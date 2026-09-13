@@ -67,6 +67,24 @@ pub fn main(init: std.process.Init) !void {
     if (had_error) std.process.exit(1);
 }
 
+fn writeEscaped(out: *Io.Writer, s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '\\' => try out.writeAll("\\\\"),
+            '\n' => try out.writeAll("\\n"),
+            '\r' => try out.writeAll("\\r"),
+            '\t' => try out.writeAll("\\t"),
+            else => {
+                if (c < 0x20) {
+                    try out.print("\\x{x:0>2}", .{c});
+                } else {
+                    try out.writeAll(&.{c});
+                }
+            },
+        }
+    }
+}
+
 fn scanFile(
     arena: std.mem.Allocator,
     io: Io,
@@ -84,8 +102,11 @@ fn scanFile(
     const result = try my_scanner.scan(arena, src, options);
 
     if (dump) {
+        // TSV：start \t end \t kind \t 转义后的文本（\n 等控制字符转成 \x 序列）
         for (result.tokens) |t| {
-            try out.print("{d:>8}  {s}\t{s}\n", .{ t.start, @tagName(t.kind), t.slice(src) });
+            try out.print("{d}\t{d}\t{s}\t", .{ t.start, t.end, @tagName(t.kind) });
+            try writeEscaped(out, t.slice(src));
+            try out.writeAll("\n");
         }
     }
 

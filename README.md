@@ -25,6 +25,31 @@ simdjson 证明了"结构性跳过"式的向量化能让解析的 I/O 密集阶�
 数字、正则、punctuator 目前是标量：数字 token 平均只有几字节，
 punctuator 是 O(1) 的首字符前缀树，先求正确，等 profile 说话再决定是否向量化。
 
+## 正确性验证
+
+单元测试之外，用 [tools/compare-tsc.mjs](tools/compare-tsc.mjs) 把 tsc 的 scanner
+（typescript 包的 `ts.createScanner`）当参考实现做 token 级差分：以切分（字节偏移）
+对齐为主，语义分类从宽。四个真实大文件全部对齐，零分类硬差异：
+
+| 文件 | tokens | 结果 |
+| --- | --- | --- |
+| typescript.js | 1,122,439 | ✓ 切分完全一致 |
+| checker.ts | 348,152 | ✓ 切分完全一致 |
+| lib.dom.d.ts | 116,895 | ✓ 切分完全一致 |
+| react.js | 8,411 | ✓ 切分完全一致 |
+
+对比口径中归一的 tsc scanner 设计差异（推迟给 parser 重扫，不是谁对谁错）：
+
+- tsc 按 UTF-16 code unit 计偏移，my-scanner 按字节计（对比时按 latin1 喂入统一坐标系）
+- tsc 永不合并 `>` 家族（`>>` `>=` `>>>=`），由 parser `reScanGreaterToken` 合并——泛型 `A<B<C>>` 的需要
+- tsc 对 `/` 保守判除号，由 parser `reScanSlashToken` 重扫为正则（正则体内相邻的 `//` 在保守路径会被当成行注释）
+- 模板字面量 tsc 拆成 Head/Middle/Tail，模板字符串类型（`` `${string}` ``）纯 scanner 甚至不续扫；这两类整体边界以 my-scanner 为准同步，其内部逻辑由单元测试保证
+
+```sh
+cd tools && npm i && cd ..
+node tools/compare-tsc.mjs corpus/*.js corpus/*.ts
+```
+
 ## 现状
 
 ### 吞吐（M2, ReleaseFast, --bench=20）
