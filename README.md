@@ -27,6 +27,20 @@ punctuator 是 O(1) 的首字符前缀树，先求正确，等 profile 说话再
 
 ## 现状
 
+### 吞吐（M2, ReleaseFast, --bench=20）
+
+| 文件 | 大小 | tokens | GB/s | Mtok/s |
+| --- | --- | --- | --- | --- |
+| typescript.js（bundled tsc） | 8.2 MB | 1.12 M | 0.25 | 34.6 |
+| checker.ts（tsc 源码） | 3.1 MB | 348 K | 0.31 | 34.6 |
+| react.js | 72 KB | 8.4 K | 0.34 | 40.0 |
+| lib.dom.d.ts | 1.9 MB | 117 K | 0.61 | 37.9 |
+
+（基准文件在 `corpus/`，已 gitignore）
+
+Mtok/s 几乎恒定而 GB/s 随 token 密度反向变化——瓶颈是每 token 的固定开销
+（分发 + emit + append），不是 SIMD 扫描本身。所以 roadmap 第一项就是 token 批量产出。
+
 已支持（ASCII 阶段）：
 
 - 标识符 / 关键字（含 let、static、async、of 等上下文关键字的提示性归类）
