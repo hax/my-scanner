@@ -25,6 +25,33 @@ simdjson 证明了"结构性跳过"式的向量化能让解析的 I/O 密集阶�
 数字、正则、punctuator 目前是标量：数字 token 平均只有几字节，
 punctuator 是 O(1) 的首字符前缀树，先求正确，等 profile 说话再决定是否向量化。
 
+## 两个脚本
+
+```sh
+scripts/check.sh                    # 正确性：单元测试 + 与 tsc 差分对比
+scripts/bench.sh                    # 性能：my-scanner vs yuku lexer 吞吐对比
+```
+
+## 与 yuku 的对比基准
+
+[scripts/bench.sh](scripts/bench.sh) 首次运行会把 [yuku](https://github.com/yuku-toolchain/yuku)
+的源码 clone 到 `.bench-deps/`（gitignore），然后同进程、同文件、同计时器跑两个
+lexer：口径对称（都把产出的 token append 到复用缓冲、读文件与初始化不计入），
+N 轮取最优。yuku 纯 scanner 与 tsc 同款把正则/模板续扫推迟给 parser，
+bench 里按 yuku parser 的方式调 `reScanAsRegex` / `reScanTemplateContinuation`
+对齐（正则决策与 my-scanner 完全一致，模板用花括号平衡栈跟踪）。
+
+M2 / ReleaseFast / 10 轮取最优：
+
+| 文件 | my-scanner | yuku | mine/yuku |
+| --- | --- | --- | --- |
+| typescript.js | 0.25 GB/s · 34.1 Mtok/s | 0.56 GB/s · 77.3 Mtok/s | 0.44x |
+| checker.ts | 0.30 GB/s · 33.9 Mtok/s | 0.63 GB/s · 70.6 Mtok/s | 0.48x |
+| react.js | 0.35 GB/s · 40.9 Mtok/s | 0.90 GB/s · 104.9 Mtok/s | 0.39x |
+| lib.dom.d.ts | 0.59 GB/s · 36.8 Mtok/s | 1.02 GB/s · 63.9 Mtok/s | 0.58x |
+
+yuku 的成熟实现目前快约 2 倍——这正是起步骨架的优化空间量化，见 roadmap。
+
 ## 正确性验证
 
 单元测试之外，用 [tools/compare-tsc.mjs](tools/compare-tsc.mjs) 把 tsc 的 scanner
@@ -106,7 +133,7 @@ for (result.tokens) |tok| { ... }
 
 ## Roadmap
 
-- [ ] 吞吐优化：token 批量产出、关键字识别去 hash 化、错误路径冷热分离
+- [ ] 吞吐优化：token 批量产出、关键字识别去 hash 化、错误路径冷热分离（对标 yuku：当前 0.44-0.58x）
 - [ ] 宽度实验：block_size = 16 / 32 / 64（AVX-512）横评
 - [ ] 标量 baseline + 各 SIMD 化子阶段单独 A/B 计量（把"每个环节拿到多少"量化出来）
 - [ ] unicode 标识符与 `\u` 转义
