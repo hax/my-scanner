@@ -252,7 +252,7 @@ fn tryComment(src: []const u8, start: usize) ?Token {
             return .{ .kind = .comment, .start = @intCast(start), .end = @intCast(end) };
         }
         // 未闭合的块注释：吞掉余下全部，容错继续（与真实引擎行为一致）
-        return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(src.len) };
+        return unterminatedBlockComment(src, start);
     }
     return null;
 }
@@ -281,9 +281,9 @@ fn scanString(src: []const u8, start: usize, quote: u8) Token {
             continue;
         }
         // 裸换行：非法字符串，吞到行尾当 illegal，容错继续
-        return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(lineEnd(src, idx)) };
+        return illegalString(start, lineEnd(src, idx));
     }
-    return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(src.len) }; // EOF 未闭合
+    return illegalString(start, src.len); // EOF 未闭合
 }
 
 /// 模板字面量：允许跨行。SIMD 定位 `` ` ``、`\`、`$`。
@@ -417,15 +417,45 @@ fn scanRegex(src: []const u8, start: usize) Token {
         i += 1;
     }
     // 失败：吞到行尾当 illegal，容错继续
-    return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(lineEnd(src, start)) };
+    return illegalRegex(src, start);
 }
 
 /// punctuator，最长匹配（4→3→2→1）。
+/// 主体路径一次 4 字节加载（无逐字节边界检查），文件尾不足 4 字节走慢版。
 fn scanPunct(src: []const u8, start: usize) Token {
+    const len = if (start + 4 <= src.len)
+        punctLenW(std.mem.readInt(u32, src[start..][0..4], .little))
+    else
+        punctLen(src[start..]);
     return .{
         .kind = .punct,
         .start = @intCast(start),
-        .end = @intCast(start + punctLen(src[start..])),
+        .end = @intCast(start + len),
+    };
+}
+
+/// punctLen 的无边界检查版本：w 是 src[start..start+4] 的小端 u32，
+/// 一次加载后截取出 b1/b2/b3。
+fn punctLenW(w: u32) usize {
+    const b1: u8 = @truncate(w >> 8);
+    const b2: u8 = @truncate(w >> 16);
+    const b3: u8 = @truncate(w >> 24);
+    return switch (@as(u8, @truncate(w))) {
+        '.' => if (b1 == '.' and b2 == '.') 3 else 1,
+        '=' => if (b1 == '=') (if (b2 == '=') 3 else 2) else if (b1 == '>') 2 else 1,
+        '!' => if (b1 == '=') (if (b2 == '=') 3 else 2) else 1,
+        '<' => if (b1 == '<') (if (b2 == '=') 3 else 2) else if (b1 == '=') 2 else 1,
+        '>' => if (b1 == '>') (if (b2 == '>') (if (b3 == '=') 4 else 3) else if (b2 == '=') 3 else 2) else if (b1 == '=') 2 else 1,
+        '&' => if (b1 == '&') (if (b2 == '=') 3 else 2) else if (b1 == '=') 2 else 1,
+        '|' => if (b1 == '|') (if (b2 == '=') 3 else 2) else if (b1 == '=') 2 else 1,
+        '?' => if (b1 == '?') (if (b2 == '=') 3 else 2) else if (b1 == '.' and !(b2 == '.' or simd.isDigit(b2))) 2 else 1,
+        '+' => if (b1 == '+' or b1 == '=') 2 else 1,
+        '-' => if (b1 == '-' or b1 == '=') 2 else 1,
+        '*' => if (b1 == '*') (if (b2 == '=') 3 else 2) else if (b1 == '=') 2 else 1,
+        '/' => if (b1 == '=') 2 else 1,
+        '%' => if (b1 == '=') 2 else 1,
+        '^' => if (b1 == '=') 2 else 1,
+        else => 1,
     };
 }
 
@@ -436,8 +466,27 @@ fn scanShebang(src: []const u8) Token {
 /// 非 ASCII 字节：按完整 UTF-8 码点消费成 illegal，
 /// 避免中文注释碎成一堆单字节 illegal。
 fn scanNonAscii(src: []const u8, start: usize) Token {
+    @branchHint(.unlikely);
     const len = @min(utf8Len(src[start]), src.len - start);
     return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(start + len) };
+}
+
+// 容错路径统一收进冷函数：@branchHint(.unlikely) 等价 cold attribute，
+// 编译器把代码放进 cold 段并让调用点按 unlikely 预测。
+
+fn unterminatedBlockComment(src: []const u8, start: usize) Token {
+    @branchHint(.unlikely);
+    return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(src.len) };
+}
+
+fn illegalString(start: usize, end: usize) Token {
+    @branchHint(.unlikely);
+    return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(end) };
+}
+
+fn illegalRegex(src: []const u8, start: usize) Token {
+    @branchHint(.unlikely);
+    return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(lineEnd(src, start)) };
 }
 
 /// `/` 出现在什么 token 之后时是正则开头，否则是除号。
