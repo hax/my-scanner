@@ -10,6 +10,10 @@ echo "==== zig build test ===="
 zig build test
 
 echo
+echo "==== zig build（对拍用新编译的 CLI）===="
+zig build
+
+echo
 echo "==== 差分对比 vs tsc scanner ===="
 if [ $# -gt 0 ]; then
   exec node tools/compare-tsc.mjs "$@"

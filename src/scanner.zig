@@ -195,6 +195,9 @@ pub fn scanInto(
             tokens.appendAssumeCapacity(tok);
         }
     }
+    // 尾部空白（如末行换行）不在候选起点里，s.pos 可能落后于 src.len；
+    // 推到末尾再出 eof，保证 start == end == src.len。
+    s.pos = src.len;
     try tokens.append(allocator, s.emit(src.len, .eof));
     return cls.newlines + 1;
 }
@@ -485,18 +488,23 @@ const Scanner = struct {
 };
 
 /// `/` 出现在什么 token 之后时是正则开头，否则是除号。
-/// 经典共识规则（V8 用精确表）：
-/// - 值类 token（标识符/数字/字符串/模板/正则/`)`/`]`）之后是除号；
-/// - 表达式位置的关键字（return/typeof/case 等）之后是正则；
-/// - `}` 之后本有歧义（块尾 vs 对象字面量尾），先按除号处理。TODO:
-///   像 V8 一样在 scanner 里维护花括号栈做精确判定。
+/// 单 token 回看的启发式，按真实代码的先验取舍，不追语法完备：
+/// - 值类 token（标识符/数字/字符串/模板/正则）之后是除号；
+/// - `++`/`--` 之后是除号：前缀形式要求左值，`++/re/` 本就是错误代码，
+///   真实代码里只能是后缀，而后缀之后接除法；
+/// - `}` 之后是正则：块尾开新语句常见，`{...} / x` 对象除法在语义上无意义；
+/// - `)`/`]` 之后是除号：`if (x) /re/.test(y)` 这类无副作用的正则方法
+///   调用作为单独语句，真实代码里几乎不出现；
+/// - 关键字里 this/super 是值，return/typeof/case 等都把 `/` 放进表达式位置。
 fn regexAllowedAfter(prev: ?Token, src: []const u8) bool {
     const t = prev orelse return true; // 文件开头
     return switch (t.kind) {
         .identifier, .number, .string, .template, .regex, .private_name => false,
-        .punct => switch (t.slice(src)[0]) {
-            ')', ']', '}' => false,
-            else => true,
+        .punct => blk: {
+            // ++/-- 走除号侧（见上）；其余 punctuator（= ( , : + 等运算符）都在表达式位置
+            const text = t.slice(src);
+            break :blk text[0] != ')' and text[0] != ']' and
+                !std.mem.eql(u8, text, "++") and !std.mem.eql(u8, text, "--");
         },
         .keyword => blk: {
             // this/super 是值；其余关键字（return/typeof/in/...）都把 `/` 放进表达式位置
@@ -718,6 +726,60 @@ test "正则 vs 除法" {
         .{ .punct, "(" },
         .{ .identifier, "s" },
         .{ .punct, ")" },
+        .{ .eof, "" },
+    });
+}
+
+test "正则 vs 除法（按真实代码先验取舍）" {
+    // 后缀 ++/-- 之后只能是除法：前缀形式要求左值，++/re/ 本就是错误代码
+    try expectTokens("a++ / b", &.{
+        .{ .identifier, "a" },
+        .{ .punct, "++" },
+        .{ .punct, "/" },
+        .{ .identifier, "b" },
+        .{ .eof, "" },
+    });
+    // 块尾开新语句是常态；对象除法在语义上无意义 → `}` 之后判正则
+    try expectTokens("if (x) {} /y/.test(s)", &.{
+        .{ .keyword, "if" },
+        .{ .punct, "(" },
+        .{ .identifier, "x" },
+        .{ .punct, ")" },
+        .{ .punct, "{" },
+        .{ .punct, "}" },
+        .{ .regex, "/y/" },
+        .{ .punct, "." },
+        .{ .identifier, "test" },
+        .{ .punct, "(" },
+        .{ .identifier, "s" },
+        .{ .punct, ")" },
+        .{ .eof, "" },
+    });
+    // `)` 之后保持除号：if (x) /re/.test(y) 这类无副作用的正则语句真实代码里几乎不出现
+    try expectTokens("if (x) /y/.length", &.{
+        .{ .keyword, "if" },
+        .{ .punct, "(" },
+        .{ .identifier, "x" },
+        .{ .punct, ")" },
+        .{ .punct, "/" },
+        .{ .identifier, "y" },
+        .{ .punct, "/" },
+        .{ .punct, "." },
+        .{ .identifier, "length" },
+        .{ .eof, "" },
+    });
+}
+
+test "尾部空白与 eof" {
+    // 末行换行不是候选起点，eof 仍须 start == end == src.len（曾出过 end 落在
+    // 最后一个 token 末尾、slice 越界 panic 的 bug）
+    try expectTokens("a\n", &.{
+        .{ .identifier, "a" },
+        .{ .eof, "" },
+    });
+    try expectTokens("return /x/  \n\n", &.{
+        .{ .keyword, "return" },
+        .{ .regex, "/x/" },
         .{ .eof, "" },
     });
 }
