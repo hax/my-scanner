@@ -4,3 +4,4 @@ zig-out/
 corpus/
 node_modules/
 .bench-deps/
+docs/node_modules
