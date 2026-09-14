@@ -350,23 +350,35 @@ fn scanTemplate(src: []const u8, start: usize) Token {
     return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(src.len) }; // EOF 未闭合
 }
 
-/// `${...}` 简易平衡扫描：返回配对 `}` 之后的位置。
-/// 顺带跳过子表达式里的普通字符串，防止其中的花括号干扰计数。
+/// `${...}` 平衡扫描：返回配对 `}` 之后的位置。跳过子表达式里的
+/// 普通字符串、行/块注释与嵌套模板，防止其中的花括号/反引号干扰计数。
+/// 嵌套模板直接递归 scanTemplate（其内部再进 `${` 时回到这里）。
+/// 已知限制：正则字面量里的 `}`（如 `/}/`）仍可能骗过计数——判别
+/// `/` 需要完整正则/除号语义，极罕见，留待递归调用 scanner 本体时解决。
 fn scanTemplateSubstitution(src: []const u8, from: usize) usize {
     var depth: usize = 1;
     var i = from;
     while (i < src.len and depth > 0) {
         const c = src[i];
-        if (c == '{') {
-            depth += 1;
-            i += 1;
-        } else if (c == '}') {
-            depth -= 1;
-            i += 1;
-        } else if (c == '\'' or c == '"') {
-            i = skipQuoted(src, i);
-        } else {
-            i += 1;
+        switch (c) {
+            '{' => {
+                depth += 1;
+                i += 1;
+            },
+            '}' => {
+                depth -= 1;
+                i += 1;
+            },
+            '\'', '"' => i = skipQuoted(src, i),
+            '`' => i = scanTemplate(src, i).end,
+            '/' => {
+                if (i + 1 < src.len and src[i + 1] == '/') {
+                    i = lineEnd(src, i);
+                } else if (i + 1 < src.len and src[i + 1] == '*') {
+                    i = simd.findBlockCommentEnd(src, i + 2) orelse src.len;
+                } else i += 1;
+            },
+            else => i += 1,
         }
     }
     return i;
@@ -1097,6 +1109,41 @@ test "中文标识位仍为 illegal（非 whitespace 的非 ASCII 不变）" {
         .{ .identifier, "a" },
         .{ .illegal, "中" },
         .{ .identifier, "b" },
+        .{ .eof, "" },
+    });
+}
+
+test "模板子表达式：嵌套模板与注释里的 } 不干扰平衡" {
+    // 嵌套模板文本里的 `}` 与反引号
+    try expectTokens("x = `a${ `b}c` }d`;", &.{
+        .{ .identifier, "x" },
+        .{ .punct, "=" },
+        .{ .template, "`a${ `b}c` }d`" },
+        .{ .punct, ";" },
+        .{ .eof, "" },
+    });
+    // 块注释里的 `}`（此前靠运气正确——注释里的反引号才会真正破坏）
+    try expectTokens("x = `a${ /* } ` */ 1 }d`;", &.{
+        .{ .identifier, "x" },
+        .{ .punct, "=" },
+        .{ .template, "`a${ /* } ` */ 1 }d`" },
+        .{ .punct, ";" },
+        .{ .eof, "" },
+    });
+    // 行注释同理
+    try expectTokens("x = `a${ // }`\n1 }d`;", &.{
+        .{ .identifier, "x" },
+        .{ .punct, "=" },
+        .{ .template, "`a${ // }`\n1 }d`" },
+        .{ .punct, ";" },
+        .{ .eof, "" },
+    });
+    // 子表达式里的字符串已有覆盖，保持
+    try expectTokens("x = `a${ \"}\" }d`;", &.{
+        .{ .identifier, "x" },
+        .{ .punct, "=" },
+        .{ .template, "`a${ \"}\" }d`" },
+        .{ .punct, ";" },
         .{ .eof, "" },
     });
 }
