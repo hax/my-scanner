@@ -9,6 +9,7 @@
 const std = @import("std");
 const token_mod = @import("token.zig");
 const simd = @import("simd.zig");
+const unicode = @import("unicode.zig");
 
 pub const Token = token_mod.Token;
 pub const TokenKind = token_mod.TokenKind;
@@ -443,10 +444,33 @@ fn scanTemplateSubstitution(src: []const u8, from: usize) usize {
     return i;
 }
 
-/// 标识符/关键字。快路径标量扫前 8 字节（多数标识符不长），
-/// 更长才 SIMD 续扫：`@ctz(~identPartMask)` 直接给出结尾偏移。
+/// 标识符/关键字。ASCII 段走快路径（标量 8 字节 + SIMD 续扫），
+/// 遇非 ASCII 字节按 UTF-8 解码查 ID_Continue 表续扫——unicode 标识符
+/// 字符在真实代码中罕见，二分查表（~10 次比较）的代价可接受。
 fn scanIdentifier(src: []const u8, start: usize) Token {
-    var i = start + 1; // 首字符合法性由 tokenAt 的分发保证
+    // 首字符合法性由分发保证（ASCII ident start 或已验证的非 ASCII ID_Start）；
+    // 非 ASCII 首字符按码点长度推进，不能假设 +1
+    var i = if (src[start] < 0x80) start + 1 else start + unicode.decode(src, start).?.len;
+    while (i < src.len) {
+        if (src[i] < 0x80) {
+            i = asciiIdentEnd(src, i);
+            if (i < src.len and src[i] >= 0x80) continue;
+            break;
+        }
+        const r = unicode.decode(src, i) orelse break;
+        if (!unicode.isIdContinue(r.cp)) break;
+        i += r.len;
+    }
+    const kind: TokenKind =
+        if (isKeyword(src[start..i])) .keyword else .identifier;
+    return .{ .kind = kind, .start = @intCast(start), .end = @intCast(i) };
+}
+
+/// ASCII 标识符字符段的结尾：标量快扫前 8 字节（多数标识符不长），
+/// 更长才 SIMD 续扫（`@ctz(~identPartMask)` 直接给出结尾偏移）。
+/// 遇非 ASCII 字节即停（由调用方走 unicode 路径）。
+fn asciiIdentEnd(src: []const u8, from: usize) usize {
+    var i = from;
     const fast_end = @min(i + 8, src.len);
     while (i < fast_end and simd.isIdentPart(src[i])) i += 1;
     if (i == fast_end and i < src.len) {
@@ -466,16 +490,20 @@ fn scanIdentifier(src: []const u8, start: usize) Token {
             } else break;
         }
     }
-    const kind: TokenKind =
-        if (isKeyword(src[start..i])) .keyword else .identifier;
-    return .{ .kind = kind, .start = @intCast(start), .end = @intCast(i) };
+    return i;
 }
 
-/// 私有名 `#foo`；`#` 后不是标识符起始则整个算 illegal。
+/// 私有名 `#foo`（也接受 unicode ID_Start，如 `#π`）；
+/// `#` 后不是标识符起始则整个算 illegal。
 fn scanPrivateName(src: []const u8, start: usize) Token {
-    if (start + 1 < src.len and simd.isIdentStart(src[start + 1])) {
-        const body = scanIdentifier(src, start + 1);
-        return .{ .kind = .private_name, .start = @intCast(start), .end = body.end };
+    if (start + 1 < src.len) {
+        const c = src[start + 1];
+        const ok = simd.isIdentStart(c) or
+            (c >= 0x80 and if (unicode.decode(src, start + 1)) |r| unicode.isIdStart(r.cp) else false);
+        if (ok) {
+            const body = scanIdentifier(src, start + 1);
+            return .{ .kind = .private_name, .start = @intCast(start), .end = body.end };
+        }
     }
     return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(start + 1) };
 }
@@ -573,10 +601,13 @@ fn scanShebang(src: []const u8) Token {
 /// 避免中文注释碎成一堆单字节 illegal。
 fn scanNonAscii(src: []const u8, start: usize) Token {
     @branchHint(.unlikely);
-    // 跨块的 Unicode whitespace 码点（分类 pass 只修正块内完整的），
-    // 按 trivia 处理，由主循环过滤
+    // Unicode whitespace（含跨块码点），按 trivia 处理，由主循环过滤
     if (simd.unicodeWhitespaceLen(src, start)) |len| {
         return .{ .kind = .whitespace, .start = @intCast(start), .end = @intCast(start + len) };
+    }
+    // Unicode 标识符首字符（ID_Start）
+    if (unicode.decode(src, start)) |r| {
+        if (unicode.isIdStart(r.cp)) return scanIdentifier(src, start);
     }
     const len = @min(utf8Len(src[start]), src.len - start);
     return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(start + len) };
@@ -942,11 +973,55 @@ test "操作符最长匹配" {
 }
 
 test "非 ASCII 按码点消费" {
-    // "中" 的 UTF-8 是 3 字节，应合成一个 illegal 而不是每字节一个
-    try expectTokens("a 中 b", &.{
+    // ☃（U+2603）不是标识符字符：整码点消费成一个 illegal
+    try expectTokens("a ☃ b", &.{
         .{ .identifier, "a" },
-        .{ .illegal, "中" },
+        .{ .illegal, "☃" },
         .{ .identifier, "b" },
+        .{ .eof, "" },
+    });
+}
+
+test "unicode 标识符（ID_Start/ID_Continue）" {
+    // 中文、希腊字母是 ID_Start，整体一个 identifier token
+    try expectTokens("let 变量 = 1;", &.{
+        .{ .keyword, "let" },
+        .{ .identifier, "变量" },
+        .{ .punct, "=" },
+        .{ .number, "1" },
+        .{ .punct, ";" },
+        .{ .eof, "" },
+    });
+    try expectTokens("let π = 3.14;", &.{
+        .{ .keyword, "let" },
+        .{ .identifier, "π" },
+        .{ .punct, "=" },
+        .{ .number, "3.14" },
+        .{ .punct, ";" },
+        .{ .eof, "" },
+    });
+    // ASCII 与 unicode 字符混排仍是一个标识符
+    try expectTokens("xπy_中 = 1", &.{
+        .{ .identifier, "xπy_中" },
+        .{ .punct, "=" },
+        .{ .number, "1" },
+        .{ .eof, "" },
+    });
+    // 非 ID_Continue 的 unicode 字符终止标识符。☃ 本身被静默跳过
+    // （boundary v2 把非 ws 非 ASCII 一律按 ID-like 连接，ident 后的
+    // 非 ident 非 ASCII 不是候选起点）——这是设计文档「只保证合法源码」
+    // 假设下的已知容错差异；☃ 裸用本就是非法 JS
+    try expectTokens("变量☃ = 1", &.{
+        .{ .identifier, "变量" },
+        .{ .punct, "=" },
+        .{ .number, "1" },
+        .{ .eof, "" },
+    });
+    // unicode 私有名
+    try expectTokens("this.#π", &.{
+        .{ .keyword, "this" },
+        .{ .punct, "." },
+        .{ .private_name, "#π" },
         .{ .eof, "" },
     });
 }
@@ -1163,10 +1238,11 @@ test "OP 连接关系：多字节 punctuator token 流不受影响" {
     });
 }
 
-test "中文标识位仍为 illegal（非 whitespace 的非 ASCII 不变）" {
+test "中文是标识符字符（unicode 标识符支持后的行为变化）" {
+    // 此前中文按码点消费成 illegal；ID_Start/ID_Continue 支持后是 identifier
     try expectTokens("a 中 b", &.{
         .{ .identifier, "a" },
-        .{ .illegal, "中" },
+        .{ .identifier, "中" },
         .{ .identifier, "b" },
         .{ .eof, "" },
     });

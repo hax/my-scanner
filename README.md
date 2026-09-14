@@ -166,7 +166,7 @@ for (result.tokens) |tok| { ... }
 - [ ] 更进一步：SoA token 输出、token 簇融合
 - [x] 宽度实验：block_size=16 在 M2 上 -9%（块循环开销翻倍，高于 NEON 单指令收益）被否决，32 定稿；64（AVX-512）待有对应硬件再测
 - [ ] 标量 baseline + 各 SIMD 化子阶段单独 A/B 计量（把"每个环节拿到多少"量化出来）
-- [ ] unicode 标识符与 `\u` 转义（boundary v2 是其地基：非 ASCII ID-like 快路径 + 19 个 ECMAScript whitespace 修正，见设计文档）
+- [x] unicode 标识符：ID_Start/ID_Continue 范围表（tools/gen_unicode_tables.mjs 从 UCD 生成，Unicode 17.0.0，682/795 范围二分）+ 严格 UTF-8 解码；scanIdentifier 遇非 ASCII 解码续扫（含混排、unicode 私有名 `#π`）；ID_Continue 含 ECMAScript 显式的 ZWNJ/ZWJ。已知容错差异：ident 后裸跟非 ident 非 ws 的非 ASCII 字符（非法 JS）会被 ID-like 连接静默跳过。`\u` 转义标识符暂未支持
 - [ ] 模板子表达式递归调 scanner 本体
 - [x] token 行号：`Result.lines`（LineIndex，每块逻辑换行位图 + 前缀和，O(1) `lineAt(offset)`；零 token 流开销——不改 Token 结构，`--dump` 输出加行号列）。列号可由消费方从行首 offset 推导，暂不内置
 - [ ] 对齐 Test262 / 真实大型 JS 代码库的模糊正确性验证
