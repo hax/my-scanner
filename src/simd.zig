@@ -254,6 +254,8 @@ pub fn classifyTokenStarts(
     // 跨块状态：id after 平面的末字节（bit0 位置 = 前一字节的 after）
     var carry_id: u32 = 0;
     var carry_lf: u32 = 0;
+    // 前块末字节是否 \r：若是且本块首是 \n，前块尾 \r 的乐观换行标记要回改
+    var prev_was_cr = false;
     // 跨块 U+2028/U+2029：保留前两字节
     var prev2: u8 = 0;
     var prev1: u8 = 0;
@@ -282,22 +284,31 @@ pub fn classifyTokenStarts(
         // 阶段 2 在 lead 处产 .whitespace token（跨块码点的尾部字节
         // 会被消费后的 pos 越过，无需排除）。
         // 纯 ASCII 块（且前块末尾无悬挂）整体跳过——corpus 大多是这种。
+        var brk_marked: u32 = 0;
         if (high != 0 or prev2 >= 0x80 or prev1 >= 0x80) {
             // 跨块悬挂：lead 在前块、末字节在本块开头，清其 id_after
             const dangle = danglingUnicodeWs(src, i, prev2, prev1);
             if (dangle != 0) {
                 id_after &= ~(@as(u32, 1) << @intCast(dangle - 1));
+                // 悬挂的是 U+2028/29（末字节 A8/A9 精确对应）则 break 位
+                // 标在末字节位置
+                if (src[i + dangle - 1] == 0xA8 or src[i + dangle - 1] == 0xA9) {
+                    brk_marked = @as(u32, 1) << @intCast(dangle - 1);
+                }
             }
 
-            // 块内完整的码点
+            // 码点修正：lead 的 before 断连无条件做（lead 必在本块），
+            // 这保证跨块码点的 lead 也满足「恒候选」语义（与标量版一致）；
+            // 末字节的 after 断连只在码点完整落于本块时做，跨块的
+            // 由下一块的悬挂修正负责
             var lead = unicodeWsLeadMask(chunk) & valid;
             while (lead != 0) {
                 const p: u5 = @intCast(@ctz(lead));
                 lead &= lead - 1;
                 if (unicodeWhitespaceLen(src, i + p)) |len| {
+                    id_before &= ~(@as(u32, 1) << p);
                     if (@as(usize, p) + len <= block_size and i + p + len <= src.len) {
                         id_after &= ~(@as(u32, 1) << @intCast(p + len - 1));
-                        id_before &= ~(@as(u32, 1) << p);
                     }
                 }
             }
@@ -319,7 +330,13 @@ pub fn classifyTokenStarts(
         const cr = eqMask(chunk, '\r');
         const lf_next = (lf >> 1) | carry_lf; // i+1 是 \n：右移对齐到 \r 的位
         var brk = (lf | (cr & ~lf_next)) & valid;
+        // 跨块 CRLF：前块尾 \r 被乐观标记为换行，本块首是 \n 则回改
+        if (bi > 0 and prev_was_cr and rem >= 1 and src[i] == '\n') {
+            line_breaks[bi - 1] &= ~(@as(u32, 1) << (block_size - 1));
+            newlines -= 1;
+        }
         carry_lf = lf >> (block_size - 1);
+        prev_was_cr = (cr & valid & (@as(u32, 1) << (block_size - 1))) != 0;
 
         // U+2028/U+2029：块内完整（E2 80 A8/A9），位标记在末字节；
         // 纯 ASCII 块跳过三个 eq
@@ -329,11 +346,7 @@ pub fn classifyTokenStarts(
             const a8a9 = eqMask(chunk, 0xA8) | eqMask(chunk, 0xA9);
             brk |= ((e2 << 2) & (m80 << 1) & a8a9) & valid;
         }
-        if (prev2 == 0xE2 and prev1 == 0x80 and rem >= 1 and
-            (src[i] == 0xA8 or src[i] == 0xA9))
-        {
-            brk |= 1; // 跨块 U+2028/29 收尾在本块首字节
-        }
+        brk |= brk_marked;
         line_breaks[bi] = brk;
         newlines += @as(usize, @popCount(brk));
         // 保留本块末两字节供跨块码点判定（注意用本块长度 blen，rem 是到
@@ -349,6 +362,81 @@ pub fn classifyTokenStarts(
         }
     }
 
+    return .{ .starts = .{ .masks = masks }, .line_breaks = line_breaks, .newlines = newlines };
+}
+
+/// classifyTokenStarts 的标量对照实现：逐码点状态机，语义与 SIMD 版完全
+/// 一致（ID-like 连接、Unicode whitespace 修正、逻辑换行）。
+/// 用途：交叉验证 SIMD 版正确性 + bench 量化 SIMD 的贡献（A/B）。
+/// 逐码点处理天然无块边界，跨块悬挂逻辑在此不存在。
+pub const ClassifyResult = struct {
+    starts: TokenStarts,
+    line_breaks: []u32,
+    newlines: usize,
+};
+
+pub fn classifyTokenStartsScalar(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+) !ClassifyResult {
+    const nblocks = (src.len + block_size - 1) / block_size;
+    const masks = try allocator.alloc(u32, nblocks);
+    errdefer allocator.free(masks);
+    const line_breaks = try allocator.alloc(u32, nblocks);
+    errdefer allocator.free(line_breaks);
+    @memset(masks, 0);
+    @memset(line_breaks, 0);
+
+    var prev_after_id = false; // 前一码点的 ID after
+    var i: usize = 0;
+    var newlines: usize = 0;
+    while (i < src.len) {
+        const c = src[i];
+        const bit = @as(u32, 1) << @intCast(i % block_size);
+        const bi = i / block_size;
+        var adv: usize = 1;
+        var after_id = false;
+        var before_id = false;
+        var is_break = false;
+        var candidate: ?bool = null; // null = 按连接规则推导
+
+        if (c < 0x80) {
+            const ws = c == ' ' or (c >= 0x09 and c <= 0x0D);
+            const idp = !ws and isIdentPart(c);
+            after_id = idp;
+            before_id = idp;
+            if (candidate == null) candidate = !ws and !(prev_after_id and before_id);
+            is_break = c == '\n' or
+                (c == '\r' and !(i + 1 < src.len and src[i + 1] == '\n'));
+        } else if (unicodeWhitespaceLen(src, i)) |len| {
+            // Unicode whitespace 码点：lead 恒为候选（连接已被码点断开，
+            // 阶段 2 统一在 lead 产 whitespace token），其余字节跳过；
+            // 码点对外不建立 ID 连接；U+2028/29 的 break 位标记在末字节
+            adv = len;
+            candidate = true;
+            if (len == 3 and src[i + 1] == 0x80 and
+                (src[i + 2] == 0xA8 or src[i + 2] == 0xA9))
+            {
+                const e = i + len - 1;
+                line_breaks[e / block_size] |= @as(u32, 1) << @intCast(e % block_size);
+                newlines += 1;
+            }
+        } else {
+            // 非 ws 非 ASCII：ID-like，逐字节判定（SIMD 版的连接是字节级的，
+            // 截断/非法序列的每个字节独立参与连接，不能按码点长度跳）
+            after_id = true;
+            before_id = true;
+            candidate = !(prev_after_id and before_id);
+        }
+
+        if (candidate.?) masks[bi] |= bit;
+        if (is_break) {
+            line_breaks[bi] |= bit;
+            newlines += 1;
+        }
+        prev_after_id = after_id;
+        i += adv;
+    }
     return .{ .starts = .{ .masks = masks }, .line_breaks = line_breaks, .newlines = newlines };
 }
 
@@ -609,4 +697,73 @@ fn collectStarts(starts: *const TokenStarts) []usize {
         pos = p + 1;
     }
     return list[0..n];
+}
+
+test "classifyTokenStarts 与标量版交叉验证" {
+    const cases = [_][]const u8{
+        "",
+        "a",
+        "let x = 42;",
+        "a==b;a%=b;a**b;\\\"x\\\"",
+        "  \t\n  \r\n  \r  ",
+        "a\u{2028}b\u{2029}c",
+        "let \u{53d8}\u{91cf} = 1;",
+        "\u{00a0}a\u{3000}b\u{feff}",
+        "a\u{4e2d}b \u{2603} c",
+        "x\\y", // 反斜杠
+        "// comment\n/* block */ a",
+    };
+    for (cases) |src| {
+        const simd_r = try classifyTokenStarts(testing.allocator, src);
+        defer {
+            var s0 = simd_r;
+            s0.starts.deinit(testing.allocator);
+        }
+        defer testing.allocator.free(simd_r.line_breaks);
+        var scalar_r = try classifyTokenStartsScalar(testing.allocator, src);
+        defer scalar_r.starts.deinit(testing.allocator);
+        defer testing.allocator.free(scalar_r.line_breaks);
+        testing.expectEqualSlices(u32, scalar_r.starts.masks, simd_r.starts.masks) catch |e| {
+            std.debug.print("masks 不一致: {s}\n", .{src});
+            return e;
+        };
+        testing.expectEqualSlices(u32, scalar_r.line_breaks, simd_r.line_breaks) catch |e| {
+            std.debug.print("line_breaks 不一致: {s}\n", .{src});
+            return e;
+        };
+        try testing.expectEqual(scalar_r.newlines, simd_r.newlines);
+    }
+}
+
+test "classifyTokenStarts 与标量版随机交叉验证" {
+    // 确定性 PRNG 生成含多字节前缀的字节流，两版必须逐位一致
+    var prng = std.Random.DefaultPrng.init(0xC0FFEE);
+    const rand = prng.random();
+    const alphabet = "abc $_=\n\r\t/\\\"\u{4e2d}\u{00a0}\u{2028}\u{2603}\u{e4}x";
+    var buf: [512]u8 = undefined;
+    for (0..200) |_| {
+        const n = rand.intRangeAtMost(usize, 0, buf.len);
+        for (buf[0..n]) |*b| b.* = alphabet[rand.intRangeAtMost(usize, 0, alphabet.len - 1)];
+        const src = buf[0..n];
+        const simd_r = try classifyTokenStarts(testing.allocator, src);
+        var s0 = simd_r;
+        defer s0.starts.deinit(testing.allocator);
+        defer testing.allocator.free(simd_r.line_breaks);
+        var scalar_r = try classifyTokenStartsScalar(testing.allocator, src);
+        defer scalar_r.starts.deinit(testing.allocator);
+        defer testing.allocator.free(scalar_r.line_breaks);
+        testing.expectEqualSlices(u32, scalar_r.starts.masks, simd_r.starts.masks) catch |e| {
+            for (scalar_r.starts.masks, simd_r.starts.masks, 0..) |sm, vm, b| {
+                if (sm != vm) {
+                    const d = sm ^ vm;
+                    const off = b * block_size + @ctz(d);
+                    std.debug.print("masks diff @block {d} bit {d} (offset {d}): scalar={b:0>8} simd={b:0>8}\nsrc={any}\nbytes near: {any}\n", .{ b, @ctz(d), off, sm, vm, src, src[off - @min(off, 8) .. @min(off + 12, src.len)] });
+                    break;
+                }
+            }
+            return e;
+        };
+        try testing.expectEqualSlices(u32, scalar_r.line_breaks, simd_r.line_breaks);
+        try testing.expectEqual(scalar_r.newlines, simd_r.newlines);
+    }
 }

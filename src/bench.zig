@@ -90,13 +90,25 @@ fn benchFile(
 
     // 阶段 1（SIMD 分类 pass）单独计时，隔离它在总扫描里的占比。
     // page_allocator 直接 alloc/free，避免 arena 的 no-op free 累积内存。
+    // 同场加标量对照（classifyTokenStartsScalar，语义与 SIMD 版经交叉
+    // 验证逐位一致），量化 SIMD 在分类 pass 的贡献。
     var cls_best: i96 = std.math.maxInt(i96);
+    var scalar_best: i96 = std.math.maxInt(i96);
     for (0..repeats) |_| {
-        const t0 = Io.Timestamp.now(io, .awake);
-        var cls = try my_scanner.simd.classifyTokenStarts(std.heap.page_allocator, src);
-        const ns = t0.durationTo(Io.Timestamp.now(io, .awake)).nanoseconds;
-        cls.starts.deinit(std.heap.page_allocator);
-        cls_best = @min(cls_best, ns);
+        {
+            const t0 = Io.Timestamp.now(io, .awake);
+            var cls = try my_scanner.simd.classifyTokenStarts(std.heap.page_allocator, src);
+            const ns = t0.durationTo(Io.Timestamp.now(io, .awake)).nanoseconds;
+            cls.starts.deinit(std.heap.page_allocator);
+            cls_best = @min(cls_best, ns);
+        }
+        {
+            const t0 = Io.Timestamp.now(io, .awake);
+            var cls = try my_scanner.simd.classifyTokenStartsScalar(std.heap.page_allocator, src);
+            const ns = t0.durationTo(Io.Timestamp.now(io, .awake)).nanoseconds;
+            cls.starts.deinit(std.heap.page_allocator);
+            scalar_best = @min(scalar_best, ns);
+        }
     }
 
     // ---- yuku ----
@@ -197,6 +209,10 @@ fn benchFile(
         const ms = @as(f64, @floatFromInt(cls_best)) / 1e6;
         const gbps = @as(f64, @floatFromInt(src.len)) / @as(f64, @floatFromInt(cls_best));
         try out.print("  {s: <5} best {d:>8.2} ms   {d:>6.2} GB/s   （阶段 1 分类 pass，占总扫描 {d:>5.1}%）\n", .{ "cls", ms, gbps, pct });
+        const sms = @as(f64, @floatFromInt(scalar_best)) / 1e6;
+        const sgbps = @as(f64, @floatFromInt(src.len)) / @as(f64, @floatFromInt(scalar_best));
+        const speedup = @as(f64, @floatFromInt(scalar_best)) / @as(f64, @floatFromInt(cls_best));
+        try out.print("  {s: <5} best {d:>8.2} ms   {d:>6.2} GB/s   （标量对照，SIMD {d:.1}x）\n", .{ "cls-s", sms, sgbps, speedup });
     }
     try printRow(out, "yuku", yuku_best, src.len, yuku_count);
     if (yuku_err) |e| try out.print("  （yuku 中途报 {s}，计扫到出错为止）\n", .{e});
