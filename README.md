@@ -71,11 +71,15 @@ M2 / ReleaseFast / 30 轮取最优（bench 同时驱动 yuku 两版本：引入�
 | react.js | 114.1 | 106.3 | 119.7 | 1.13x | 0.95x |
 | lib.dom.d.ts | 73.5 | 67.1 | **96.5** | **1.44x** | **0.76x** |
 
-yuku 主干的向量化是 `findAnyPos`（@Vector 16/8 字节找命中字符 + ctz），
-覆盖行注释/字符串/模板三处，块注释仍为标量。收益高度依赖语料：注释/字符串
-密集的 lib.dom.d.ts +44%、react.js +13%，minified 的 typescript.js +3%、
+yuku 主干的向量化覆盖四处：`findAnyPos`（@Vector 16/8 字节找命中字符
++ ctz）用于行注释/字符串/模板，块注释则是两段式（标量扫过首行后，
+注释主体用 stars/slashes 双 mask 的 @Vector(16) 窗口搜 `*/`，窗口重叠
+1 字节防跨窗漏检）。收益随注释/字符串密度变化：块注释密集的
+lib.dom.d.ts +44%、react.js +13%，minified 的 typescript.js +3%、
 checker.ts 持平。**lib.dom.d.ts 上 yuku-main 反超我们 24%**——注释密集
-语料的扫描是当前的明确短板（见 roadmap）。
+语料是当前的明确短板；注意我们的块注释同样是 SIMD（`slash & star<<1`
+的 32B 块 + carry 衔接，指令数理应更少），差距的具体定位需要 profile，
+不预设结论（见 roadmap）。
 
 （历史演进：单阶段 0.25-0.59 → 两阶段分类 0.41-1.05 → 块内迭代等微优化
 0.55-1.07 → 数据流化 + 冷路径 + 打包 punct 0.59-1.13 → 类别码分发
@@ -169,7 +173,7 @@ for (result.tokens) |tok| { ... }
 - [ ] SIMD 查表分类第二阶段（packed tag / 全表 LUT）：前提已变化——boundary v2 实测砍掉 OP/ESC 后只剩 ID 平面，多平面需求暂不存在；若将来做「candidate 免验证」激进阶段 2（OP/ESC 回归），此项随之复活（矩形约束 + GF(2) 变换搜索，见类别码纪要）
 - [x] 单字节 punct 批量块路径：**否决**——实测纯 punct_single 块仅 4.3-7.4%，run≥2 覆盖的 token 检测成本与省下的 dispatch 查询相抵；现有 dispatch 表的单 token 快路径已覆盖该场景
 - [x] 模板子表达式：平衡扫描已感知嵌套模板（递归 scanTemplate）、行/块注释与字符串；正则字面量里的 `}` 仍为已知限制
-- [ ] **注释/字符串密集语料的扫描对齐**：yuku-main（findAnyPos 向量化行注释/字符串/模板）在 lib.dom.d.ts 上反超我们 24%（96.5 vs 73.5 Mtok/s）；我们的块注释 SIMD（`slash & star<<1`）与字符串 stop mask 需在该语料上重新计量并优化
+- [ ] **注释密集语料的差距定位**：yuku-main 在 lib.dom.d.ts 上反超 24%（96.5 vs 73.5 Mtok/s），其增益主要来自块注释两段式向量化（标量首行 + @Vector(16) 双 mask 搜 `*/`）；我们的块注释同为 SIMD 且方案指令数更少，差距从哪来需先 profile 再动——候选怀疑点：JSDoc 首行的处理路径、块注释区间的重复扫描、候选迭代在低密度语料下的开销占比
 - [ ] 更进一步：SoA token 输出、token 簇融合
 - [x] 宽度实验：block_size=16 在 M2 上 -9%（块循环开销翻倍，高于 NEON 单指令收益）被否决，32 定稿；64（AVX-512）待有对应硬件再测
 - [x] 标量 baseline + A/B 计量：`classifyTokenStartsScalar` 与 SIMD 版经交叉验证（固定用例 + 200 轮随机字节流逐位一致，顺带抓出 SIMD 版三个跨块边界 bug：ws lead 候选性、跨块 CRLF 回改、跨块 U+2028 变体）；bench 的 `cls-s` 行常设输出。**SIMD 分类 pass = 标量的 8.8-11.9x**（4.9 vs ~0.45 GB/s）
