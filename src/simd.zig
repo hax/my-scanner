@@ -243,10 +243,12 @@ fn danglingUnicodeWs(src: []const u8, i: usize, prev2: u8, prev1: u8) usize {
 pub fn classifyTokenStarts(
     allocator: std.mem.Allocator,
     src: []const u8,
-) !struct { starts: TokenStarts, newlines: usize } {
+) !struct { starts: TokenStarts, line_breaks: []u32, newlines: usize } {
     const nblocks = (src.len + block_size - 1) / block_size;
     const masks = try allocator.alloc(u32, nblocks);
     errdefer allocator.free(masks);
+    const line_breaks = try allocator.alloc(u32, nblocks);
+    errdefer allocator.free(line_breaks);
 
     var newlines: usize = 0;
     // 跨块状态：id after 平面的末字节（bit0 位置 = 前一字节的 after）
@@ -311,11 +313,12 @@ pub fn classifyTokenStarts(
 
         carry_id = id_after >> (block_size - 1);
 
-        // 逻辑换行：\n 与孤立 \r（下一字节非 \n；CRLF 只在 \n 处计一次）
+        // 逻辑换行位图（位标记在行终止字节）：\n、孤立 \r（下一字节非
+        // \n，CRLF 只在 \n 计一次）、U+2028/U+2029
         const lf = eqMask(chunk, '\n');
         const cr = eqMask(chunk, '\r');
         const lf_next = (lf >> 1) | carry_lf; // i+1 是 \n：右移对齐到 \r 的位
-        newlines += @as(usize, @popCount((lf | (cr & ~lf_next)) & valid));
+        var brk = (lf | (cr & ~lf_next)) & valid;
         carry_lf = lf >> (block_size - 1);
 
         // U+2028/U+2029：块内完整（E2 80 A8/A9），位标记在末字节；
@@ -324,13 +327,15 @@ pub fn classifyTokenStarts(
             const e2 = eqMask(chunk, 0xE2);
             const m80 = eqMask(chunk, 0x80);
             const a8a9 = eqMask(chunk, 0xA8) | eqMask(chunk, 0xA9);
-            newlines += @as(usize, @popCount(((e2 << 2) & (m80 << 1) & a8a9) & valid));
+            brk |= ((e2 << 2) & (m80 << 1) & a8a9) & valid;
         }
         if (prev2 == 0xE2 and prev1 == 0x80 and rem >= 1 and
             (src[i] == 0xA8 or src[i] == 0xA9))
         {
-            newlines += 1;
+            brk |= 1; // 跨块 U+2028/29 收尾在本块首字节
         }
+        line_breaks[bi] = brk;
+        newlines += @as(usize, @popCount(brk));
         // 保留本块末两字节供跨块码点判定（注意用本块长度 blen，rem 是到
         // 文件尾的距离，非末块会取到文件末尾的字节——曾因此漏判跨块码点）。
         // 纯 ASCII 块直接置 0：dangle 只关心 prev >= 0x80，等价且免两次 load。
@@ -344,7 +349,7 @@ pub fn classifyTokenStarts(
         }
     }
 
-    return .{ .starts = .{ .masks = masks }, .newlines = newlines };
+    return .{ .starts = .{ .masks = masks }, .line_breaks = line_breaks, .newlines = newlines };
 }
 
 // ---------------------------------------------------------------------------
@@ -506,6 +511,7 @@ test "classifyTokenStarts：候选起点规则" {
     const src = "let x = 42;";
     var r = try classifyTokenStarts(testing.allocator, src);
     defer r.starts.deinit(testing.allocator);
+    defer testing.allocator.free(r.line_breaks);
     try testing.expectEqualSlices(usize, &.{ 0, 4, 6, 8, 10 }, collectStarts(&r.starts));
     try testing.expectEqual(@as(usize, 0), r.newlines);
 }
@@ -516,6 +522,7 @@ test "classifyTokenStarts：标识符中间字节不算候选" {
     const src = "a1b .5 x_1";
     var r = try classifyTokenStarts(testing.allocator, src);
     defer r.starts.deinit(testing.allocator);
+    defer testing.allocator.free(r.line_breaks);
     try testing.expectEqualSlices(usize, &.{ 0, 4, 5, 7 }, collectStarts(&r.starts));
 }
 
@@ -524,6 +531,7 @@ test "classifyTokenStarts：字符串内部字节是假候选（阶段 2 越过�
     const src = "\"a b\" x";
     var r = try classifyTokenStarts(testing.allocator, src);
     defer r.starts.deinit(testing.allocator);
+    defer testing.allocator.free(r.line_breaks);
     try testing.expectEqualSlices(usize, &.{ 0, 1, 3, 4, 6 }, collectStarts(&r.starts));
 }
 
@@ -536,6 +544,7 @@ test "classifyTokenStarts：跨块 carry 与尾块 padding" {
     const src = buf[0 .. block_size * 3];
     var r = try classifyTokenStarts(testing.allocator, src);
     defer r.starts.deinit(testing.allocator);
+    defer testing.allocator.free(r.line_breaks);
     // 每块首字节（0、32、64）是候选，其余标识符中间字节都不是
     try testing.expectEqualSlices(usize, &.{ 0, block_size, block_size * 2 }, collectStarts(&r.starts));
     try testing.expectEqual(@as(usize, 1), r.newlines);
@@ -545,11 +554,13 @@ test "classifyTokenStarts：空文件与纯空白" {
     {
         var r = try classifyTokenStarts(testing.allocator, "");
         defer r.starts.deinit(testing.allocator);
+        defer testing.allocator.free(r.line_breaks);
         try testing.expectEqual(@as(?usize, null), r.starts.nextAt(0));
     }
     {
         var r = try classifyTokenStarts(testing.allocator, "  \n\t ");
         defer r.starts.deinit(testing.allocator);
+        defer testing.allocator.free(r.line_breaks);
         try testing.expectEqual(@as(?usize, null), r.starts.nextAt(0));
     }
 }
@@ -558,6 +569,7 @@ test "classifyTokenStarts：nextAt 从任意位置起查" {
     const src = "a b  c";
     var r = try classifyTokenStarts(testing.allocator, src);
     defer r.starts.deinit(testing.allocator);
+    defer testing.allocator.free(r.line_breaks);
     try testing.expectEqual(@as(?usize, 0), r.starts.nextAt(0));
     try testing.expectEqual(@as(?usize, 2), r.starts.nextAt(1));
     try testing.expectEqual(@as(?usize, 5), r.starts.nextAt(3));

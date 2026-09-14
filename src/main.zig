@@ -102,11 +102,11 @@ fn scanFile(
     const result = try my_scanner.scan(arena, src, options);
 
     if (dump) {
-        // TSV：start \t end \t kind \t 转义后的文本（\n 等控制字符转成 \x 序列）
+        // TSV：start \t end \t kind \t 转义后的文本（\n 等控制字符转成 \x 序列）\t 行号
         for (result.tokens) |t| {
             try out.print("{d}\t{d}\t{s}\t", .{ t.start, t.end, @tagName(t.kind) });
             try writeEscaped(out, t.slice(src));
-            try out.writeAll("\n");
+            try out.print("\t{d}\n", .{result.lines.lineAt(t.start)});
         }
     }
 

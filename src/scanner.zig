@@ -20,8 +20,41 @@ pub const Options = struct {
 
 pub const Result = struct {
     tokens: []Token,
-    /// 按 '\n' 计的物理行数（含注释与模板串内部的换行）
+    /// 逻辑换行总数 + 1（\n、孤立 \r、U+2028/U+2029；含注释与字符串内部）
     line_count: usize,
+    /// 行号查询索引（按需查任意 offset 的 1-based 行号）
+    lines: LineIndex,
+
+    pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
+        allocator.free(self.tokens);
+        allocator.free(self.lines.breaks);
+        allocator.free(self.lines.prefix);
+        self.* = undefined;
+    }
+};
+
+/// 逻辑换行索引：每块一个换行位图 + 块前累计行数。
+/// lineAt 为 O(1)：一次块查 + 一次 popcount。
+pub const LineIndex = struct {
+    breaks: []u32,
+    /// prefix[b] = 块 b 之前的换行总数
+    prefix: []u32,
+    /// 源文件字节数（越界查询归到最后一行）
+    len: usize,
+
+    pub fn lineAt(self: LineIndex, offset: usize) usize {
+        if (self.prefix.len == 0) return 1;
+        if (offset >= self.len) return self.lineCount();
+        const b = offset / simd.block_size;
+        const within = self.breaks[b] & ((@as(u32, 1) << @intCast(offset % simd.block_size)) - 1);
+        return @as(usize, self.prefix[b]) + @as(usize, @popCount(within)) + 1;
+    }
+
+    pub fn lineCount(self: LineIndex) usize {
+        if (self.prefix.len == 0) return 1;
+        const last = self.prefix.len - 1;
+        return @as(usize, self.prefix[last]) + @as(usize, @popCount(self.breaks[last])) + 1;
+    }
 };
 
 /// ECMAScript 关键字 + 严格模式保留字 + 未来保留字，
@@ -150,15 +183,32 @@ fn isKeyword(text: []const u8) bool {
     };
 }
 
-/// 扫描 src，返回 token 序列（以 eof 收尾）。
+/// 扫描 src，返回 token 序列（以 eof 收尾）+ 行号索引。
 pub fn scan(allocator: std.mem.Allocator, src: []const u8, options: Options) !Result {
     std.debug.assert(src.len <= std.math.maxInt(u32));
     var tokens: std.ArrayList(Token) = .empty;
     errdefer tokens.deinit(allocator);
-    const line_count = try scanInto(&tokens, allocator, src, options);
+
+    var cls = try simd.classifyTokenStarts(allocator, src);
+    // masks 只在扫描期间使用（成功路径也释放）；line_breaks 转移给 Result
+    defer cls.starts.deinit(allocator);
+    errdefer allocator.free(cls.line_breaks);
+
+    try consume(&tokens, allocator, src, &cls.starts, options);
+
+    const prefix = try allocator.alloc(u32, cls.line_breaks.len);
+    errdefer allocator.free(prefix);
+    var acc: u32 = 0;
+    for (cls.line_breaks, 0..) |m, b| {
+        prefix[b] = acc;
+        acc += @popCount(m);
+    }
+    std.debug.assert(acc == cls.newlines); // 与单值计数交叉验证
+
     return .{
         .tokens = try tokens.toOwnedSlice(allocator),
-        .line_count = line_count,
+        .line_count = @as(usize, acc) + 1,
+        .lines = .{ .breaks = cls.line_breaks, .prefix = prefix, .len = src.len },
     };
 }
 
@@ -170,14 +220,24 @@ pub fn scanInto(
     src: []const u8,
     options: Options,
 ) !usize {
-    // 阶段 1：一次 SIMD 分类 pass 产出 token 候选起点位图
     var cls = try simd.classifyTokenStarts(allocator, src);
     defer cls.starts.deinit(allocator);
+    defer allocator.free(cls.line_breaks);
+    try consume(tokens, allocator, src, &cls.starts, options);
+    return cls.newlines + 1;
+}
 
-    // 阶段 2：按块迭代候选位，贪心消费。token 区间内的假起点用
-    // `start < pos` 越过。所有状态（pos/prev）都是循环局部变量，
-    // 由编译器驻进寄存器——这是数据流化的核心：扫描函数全是纯函数，
-    // 没有隐藏的 store/load 链。
+/// 阶段 2：块内迭代候选位，贪心消费。token 区间内的假起点用
+/// `start < pos` 越过。所有状态（pos/prev）都是循环局部变量，
+/// 由编译器驻进寄存器——这是数据流化的核心：扫描函数全是纯函数，
+/// 没有隐藏的 store/load 链。
+fn consume(
+    tokens: *std.ArrayList(Token),
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    starts: *const simd.TokenStarts,
+    options: Options,
+) !void {
     var pos: usize = 0;
     var prev: ?Token = null; // 上一个非注释 token，供 `/` 的正则/除号判别
 
@@ -187,7 +247,7 @@ pub fn scanInto(
         prev = t;
         try tokens.append(allocator, t);
     }
-    for (cls.starts.masks, 0..) |mask, bi| {
+    for (starts.masks, 0..) |mask, bi| {
         // 一块最多 32 个候选 → 每 token 的容量检查摊薄为每块一次
         try tokens.ensureUnusedCapacity(allocator, simd.block_size);
         var m = mask;
@@ -207,7 +267,6 @@ pub fn scanInto(
     }
     // 尾部空白不是候选起点，pos 可能落后于 src.len；eof 固定 start == end == src.len
     try tokens.append(allocator, .{ .kind = .eof, .start = @intCast(src.len), .end = @intCast(src.len) });
-    return cls.newlines + 1;
 }
 
 /// 分发类别码：token 首字节 → 位集，comptime 打进 256 项标量表。
@@ -665,8 +724,8 @@ const testing = std.testing;
 const Expected = struct { TokenKind, []const u8 };
 
 fn expectTokens(src: []const u8, expected: []const Expected) !void {
-    const result = try scan(testing.allocator, src, .{});
-    defer testing.allocator.free(result.tokens);
+    var result = try scan(testing.allocator, src, .{});
+    defer result.deinit(testing.allocator);
     if (result.tokens.len != expected.len) {
         std.debug.print("\nsrc: {s}\n期望 {d} 个 token，实际 {d} 个：\n", .{
             src, expected.len, result.tokens.len,
@@ -742,8 +801,8 @@ test "注释默认跳过" {
 
 test "保留注释" {
     const src = "a /* xx */ b";
-    const result = try scan(testing.allocator, src, .{ .keep_comments = true });
-    defer testing.allocator.free(result.tokens);
+    var result = try scan(testing.allocator, src, .{ .keep_comments = true });
+    defer result.deinit(testing.allocator);
     try testing.expectEqual(TokenKind.comment, result.tokens[1].kind);
     try testing.expectEqualStrings("/* xx */", result.tokens[1].slice(src));
 }
@@ -932,8 +991,8 @@ test "块注释跨块（各种对齐）" {
 
 test "行数统计" {
     const src = "a\n// c\nb\n`multi\nline`";
-    const result = try scan(testing.allocator, src, .{});
-    defer testing.allocator.free(result.tokens);
+    var result = try scan(testing.allocator, src, .{});
+    defer result.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 5), result.line_count);
 }
 
@@ -1059,8 +1118,8 @@ test "跨块的 Unicode whitespace 走兜底路径" {
 
 test "keep_comments 模式下 Unicode whitespace token 可见" {
     const src = "a\xc2\xa0b";
-    const result = try scan(testing.allocator, src, .{ .keep_comments = true });
-    defer testing.allocator.free(result.tokens);
+    var result = try scan(testing.allocator, src, .{ .keep_comments = true });
+    defer result.deinit(testing.allocator);
     try testing.expectEqual(TokenKind.whitespace, result.tokens[1].kind);
     try testing.expectEqualStrings("\xc2\xa0", result.tokens[1].slice(src));
 }
@@ -1068,26 +1127,26 @@ test "keep_comments 模式下 Unicode whitespace token 可见" {
 test "逻辑换行：U+2028/U+2029 与孤立 \\r" {
     // U+2028 是行终止符
     {
-        const result = try scan(testing.allocator, "a\xe2\x80\xa8b", .{});
-        defer testing.allocator.free(result.tokens);
+        var result = try scan(testing.allocator, "a\xe2\x80\xa8b", .{});
+        defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(usize, 2), result.line_count);
     }
     // U+2029 同样
     {
-        const result = try scan(testing.allocator, "a\xe2\x80\xa9b", .{});
-        defer testing.allocator.free(result.tokens);
+        var result = try scan(testing.allocator, "a\xe2\x80\xa9b", .{});
+        defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(usize, 2), result.line_count);
     }
     // 孤立 \r 计一次
     {
-        const result = try scan(testing.allocator, "a\rb", .{});
-        defer testing.allocator.free(result.tokens);
+        var result = try scan(testing.allocator, "a\rb", .{});
+        defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(usize, 2), result.line_count);
     }
     // CRLF 只计一次
     {
-        const result = try scan(testing.allocator, "a\r\nb", .{});
-        defer testing.allocator.free(result.tokens);
+        var result = try scan(testing.allocator, "a\r\nb", .{});
+        defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(usize, 2), result.line_count);
     }
 }
@@ -1146,4 +1205,42 @@ test "模板子表达式：嵌套模板与注释里的 } 不干扰平衡" {
         .{ .punct, ";" },
         .{ .eof, "" },
     });
+}
+
+test "行号索引 lineAt（逻辑换行：\\n、CRLF、孤立 \\r、U+2028）" {
+    const src = "a\nb\r\nc\rd\u{2028}e";
+    // 布局：a@0 \n@1 b@2 \r@3 \n@4 c@5 \r@6 d@7 U+2028@8..10 e@11
+    var result = try scan(testing.allocator, src, .{});
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 5), result.line_count);
+    try testing.expectEqual(@as(usize, 5), result.lines.lineCount());
+    try testing.expectEqual(@as(usize, 1), result.lines.lineAt(0)); // a
+    try testing.expectEqual(@as(usize, 2), result.lines.lineAt(2)); // b（\n 后）
+    try testing.expectEqual(@as(usize, 3), result.lines.lineAt(5)); // c（\r\n 后只计一次）
+    try testing.expectEqual(@as(usize, 4), result.lines.lineAt(7)); // d（孤立 \r 后）
+    try testing.expectEqual(@as(usize, 5), result.lines.lineAt(11)); // e（U+2028 后）
+    // 换行字节自身仍属于上一行
+    try testing.expectEqual(@as(usize, 1), result.lines.lineAt(1));
+    // 越界 offset 归到最后一行
+    try testing.expectEqual(@as(usize, 5), result.lines.lineAt(99));
+    // 与 token 流交叉验证
+    for (result.tokens) |t| {
+        try testing.expect(result.lines.lineAt(t.start) <= result.line_count);
+    }
+}
+
+test "行号索引：空文件与单行" {
+    {
+        var result = try scan(testing.allocator, "", .{});
+        defer result.deinit(testing.allocator);
+        try testing.expectEqual(@as(usize, 1), result.lines.lineAt(0));
+    }
+    {
+        var result = try scan(testing.allocator, "let x = 1;", .{});
+        defer result.deinit(testing.allocator);
+        try testing.expectEqual(@as(usize, 1), result.line_count);
+        for (result.tokens) |t| {
+            try testing.expectEqual(@as(usize, 1), result.lines.lineAt(t.start));
+        }
+    }
 }

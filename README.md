@@ -160,7 +160,7 @@ for (result.tokens) |tok| { ... }
 - [x] 吞吐优化：两阶段分类 + 块内 ctz 迭代 + 数据流化 + 冷路径分离 + 打包 punct + 类别码分发（comptime 256 项 dispatch 表 + `{}();,` 单字节 punct 零调用快路径；对标 yuku：0.44x → 1.16-1.40x，累计 ~3x）
 - [x] **boundary v2（精简版落地）**：[设计文档](docs/simd-token-boundary-prefilter.md) 的 ID 连接 + Unicode whitespace（19 码点 trivia 化）+ 逻辑换行（\r\n、U+2028/2029）+ ASCII 快路径。实测砍掉了 OP/ESC 平面（粗筛精化在 pos 跳过兜底下负收益，端到端 -25~30%），语义成本 ~13-16%，OP 集合审计成果留给将来免验证阶段 2。实验全记录见 [类别码纪要](docs/class-code-and-simd-lookup.md) 的 boundary v2 一节
 - [x] whitespace 平面查表实验：**否决**——JS 空白恰为连续区间 {09..0D}+20，范围比较（3 条/16B）已最优；simdjson 查表是被 JSON 空白的不连续布局逼的。结论：等值查表只对「低 nibble 互异**且不连续**」的集合有意义（[实验记录](docs/class-code-and-simd-lookup.md)）
-- [ ] SIMD 查表分类第二阶段：四位关系需要 ≥6 个位平面，全表 LUT / packed tag 的翻正条件在此点亮——矩形约束框架 + GF(2) 变换搜索（见类别码纪要）
+- [ ] SIMD 查表分类第二阶段（packed tag / 全表 LUT）：前提已变化——boundary v2 实测砍掉 OP/ESC 后只剩 ID 平面，多平面需求暂不存在；若将来做「candidate 免验证」激进阶段 2（OP/ESC 回归），此项随之复活（矩形约束 + GF(2) 变换搜索，见类别码纪要）
 - [x] 单字节 punct 批量块路径：**否决**——实测纯 punct_single 块仅 4.3-7.4%，run≥2 覆盖的 token 检测成本与省下的 dispatch 查询相抵；现有 dispatch 表的单 token 快路径已覆盖该场景
 - [x] 模板子表达式：平衡扫描已感知嵌套模板（递归 scanTemplate）、行/块注释与字符串；正则字面量里的 `}` 仍为已知限制
 - [ ] 更进一步：SoA token 输出、token 簇融合
@@ -168,7 +168,7 @@ for (result.tokens) |tok| { ... }
 - [ ] 标量 baseline + 各 SIMD 化子阶段单独 A/B 计量（把"每个环节拿到多少"量化出来）
 - [ ] unicode 标识符与 `\u` 转义（boundary v2 是其地基：非 ASCII ID-like 快路径 + 19 个 ECMAScript whitespace 修正，见设计文档）
 - [ ] 模板子表达式递归调 scanner 本体
-- [ ] token 行列号（lineBreakPlane 就绪后按逻辑换行计）
+- [x] token 行号：`Result.lines`（LineIndex，每块逻辑换行位图 + 前缀和，O(1) `lineAt(offset)`；零 token 流开销——不改 Token 结构，`--dump` 输出加行号列）。列号可由消费方从行首 offset 推导，暂不内置
 - [ ] 对齐 Test262 / 真实大型 JS 代码库的模糊正确性验证
 - [ ] 与 esbuild / swc / oxc 的 scanner 吞吐对比
 
