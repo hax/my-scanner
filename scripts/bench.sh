@@ -9,11 +9,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 YUKU_DIR=.bench-deps/yuku
+YUKU_MAIN_DIR=.bench-deps/yuku-main
 if [ ! -f "$YUKU_DIR/src/parser/lexer.zig" ]; then
-  echo "==> clone yuku（供 bench 引用其 lexer 源码）"
+  echo "==> clone yuku 基线快照（供 bench 引用其 lexer 源码）"
   mkdir -p .bench-deps
   git clone --depth 1 https://github.com/yuku-toolchain/yuku "$YUKU_DIR"
   rm -rf "$YUKU_DIR/.git"
+fi
+if [ ! -f "$YUKU_MAIN_DIR/src/parser/lexer.zig" ]; then
+  echo "==> clone yuku 主干（含 perf(lexer) 向量化提交）"
+  git clone --depth 5 https://github.com/yuku-toolchain/yuku "$YUKU_MAIN_DIR"
+  rm -rf "$YUKU_MAIN_DIR/.git"
 fi
 
 DEFAULT_FILES=(corpus/typescript.js corpus/checker.ts corpus/react.js corpus/lib.dom.d.ts)

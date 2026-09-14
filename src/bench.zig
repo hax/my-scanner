@@ -10,15 +10,8 @@
 const std = @import("std");
 const Io = std.Io;
 const my_scanner = @import("my_scanner");
-const yuku = @import("yuku_lexer");
-
-// yuku 的 lexer.zig 不导出 Token/SourceType（root.zig 也只导出 parser 层），
-// 从函数签名里提取，避免把整个 parser 模块拉进来（连带 semantic/codegen）。
-const YukuSourceType = @typeInfo(@TypeOf(yuku.Lexer.init)).@"fn".params[2].type.?;
-const YukuToken = blk: {
-    const ret = @typeInfo(@TypeOf(yuku.Lexer.nextToken)).@"fn".return_type.?;
-    break :blk @typeInfo(ret).error_union.payload;
-};
+const yuku_old = @import("yuku_lexer");
+const yuku_main = @import("yuku_lexer_main");
 
 const usage_text =
     \\bench — my-scanner vs yuku lexer 对比基准
@@ -76,8 +69,6 @@ fn benchFile(
         try out.print("{s}: 读取失败: {s}\n", .{ path, @errorName(err) });
         return;
     };
-    const src_type: YukuSourceType = @enumFromInt(0); // script
-
     // ---- my-scanner ----
     var tokens: std.ArrayList(my_scanner.Token) = .empty;
     defer tokens.deinit(arena);
@@ -115,18 +106,11 @@ fn benchFile(
         }
     }
 
-    // ---- yuku ----
-    var ytokens: std.ArrayList(YukuToken) = .empty;
-    defer ytokens.deinit(arena);
-    // yuku 的 Lexer 在 unicode 标识符等场景可能分配，用每轮 reset 的 arena，
-    // 稳态下与 my-scanner 同样零系统分配
-    var yarena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer yarena.deinit();
+    // ---- yuku（基线快照 + 主干，同一驱动逻辑跑两遍）----
 
     // yuku 纯 scanner 与 tsc 同款设计：`/` 保守判除号，正则由 parser 在表达式
     // 位置调 reScanAsRegex 重扫。为保证两个 lexer 做出完全相同的正则/除号
-    // 决策（否则 yuku 会在正则体上报错），用 my-scanner 的结果确定正则起点
-    // 集合，yuku 循环命中时按其 parser 的方式重扫。
+    // 决策，用 my-scanner 的结果确定正则起点集合，命中时按其 parser 方式重扫。
     var regex_starts = std.AutoHashMap(u32, void).init(arena);
     defer regex_starts.deinit();
     {
@@ -137,74 +121,8 @@ fn benchFile(
         }
     }
 
-    var yuku_best: i96 = std.math.maxInt(i96);
-    var yuku_count: usize = 0;
-    var yuku_err: ?[]const u8 = null;
-
-    // 模板上下文栈（模拟 yuku parser 的驱动）：head/middle 压一层，层内
-    // 花括号平衡，平衡归零后的 `}` 是模板自己的 → reScanTemplateContinuation。
-    // token 流里字符串/正则都是完整 token，不会干扰括号平衡。
-    var tpl_stack: [64]i32 = undefined;
-    var tpl_len: usize = 0;
-
-    for (0..repeats) |_| {
-        _ = yarena.reset(.retain_capacity);
-        var lexer = try yuku.Lexer.init(src, yarena.allocator(), src_type, false);
-        tpl_len = 0;
-        const t0 = Io.Timestamp.now(io, .awake);
-        var n: usize = 0;
-        while (true) {
-            var t = lexer.nextToken() catch |e| {
-                if (yuku_err == null) {
-                    const at = @min(lexer.cursor, src.len);
-                    const lo = at - @min(at, 48);
-                    try out.print("  yuku 报错于 offset {d}: {s}…▶{s}\n", .{
-                        at,
-                        src[lo..at],
-                        src[at..@min(at + 48, src.len)],
-                    });
-                }
-                yuku_err = @errorName(e);
-                break;
-            };
-            if ((t.tag == .slash or t.tag == .slash_assign) and
-                regex_starts.contains(t.span.start))
-            {
-                const re = lexer.reScanAsRegex(t.span.start) catch |e| {
-                    yuku_err = @errorName(e);
-                    break;
-                };
-                t = lexer.createToken(.regex_literal, re.span.start, re.span.end);
-            }
-            if (t.tag == .template_head or t.tag == .template_middle) {
-                if (tpl_len < tpl_stack.len) {
-                    tpl_stack[tpl_len] = 0;
-                    tpl_len += 1;
-                }
-            } else if (tpl_len > 0) {
-                if (t.tag == .left_brace) {
-                    tpl_stack[tpl_len - 1] += 1;
-                } else if (t.tag == .right_brace) {
-                    if (tpl_stack[tpl_len - 1] == 0) {
-                        t = lexer.reScanTemplateContinuation(t.span.start) catch |e| {
-                            yuku_err = @errorName(e);
-                            break;
-                        };
-                        if (t.tag == .template_tail) tpl_len -= 1;
-                    } else {
-                        tpl_stack[tpl_len - 1] -= 1;
-                    }
-                }
-            }
-            try ytokens.append(arena, t);
-            n += 1;
-            if (t.tag == .eof) break;
-        }
-        const ns = t0.durationTo(Io.Timestamp.now(io, .awake)).nanoseconds;
-        yuku_best = @min(yuku_best, ns);
-        yuku_count = n;
-        ytokens.clearRetainingCapacity();
-    }
+    const r_old = try runYuku(yuku_old, "yuku-old", arena, io, out, src, regex_starts, repeats);
+    const r_main = try runYuku(yuku_main, "yuku-main", arena, io, out, src, regex_starts, repeats);
 
     try out.print("{s}  ({d} bytes, x{d} 轮取最优)\n", .{ path, src.len, repeats });
     try printRow(out, "mine", mine_best, src.len, mine_count);
@@ -218,10 +136,14 @@ fn benchFile(
         const speedup = @as(f64, @floatFromInt(scalar_best)) / @as(f64, @floatFromInt(cls_best));
         try out.print("  {s: <5} best {d:>8.2} ms   {d:>6.2} GB/s   （标量对照，SIMD {d:.1}x）\n", .{ "cls-s", sms, sgbps, speedup });
     }
-    try printRow(out, "yuku", yuku_best, src.len, yuku_count);
-    if (yuku_err) |e| try out.print("  （yuku 中途报 {s}，计扫到出错为止）\n", .{e});
-    const ratio = @as(f64, @floatFromInt(yuku_best)) / @as(f64, @floatFromInt(mine_best));
-    try out.print("  吞吐比 mine/yuku = {d:.2}x\n\n", .{ratio});
+    try printRow(out, "yuku-old", r_old.best, src.len, r_old.count);
+    if (r_old.err) |e| try out.print("  （yuku-old 中途报 {s}，计扫到出错为止）\n", .{e});
+    try printRow(out, "yuku-main", r_main.best, src.len, r_main.count);
+    if (r_main.err) |e| try out.print("  （yuku-main 中途报 {s}，计扫到出错为止）\n", .{e});
+    const ratio_old = @as(f64, @floatFromInt(r_old.best)) / @as(f64, @floatFromInt(mine_best));
+    const ratio_main = @as(f64, @floatFromInt(r_main.best)) / @as(f64, @floatFromInt(mine_best));
+    const yuku_gain = @as(f64, @floatFromInt(r_old.best)) / @as(f64, @floatFromInt(r_main.best));
+    try out.print("  吞吐比 mine/yuku-old = {d:.2}x   mine/yuku-main = {d:.2}x   （yuku 向量化收益 {d:.2}x）\n\n", .{ ratio_old, ratio_main, yuku_gain });
 
     if (prim) try primBench(io, out, src, repeats);
 }
@@ -287,4 +209,108 @@ fn printRow(out: *Io.Writer, comptime label: []const u8, ns: i96, bytes: usize, 
     try out.print("  {s: <5} best {d:>8.2} ms   {d:>6.2} GB/s   {d:>8.1} Mtok/s   ({d} tokens)\n", .{
         label, ms, gbps, mtoks, count,
     });
+}
+
+fn YukuTokList(comptime mod: type) type {
+    return std.ArrayList(YukuTokenOf(mod));
+}
+
+fn YukuTokenOf(comptime mod: type) type {
+    const ret = @typeInfo(@TypeOf(mod.Lexer.nextToken)).@"fn".return_type.?;
+    return @typeInfo(ret).error_union.payload;
+}
+
+fn YukuSourceTypeOf(comptime mod: type) type {
+    return @typeInfo(@TypeOf(mod.Lexer.init)).@"fn".params[2].type.?;
+}
+
+const YukuRun = struct { best: i96, count: usize, err: ?[]const u8 };
+
+/// 用同一套驱动（正则重扫对齐 + 模板上下文栈）跑一个 yuku 版本的 lexer。
+/// 两个版本共用 my-scanner 预计算的正则起点集合，决策完全一致。
+fn runYuku(
+    comptime mod: type,
+    comptime label: []const u8,
+    arena: std.mem.Allocator,
+    io: Io,
+    out: *Io.Writer,
+    src: []const u8,
+    regex_starts: std.AutoHashMap(u32, void),
+    repeats: usize,
+) !YukuRun {
+    const SourceType = YukuSourceTypeOf(mod);
+    const src_type: SourceType = @enumFromInt(0); // script
+    var ytokens: YukuTokList(mod) = .empty;
+    defer ytokens.deinit(arena);
+
+    // yuku 的 Lexer 在 unicode 标识符等场景可能分配，用每轮 reset 的 arena
+    var yarena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer yarena.deinit();
+
+    var best: i96 = std.math.maxInt(i96);
+    var count: usize = 0;
+    var err: ?[]const u8 = null;
+
+    // 模板上下文栈（模拟 yuku parser 的驱动）：head/middle 压一层，层内
+    // 花括号平衡，平衡归零后的 `}` 是模板自己的 → reScanTemplateContinuation
+    var tpl_stack: [64]i32 = undefined;
+    var tpl_len: usize = 0;
+
+    for (0..repeats) |_| {
+        _ = yarena.reset(.retain_capacity);
+        var lexer = try mod.Lexer.init(src, yarena.allocator(), src_type, false);
+        tpl_len = 0;
+        const t0 = Io.Timestamp.now(io, .awake);
+        var n: usize = 0;
+        while (true) {
+            var t = lexer.nextToken() catch |e| {
+                if (err == null) {
+                    const at = @min(lexer.cursor, src.len);
+                    const lo = at - @min(at, 48);
+                    try out.print("  {s} 报错于 offset {d}: {s}…▶{s}\n", .{
+                        label, at, src[lo..at], src[at..@min(at + 48, src.len)],
+                    });
+                }
+                err = @errorName(e);
+                break;
+            };
+            if ((t.tag == .slash or t.tag == .slash_assign) and
+                regex_starts.contains(t.span.start))
+            {
+                const re = lexer.reScanAsRegex(t.span.start) catch |e| {
+                    err = @errorName(e);
+                    break;
+                };
+                t = lexer.createToken(.regex_literal, re.span.start, re.span.end);
+            }
+            if (t.tag == .template_head or t.tag == .template_middle) {
+                if (tpl_len < tpl_stack.len) {
+                    tpl_stack[tpl_len] = 0;
+                    tpl_len += 1;
+                }
+            } else if (tpl_len > 0) {
+                if (t.tag == .left_brace) {
+                    tpl_stack[tpl_len - 1] += 1;
+                } else if (t.tag == .right_brace) {
+                    if (tpl_stack[tpl_len - 1] == 0) {
+                        t = lexer.reScanTemplateContinuation(t.span.start) catch |e| {
+                            err = @errorName(e);
+                            break;
+                        };
+                        if (t.tag == .template_tail) tpl_len -= 1;
+                    } else {
+                        tpl_stack[tpl_len - 1] -= 1;
+                    }
+                }
+            }
+            try ytokens.append(arena, t);
+            n += 1;
+            if (t.tag == .eof) break;
+        }
+        const ns = t0.durationTo(Io.Timestamp.now(io, .awake)).nanoseconds;
+        best = @min(best, ns);
+        count = n;
+        ytokens.clearRetainingCapacity();
+    }
+    return .{ .best = best, .count = count, .err = err };
 }

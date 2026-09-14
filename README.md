@@ -60,21 +60,27 @@ N 轮取最优。yuku 纯 scanner 与 tsc 同款把正则/模板续扫推迟给 
 bench 里按 yuku parser 的方式调 `reScanAsRegex` / `reScanTemplateContinuation`
 对齐（正则决策与 my-scanner 完全一致，模板用花括号平衡栈跟踪）。
 
-M2 / ReleaseFast / 30 轮取最优：
+M2 / ReleaseFast / 30 轮取最优（bench 同时驱动 yuku 两版本：引入向量化前的
+基线快照与上游主干 `perf(lexer)` 提交之后；采样时段系统负载 ~4.5，绝对值
+偏低约 10%，三者同进程比较不受影响）：
 
-| 文件 | my-scanner | yuku | mine/yuku |
-| --- | --- | --- | --- |
-| typescript.js | 0.71 GB/s · 96.5 Mtok/s | ~0.59 GB/s · ~80 Mtok/s | 1.19x |
-| checker.ts | 0.78 GB/s · 87.5 Mtok/s | ~0.67 GB/s · ~76 Mtok/s | 1.16x |
-| react.js | 1.29 GB/s · 150.5 Mtok/s | ~0.9 GB/s · ~107 Mtok/s | 1.40x |
-| lib.dom.d.ts | 1.35 GB/s · 84.3 Mtok/s | ~1.05 GB/s · ~67 Mtok/s | 1.26x |
+| 文件 | my-scanner | yuku-old | yuku-main | yuku 向量化收益 | mine/yuku-main |
+| --- | --- | --- | --- | --- | --- |
+| typescript.js | 84.4 Mtok/s | 79.6 | 82.1 | 1.03x | **1.03x** |
+| checker.ts | 78.5 | 76.6 | 76.6 | 1.00x | **1.03x** |
+| react.js | 114.1 | 106.3 | 119.7 | 1.13x | 0.95x |
+| lib.dom.d.ts | 73.5 | 67.1 | **96.5** | **1.44x** | **0.76x** |
 
-（演进：单阶段 0.25-0.59 → 两阶段分类 0.41-1.05 → 块内迭代等微优化 0.55-1.07 →
-数据流化 + 冷路径 + 打包 punct 0.59-1.13 → 类别码分发（comptime 256 项标量
-dispatch 表 + 单字节 punct 零调用快路径）0.71-1.35 GB/s，累计约 3x，
-全面反超 yuku 1.16-1.40x。被数据否决的尝试：阶段融合（classify+consume 逐块
-流水，-3~12%，两阶段分离的缓存行为更好）与 block_size=16（-9%，块循环开销
-翻倍高于 NEON 单指令收益）。）
+yuku 主干的向量化是 `findAnyPos`（@Vector 16/8 字节找命中字符 + ctz），
+覆盖行注释/字符串/模板三处，块注释仍为标量。收益高度依赖语料：注释/字符串
+密集的 lib.dom.d.ts +44%、react.js +13%，minified 的 typescript.js +3%、
+checker.ts 持平。**lib.dom.d.ts 上 yuku-main 反超我们 24%**——注释密集
+语料的扫描是当前的明确短板（见 roadmap）。
+
+（历史演进：单阶段 0.25-0.59 → 两阶段分类 0.41-1.05 → 块内迭代等微优化
+0.55-1.07 → 数据流化 + 冷路径 + 打包 punct 0.59-1.13 → 类别码分发
+0.71-1.35 GB/s。被数据否决的尝试：阶段融合（-3~12%，两阶段分离的缓存
+行为更好）与 block_size=16（-9%）。安静时段的绝对值另见前文各轮记录。）
 
 ## 正确性验证
 
@@ -163,6 +169,7 @@ for (result.tokens) |tok| { ... }
 - [ ] SIMD 查表分类第二阶段（packed tag / 全表 LUT）：前提已变化——boundary v2 实测砍掉 OP/ESC 后只剩 ID 平面，多平面需求暂不存在；若将来做「candidate 免验证」激进阶段 2（OP/ESC 回归），此项随之复活（矩形约束 + GF(2) 变换搜索，见类别码纪要）
 - [x] 单字节 punct 批量块路径：**否决**——实测纯 punct_single 块仅 4.3-7.4%，run≥2 覆盖的 token 检测成本与省下的 dispatch 查询相抵；现有 dispatch 表的单 token 快路径已覆盖该场景
 - [x] 模板子表达式：平衡扫描已感知嵌套模板（递归 scanTemplate）、行/块注释与字符串；正则字面量里的 `}` 仍为已知限制
+- [ ] **注释/字符串密集语料的扫描对齐**：yuku-main（findAnyPos 向量化行注释/字符串/模板）在 lib.dom.d.ts 上反超我们 24%（96.5 vs 73.5 Mtok/s）；我们的块注释 SIMD（`slash & star<<1`）与字符串 stop mask 需在该语料上重新计量并优化
 - [ ] 更进一步：SoA token 输出、token 簇融合
 - [x] 宽度实验：block_size=16 在 M2 上 -9%（块循环开销翻倍，高于 NEON 单指令收益）被否决，32 定稿；64（AVX-512）待有对应硬件再测
 - [x] 标量 baseline + A/B 计量：`classifyTokenStartsScalar` 与 SIMD 版经交叉验证（固定用例 + 200 轮随机字节流逐位一致，顺带抓出 SIMD 版三个跨块边界 bug：ws lead 候选性、跨块 CRLF 回改、跨块 U+2028 变体）；bench 的 `cls-s` 行常设输出。**SIMD 分类 pass = 标量的 8.8-11.9x**（4.9 vs ~0.45 GB/s）
