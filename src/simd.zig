@@ -148,8 +148,98 @@ pub const TokenStarts = struct {
     }
 };
 
-/// 阶段 1 主体：产出候选起点位图，顺带 popcount 出全文件换行总数
-/// （含注释/字符串/模板内部的换行，物理行口径）。
+/// ECMAScript 的非 ASCII whitespace（19 个码点，含 U+FEFF 与行终止符
+/// U+2028/U+2029）。从 i 起若是其中之一，返回其 UTF-8 字节数。
+/// 前缀集合由 docs/unicode_utf8_prefixes.js 校验（首字节 C2 E1 E2 E3 EF）。
+pub fn unicodeWhitespaceLen(src: []const u8, i: usize) ?usize {
+    const s = src;
+    if (i + 1 >= s.len) return null;
+    switch (s[i]) {
+        0xC2 => return if (s[i + 1] == 0xA0) 2 else null, // U+00A0
+        0xE1 => return if (i + 2 < s.len and s[i + 1] == 0x9A and s[i + 2] == 0x80) 3 else null, // U+1680
+        0xE2 => {
+            if (i + 2 >= s.len) return null;
+            switch (s[i + 1]) {
+                0x80 => return switch (s[i + 2]) {
+                    // U+2000..U+200A, U+2028, U+2029, U+202F
+                    0x80...0x8A, 0xA8, 0xA9, 0xAF => 3,
+                    else => null,
+                },
+                0x81 => return if (s[i + 2] == 0x9F) 3 else null, // U+205F
+                else => return null,
+            }
+        },
+        0xE3 => return if (i + 2 < s.len and s[i + 1] == 0x80 and s[i + 2] == 0x80) 3 else null, // U+3000
+        0xEF => return if (i + 2 < s.len and s[i + 1] == 0xBB and s[i + 2] == 0xBF) 3 else null, // U+FEFF
+        else => return null,
+    }
+}
+
+inline fn eqMask(chunk: Chunk, c: u8) Mask {
+    return @bitCast(chunk == splat(c));
+}
+
+inline fn highByteMask(chunk: Chunk) Mask {
+    return @bitCast(chunk >= splat(0x80));
+}
+
+/// Unicode whitespace 码点可能的首字节
+inline fn unicodeWsLeadMask(chunk: Chunk) Mask {
+    var m: Mask = 0;
+    inline for ([_]u8{ 0xC2, 0xE1, 0xE2, 0xE3, 0xEF }) |c| m |= eqMask(chunk, c);
+    return m;
+}
+
+/// 本块开头是否悬挂着跨块 Unicode whitespace 码点的尾部：
+/// 返回该码点在本块内的字节数（1 或 2），0 表示没有。
+/// prev2/prev1 是前一块的最后两个字节。
+fn danglingUnicodeWs(src: []const u8, i: usize, prev2: u8, prev1: u8) usize {
+    const s = src;
+    if (i >= s.len) return 0;
+    // prev1 是码点首字节（2 字节码点差 1 字节；3 字节码点差 2 字节）
+    switch (prev1) {
+        0xC2 => return if (s[i] == 0xA0) 1 else 0,
+        0xE1 => return if (i + 1 < s.len and s[i] == 0x9A and s[i + 1] == 0x80) 2 else 0,
+        0xE2 => {
+            if (s[i] == 0x80) {
+                if (i + 1 >= s.len) return 0;
+                return switch (s[i + 1]) {
+                    0x80...0x8A, 0xA8, 0xA9, 0xAF => 2,
+                    else => 0,
+                };
+            }
+            if (s[i] == 0x81) {
+                return if (i + 1 < s.len and s[i + 1] == 0x9F) 2 else 0;
+            }
+        },
+        0xE3 => return if (i + 1 < s.len and s[i] == 0x80 and s[i + 1] == 0x80) 2 else 0,
+        0xEF => return if (i + 1 < s.len and s[i] == 0xBB and s[i + 1] == 0xBF) 2 else 0,
+        else => {},
+    }
+    // prev2 是首字节、prev1 是第二字节，本块首字节收尾
+    if (prev2 == 0xE1 and prev1 == 0x9A and s[i] == 0x80) return 1;
+    if (prev2 == 0xE2 and prev1 == 0x80) {
+        return switch (s[i]) {
+            0x80...0x8A, 0xA8, 0xA9, 0xAF => 1,
+            else => 0,
+        };
+    }
+    if (prev2 == 0xE2 and prev1 == 0x81 and s[i] == 0x9F) return 1;
+    if (prev2 == 0xE3 and prev1 == 0x80 and s[i] == 0x80) return 1;
+    if (prev2 == 0xEF and prev1 == 0xBB and s[i] == 0xBF) return 1;
+    return 0;
+}
+
+/// 阶段 1 主体（boundary v2，见 docs/simd-token-boundary-prefilter.md）：
+/// 用「连接关系」推出候选起点位图——字节 i 之后不可切，当且仅当
+/// (after[i] & before[i+1]) != 0。当前只启用 ID 连接：
+///   ID : [A-Za-z0-9_$] 之间，以及一切 >= 0x80 的字节（UTF-8 码点内部
+///        与非空白码点之间按 ID-like 处理；Unicode whitespace 由修正摘出）
+/// OP/ESC 连接（docs/simd-token-boundary-prefilter.md 的完整四位关系）
+/// 经实测为负收益——多字节 punctuator 与转义对中间的假候选由阶段 2 的
+/// pos 跳过兜底，粗筛精化不划算；它们留给将来 candidate 免验证的激进
+/// 阶段 2。WS：本 scanner 不产 whitespace token，ASCII 空白整体排除。
+/// 逻辑换行（\n、孤立 \r、U+2028/U+2029）在同一 pass 计数。
 pub fn classifyTokenStarts(
     allocator: std.mem.Allocator,
     src: []const u8,
@@ -159,27 +249,99 @@ pub fn classifyTokenStarts(
     errdefer allocator.free(masks);
 
     var newlines: usize = 0;
-    var carry_ip: u32 = 0; // 前一块最后一个字节是否为标识符字符（放在 bit0）
+    // 跨块状态：id after 平面的末字节（bit0 位置 = 前一字节的 after）
+    var carry_id: u32 = 0;
+    var carry_lf: u32 = 0;
+    // 跨块 U+2028/U+2029：保留前两字节
+    var prev2: u8 = 0;
+    var prev1: u8 = 0;
+
     for (masks, 0..) |*out, bi| {
         const i = bi * block_size;
         const chunk = load(src, i);
-        // 尾块：padding 字节（0x7f）非空白也非标识符字符，会算出假候选，
-        // 也可能被误计换行——都不会，但统一砍掉越界位最稳
         const rem = src.len - i;
         const valid: u32 = if (rem >= block_size)
             std.math.maxInt(u32)
         else
             (@as(u32, 1) << @intCast(rem)) - 1;
 
-        const ws = whitespaceMask(chunk);
-        const ip = identPartMask(chunk);
-        // prev_ip 的第 j 位 = 第 j-1 个字节是否标识符字符；
-        // 块内左移衔接 + 跨块 carry
-        const prev_ip = (ip << 1) | carry_ip;
-        out.* = ~ws & ~(ip & prev_ip) & valid;
+        // ID：ASCII 标识符字符 + 一切 >= 0x80（Unicode whitespace 待修正）。
+        // OP/ESC 连接关系经实测负收益（见 docs/class-code-and-simd-lookup.md
+        // 的 boundary v2 实验），其价值留给将来「candidate 免验证」的激进阶段 2。
+        const high = highByteMask(chunk);
+        var id_after = identPartMask(chunk) | high;
+        var id_before = id_after;
+        const ws = whitespaceMask(chunk); // ASCII 空白整体排除
 
-        carry_ip = ip >> (block_size - 1);
-        newlines += @as(usize, @popCount(newlineMask(chunk) & valid));
+        // Unicode whitespace 修正——必须在 impossible 合成之前改 id 平面，
+        // 否则清掉的连接不生效（会把码点后的真实边界一起挤掉）。
+        // 只做连接修正：首字节对外断 ID-before、末字节对外断 ID-after
+        // （码点内部保持 ID 连接）。码点本身不排除出候选——统一由
+        // 阶段 2 在 lead 处产 .whitespace token（跨块码点的尾部字节
+        // 会被消费后的 pos 越过，无需排除）。
+        // 纯 ASCII 块（且前块末尾无悬挂）整体跳过——corpus 大多是这种。
+        if (high != 0 or prev2 >= 0x80 or prev1 >= 0x80) {
+            // 跨块悬挂：lead 在前块、末字节在本块开头，清其 id_after
+            const dangle = danglingUnicodeWs(src, i, prev2, prev1);
+            if (dangle != 0) {
+                id_after &= ~(@as(u32, 1) << @intCast(dangle - 1));
+            }
+
+            // 块内完整的码点
+            var lead = unicodeWsLeadMask(chunk) & valid;
+            while (lead != 0) {
+                const p: u5 = @intCast(@ctz(lead));
+                lead &= lead - 1;
+                if (unicodeWhitespaceLen(src, i + p)) |len| {
+                    if (@as(usize, p) + len <= block_size and i + p + len <= src.len) {
+                        id_after &= ~(@as(u32, 1) << @intCast(p + len - 1));
+                        id_before &= ~(@as(u32, 1) << p);
+                    }
+                }
+            }
+        }
+
+        // impossible 位 j = after[j-1] & before[j]：左移 after 平面对齐，
+        // carry 是前块末字节的 after（跨块连接）。
+        // （注意方向：旧版 ident 因 after/before 对称侥幸不受影响；
+        // ws 修正把两面分开后必须移对侧。）
+        const impossible = ((id_after << 1) | carry_id) & id_before;
+
+        out.* = ~ws & ~impossible & valid;
+
+        carry_id = id_after >> (block_size - 1);
+
+        // 逻辑换行：\n 与孤立 \r（下一字节非 \n；CRLF 只在 \n 处计一次）
+        const lf = eqMask(chunk, '\n');
+        const cr = eqMask(chunk, '\r');
+        const lf_next = (lf >> 1) | carry_lf; // i+1 是 \n：右移对齐到 \r 的位
+        newlines += @as(usize, @popCount((lf | (cr & ~lf_next)) & valid));
+        carry_lf = lf >> (block_size - 1);
+
+        // U+2028/U+2029：块内完整（E2 80 A8/A9），位标记在末字节；
+        // 纯 ASCII 块跳过三个 eq
+        if (high != 0) {
+            const e2 = eqMask(chunk, 0xE2);
+            const m80 = eqMask(chunk, 0x80);
+            const a8a9 = eqMask(chunk, 0xA8) | eqMask(chunk, 0xA9);
+            newlines += @as(usize, @popCount(((e2 << 2) & (m80 << 1) & a8a9) & valid));
+        }
+        if (prev2 == 0xE2 and prev1 == 0x80 and rem >= 1 and
+            (src[i] == 0xA8 or src[i] == 0xA9))
+        {
+            newlines += 1;
+        }
+        // 保留本块末两字节供跨块码点判定（注意用本块长度 blen，rem 是到
+        // 文件尾的距离，非末块会取到文件末尾的字节——曾因此漏判跨块码点）。
+        // 纯 ASCII 块直接置 0：dangle 只关心 prev >= 0x80，等价且免两次 load。
+        if (high != 0) {
+            const blen = @min(rem, block_size);
+            prev2 = if (blen >= 2) src[i + blen - 2] else 0;
+            prev1 = if (blen >= 1) src[i + blen - 1] else 0;
+        } else {
+            prev2 = 0;
+            prev1 = 0;
+        }
     }
 
     return .{ .starts = .{ .masks = masks }, .newlines = newlines };

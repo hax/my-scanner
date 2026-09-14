@@ -143,6 +143,47 @@ whitespace = in.eq( pshufb(whitespace_table, in) );
    单独做全表 LUT 收益 ~3-6% 不值得；两份文档合流后（多平面 +
    packed tag 消费）才值得投入。
 
+## 🔬 boundary v2 落地实验（2026-09-15）
+
+按计划实施了四位连接关系（前置：`op_cont_audit.js` 复跑通过，
+Current-relation counterexamples: 0）。实测推翻了两处预估，结论如下：
+
+| 配置 | 分类 pass | 端到端（vs 之前） |
+| --- | --- | --- |
+| 之前（ws+ip 两平面） | 7.7 GB/s | 基线（96.5 Mtok/s @typescript.js） |
+| 完整四位（ID+OP+ESC+WS） | 1.79 GB/s（**-77%**） | -25~30% |
+| 精简（ID + 逻辑换行，砍 OP/ESC） | 2.9 GB/s | -20% |
+| + ASCII 快路径（high==0 跳过 Unicode 逻辑） | **4.9 GB/s** | **-13~16%** |
+
+结论：
+
+1. **OP/ESC 粗筛精化是负收益**（详见 ❌ 存档）：多字节 punctuator 与
+   转义对中间的假候选本就被阶段 2 的 `pos` 跳过兜底，粗筛为此付出
+   4 倍分类成本不值。这与 boundary-prefilter 文档「总成本 = 粗筛 +
+   候选 × 验证」的公式互为印证：候选端已有廉价兜底时，粗筛端精化
+   是纯支出。OP 集合审计成果保留，供将来「candidate 免验证直接产
+   token」的激进阶段 2 使用。
+2. **语义功能的合理成本 ~13%**：Unicode whitespace（19 码点）trivia 化、
+   逻辑换行（\r、U+2028/2029）、非 ASCII 假候选 3→1 个/码点。
+   lineBreak 在分类 pass 顺算的成本（lf/cr eq + lone-Cr 逻辑 + carry）
+   高于预估。若未来要追平：whitespace 平面查表+验证（roadmap 既有项，
+   预估补回 3-5%）或 lineBreak 拆独立 pass。
+3. **ASCII 快路径是必需品**：`highByteMask == 0` 的块跳过全部 Unicode
+   修正逻辑（lead 检测 5 eq + U+2028 检测 3 eq + 修正循环 + prev 载入），
+   挽回约 10% 端到端。
+4. 实现期被测试抓住的三个 bug（值得存档的模式）：
+   - **移位方向**：impossible 位 j = after[j-1] & before[j]，必须左移
+     after 平面；旧代码因 ident 的 after/before 对称而侥幸正确，
+     whitespace 修正把两面分开后立即暴露。
+   - **块末字节取错**：prev2/prev1 用「到文件尾的距离」取字节，非末块
+     取到文件末尾——跨块码点判定全部失效；必须用本块长度 blen。
+   - **位对齐**：U+2028 三连字节（E2 80 A8）的 mask 合成，三个平面
+     要移位到同一字节位上，左移/右移方向写反则恒为 0 或错位。
+
+行为变化（有意）：非 ASCII whitespace 从 illegal 变 trivia（阶段 2 在
+lead 处统一产 `.whitespace` token，默认过滤，keep_comments 时可见）；
+`line_count` 从「\n 计数」变「逻辑换行计数」。tsc 差分四文件切分不变。
+
 ## ❌ 已否决项存档
 
 - 阶段融合（classify+consume 逐块流水、消灭 masks 数组）：实测 -3~12%，
@@ -155,3 +196,6 @@ whitespace = in.eq( pshufb(whitespace_table, in) );
   反超标量（十字位逻辑 40-60 条/块 vs 块内 ~1.8 个多字节 punct × 8 周期）。
 - 十字 AND 用于我们的任何平面：punct 有十字洞、ws 在十字 AND 框架下
   也有（0x29/0x00 反例）——但手法二（查表+验证）不受此限制。
+- boundary v2 的 OP/ESC 连接平面（多字节 punctuator/转义对的粗筛精化）：
+  分类 pass -77%、端到端 -25~30%。假候选已由阶段 2 pos 跳过兜底，
+  精化无收益。保留 ID 平面 + Unicode 修正 + 逻辑换行的精简版。

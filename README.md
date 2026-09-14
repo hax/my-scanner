@@ -158,7 +158,7 @@ for (result.tokens) |tok| { ... }
 ## Roadmap
 
 - [x] 吞吐优化：两阶段分类 + 块内 ctz 迭代 + 数据流化 + 冷路径分离 + 打包 punct + 类别码分发（comptime 256 项 dispatch 表 + `{}();,` 单字节 punct 零调用快路径；对标 yuku：0.44x → 1.16-1.40x，累计 ~3x）
-- [ ] **boundary v2：四位连接关系粗筛**（[设计文档](docs/simd-token-boundary-prefilter.md)）：candidate 公式升级为 `afterMask(prev) & beforeMask(next)` 的 impossible 关系（ID/OP/ESC/WS），新增 OP/ESC 平面与 lineBreakPlane（\r\n、U+2028/2029 逻辑换行）。主要收益是正确性与 Unicode 地基（非 ASCII whitespace 不再误判、中文码点假候选 3→1 个/字），速度 <2%。OP 集合用 docs/op_cont_audit.js 审计过的 `%^&|*/<=?` × `=&|*?`；落地会**有意改变行为**，tsc 差分口径同步更新。实现层手法见 [类别码与 SIMD 查表纪要](docs/class-code-and-simd-lookup.md)
+- [x] **boundary v2（精简版落地）**：[设计文档](docs/simd-token-boundary-prefilter.md) 的 ID 连接 + Unicode whitespace（19 码点 trivia 化）+ 逻辑换行（\r\n、U+2028/2029）+ ASCII 快路径。实测砍掉了 OP/ESC 平面（粗筛精化在 pos 跳过兜底下负收益，端到端 -25~30%），语义成本 ~13-16%，OP 集合审计成果留给将来免验证阶段 2。实验全记录见 [类别码纪要](docs/class-code-and-simd-lookup.md) 的 boundary v2 一节
 - [ ] whitespace 平面改「tbl/pshufb 查表+验证」（simdjson 现行手法，2 条指令替代 11 条，预估总吞吐 3-5%；JS 空白 6 字符低 nibble 互不冲突恰好适用；需 arm64/x86 各一小段内联汇编）
 - [ ] SIMD 查表分类第二阶段：四位关系需要 ≥6 个位平面，全表 LUT / packed tag 的翻正条件在此点亮——矩形约束框架 + GF(2) 变换搜索（见类别码纪要）
 - [ ] 更进一步：单字节 punct 批量块路径（先测命中率）、SoA token 输出、token 簇融合

@@ -197,7 +197,7 @@ pub fn scanInto(
             if (start < pos) continue; // 上一个 token 已越过该假候选
             const tok = tokenAt(src, start, prev);
             pos = tok.end;
-            if (tok.kind == .comment) {
+            if (tok.kind == .comment or tok.kind == .whitespace) {
                 if (options.keep_comments) tokens.appendAssumeCapacity(tok);
                 continue;
             }
@@ -502,6 +502,11 @@ fn scanShebang(src: []const u8) Token {
 /// 避免中文注释碎成一堆单字节 illegal。
 fn scanNonAscii(src: []const u8, start: usize) Token {
     @branchHint(.unlikely);
+    // 跨块的 Unicode whitespace 码点（分类 pass 只修正块内完整的），
+    // 按 trivia 处理，由主循环过滤
+    if (simd.unicodeWhitespaceLen(src, start)) |len| {
+        return .{ .kind = .whitespace, .start = @intCast(start), .end = @intCast(start + len) };
+    }
     const len = @min(utf8Len(src[start]), src.len - start);
     return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(start + len) };
 }
@@ -998,4 +1003,100 @@ test "isKeyword 与关键字表交叉验证" {
     }) |word| {
         try testing.expectEqual(keywords.has(word), isKeyword(word));
     }
+}
+
+test "Unicode whitespace（U+00A0/U+3000/FEFF）是 trivia 不再 illegal" {
+    // U+00A0（块内完整）
+    try expectTokens("a\xc2\xa0b", &.{
+        .{ .identifier, "a" },
+        .{ .identifier, "b" },
+        .{ .eof, "" },
+    });
+    // U+3000 全角空格
+    try expectTokens("x\xe3\x80\x80y", &.{
+        .{ .identifier, "x" },
+        .{ .identifier, "y" },
+        .{ .eof, "" },
+    });
+    // U+FEFF BOM 式空白
+    try expectTokens("\xef\xbb\xbfa=1", &.{
+        .{ .identifier, "a" },
+        .{ .punct, "=" },
+        .{ .number, "1" },
+        .{ .eof, "" },
+    });
+}
+
+test "跨块的 Unicode whitespace 走兜底路径" {
+    // 30 个 ident 字节 + `(`（punct 收尾）+ C2 恰在块尾、A0 在下一块首，
+    // 分类 pass 只修正块内完整码点，这个跨块码点由阶段 2 兜底为 trivia
+    var buf: [64]u8 = undefined;
+    @memset(buf[0..30], 'a');
+    buf[30] = '(';
+    buf[31] = 0xC2;
+    buf[32] = 0xA0;
+    buf[33] = 'b';
+    const src = buf[0..34];
+    try expectTokens(src, &.{
+        .{ .identifier, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+        .{ .punct, "(" },
+        .{ .identifier, "b" },
+        .{ .eof, "" },
+    });
+}
+
+test "keep_comments 模式下 Unicode whitespace token 可见" {
+    const src = "a\xc2\xa0b";
+    const result = try scan(testing.allocator, src, .{ .keep_comments = true });
+    defer testing.allocator.free(result.tokens);
+    try testing.expectEqual(TokenKind.whitespace, result.tokens[1].kind);
+    try testing.expectEqualStrings("\xc2\xa0", result.tokens[1].slice(src));
+}
+
+test "逻辑换行：U+2028/U+2029 与孤立 \\r" {
+    // U+2028 是行终止符
+    {
+        const result = try scan(testing.allocator, "a\xe2\x80\xa8b", .{});
+        defer testing.allocator.free(result.tokens);
+        try testing.expectEqual(@as(usize, 2), result.line_count);
+    }
+    // U+2029 同样
+    {
+        const result = try scan(testing.allocator, "a\xe2\x80\xa9b", .{});
+        defer testing.allocator.free(result.tokens);
+        try testing.expectEqual(@as(usize, 2), result.line_count);
+    }
+    // 孤立 \r 计一次
+    {
+        const result = try scan(testing.allocator, "a\rb", .{});
+        defer testing.allocator.free(result.tokens);
+        try testing.expectEqual(@as(usize, 2), result.line_count);
+    }
+    // CRLF 只计一次
+    {
+        const result = try scan(testing.allocator, "a\r\nb", .{});
+        defer testing.allocator.free(result.tokens);
+        try testing.expectEqual(@as(usize, 2), result.line_count);
+    }
+}
+
+test "OP 连接关系：多字节 punctuator token 流不受影响" {
+    try expectTokens("a%=b;a==b;a<=b;a&&b;a**b;a??b;a|=b", &.{
+        .{ .identifier, "a" }, .{ .punct, "%=" }, .{ .identifier, "b" }, .{ .punct, ";" },
+        .{ .identifier, "a" }, .{ .punct, "==" }, .{ .identifier, "b" }, .{ .punct, ";" },
+        .{ .identifier, "a" }, .{ .punct, "<=" }, .{ .identifier, "b" }, .{ .punct, ";" },
+        .{ .identifier, "a" }, .{ .punct, "&&" }, .{ .identifier, "b" }, .{ .punct, ";" },
+        .{ .identifier, "a" }, .{ .punct, "**" }, .{ .identifier, "b" }, .{ .punct, ";" },
+        .{ .identifier, "a" }, .{ .punct, "??" }, .{ .identifier, "b" }, .{ .punct, ";" },
+        .{ .identifier, "a" }, .{ .punct, "|=" }, .{ .identifier, "b" }, .{ .eof, "" },
+    });
+}
+
+test "中文标识位仍为 illegal（非 whitespace 的非 ASCII 不变）" {
+    try expectTokens("a 中 b", &.{
+        .{ .identifier, "a" },
+        .{ .illegal, "中" },
+        .{ .identifier, "b" },
+        .{ .eof, "" },
+    });
 }

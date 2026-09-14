@@ -28,6 +28,9 @@ pub const TokenKind = enum {
     shebang,
     /// 注释（默认视为 trivia 跳过，`keep_comments` 时输出）
     comment,
+    /// Unicode whitespace 兜底：分类 pass 只修正块内完整的码点，跨块的
+    /// 码点会走到这里，按 trivia 过滤（默认不进 token 流）
+    whitespace,
     /// 无法识别的字节（消费 1 字节，容错不中断）
     illegal,
 };
