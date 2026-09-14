@@ -157,7 +157,7 @@ for (result.tokens) |tok| { ... }
 
 - [x] 吞吐优化：两阶段分类 + 块内 ctz 迭代 + 数据流化（纯函数扫描、寄存器驻留状态）+ 冷路径分离 + 打包 punct（对标 yuku：0.44x → 全面对等 0.96-1.02x，累计 ~2.3x）
 - [ ] 更进一步：单字节 punct 批量块路径（先测命中率）、SoA token 输出、token 簇融合
-- [ ] SIMD 查表分类（NEON `tbl` / x86 `pshufb` 的 256 项全表查，一次产出每字节完整类别码）：与「阶段 2 改用类别码分发」绑定做才划算——单独替换平面合成收益上限 ~1%（分类 pass 仅占 ~5%），且 nibble 十字分解对 punct 集合不可行（simdjson 手法不适用）；注意 Zig `@shuffle` 仅支持 comptime 索引，运行时查表需内联汇编
+- [ ] SIMD 查表分类（NEON `tbl` / x86 `pshufb` 的 256 项全表查，一次产出每字节完整类别码）：与「阶段 2 改用类别码分发」绑定做才划算——实测分类 pass 占总扫描 8-15%（token 密度越高占比越低：typescript.js 8.1%、lib.dom.d.ts 15.2%；此前 ~5% 系纸面估算，已在 bench 中加了 cls 常设计时），单独替换平面合成的收益上限约 3-6%；nibble 十字分解对 punct 集合不可行（simdjson 手法不适用）；注意 Zig `@shuffle` 仅支持 comptime 索引，运行时查表需内联汇编。另：分类 pass 自身吞吐已达 7.2-7.8 GB/s（simdjson 量级），瓶颈全在阶段 2 的每 token 框架成本
 - [x] 宽度实验：block_size=16 在 M2 上 -9%（块循环开销翻倍，高于 NEON 单指令收益）被否决，32 定稿；64（AVX-512）待有对应硬件再测
 - [ ] 标量 baseline + 各 SIMD 化子阶段单独 A/B 计量（把"每个环节拿到多少"量化出来）
 - [ ] unicode 标识符与 `\u` 转义
