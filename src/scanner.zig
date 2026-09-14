@@ -429,27 +429,59 @@ fn scanTemplate(src: []const u8, start: usize) Token {
 fn scanTemplateSubstitution(src: []const u8, from: usize) usize {
     var depth: usize = 1;
     var i = from;
-    while (i < src.len and depth > 0) {
+    while (i < src.len) {
+        if (src.len - i >= simd.block_size) {
+            const base = i;
+            var m = simd.substitutionStopMask(simd.load(src, i));
+            while (m != 0) {
+                const off = @as(usize, @ctz(m));
+                m &= m - 1;
+                const hit = base + off;
+                if (hit < i) continue; // 已被跳过的区间覆盖
+                switch (src[hit]) {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if (depth == 0) return hit + 1;
+                    },
+                    '\'', '"' => i = skipQuoted(src, hit),
+                    '`' => i = scanTemplate(src, hit).end,
+                    '/' => {
+                        if (hit + 1 < src.len and src[hit + 1] == '/') {
+                            i = lineEnd(src, hit);
+                        } else if (hit + 1 < src.len and src[hit + 1] == '*') {
+                            i = simd.findBlockCommentEnd(src, hit + 2) orelse src.len;
+                        } else {
+                            continue; // 单独的 / 不是注释
+                        }
+                    },
+                    else => unreachable,
+                }
+                // skip 类推进了 i；越过本块则重起 SIMD 扫描
+                if (i >= base + simd.block_size) break;
+            }
+            if (i < base + simd.block_size) i = base + simd.block_size;
+            continue;
+        }
+        // 标量尾部（不足一块）
         const c = src[i];
-        switch (c) {
-            '{' => {
-                depth += 1;
-                i += 1;
-            },
-            '}' => {
-                depth -= 1;
-                i += 1;
-            },
-            '\'', '"' => i = skipQuoted(src, i),
-            '`' => i = scanTemplate(src, i).end,
-            '/' => {
-                if (i + 1 < src.len and src[i + 1] == '/') {
-                    i = lineEnd(src, i);
-                } else if (i + 1 < src.len and src[i + 1] == '*') {
-                    i = simd.findBlockCommentEnd(src, i + 2) orelse src.len;
-                } else i += 1;
-            },
-            else => i += 1,
+        if (c == '{') {
+            depth += 1;
+            i += 1;
+        } else if (c == '}') {
+            depth -= 1;
+            i += 1;
+            if (depth == 0) return i;
+        } else if (c == '\'' or c == '"') {
+            i = skipQuoted(src, i);
+        } else if (c == '`') {
+            i = scanTemplate(src, i).end;
+        } else if (c == '/' and i + 1 < src.len and src[i + 1] == '/') {
+            i = lineEnd(src, i);
+        } else if (c == '/' and i + 1 < src.len and src[i + 1] == '*') {
+            i = simd.findBlockCommentEnd(src, i + 2) orelse src.len;
+        } else {
+            i += 1;
         }
     }
     return i;
@@ -790,8 +822,22 @@ fn skipQuoted(src: []const u8, quote_at: usize) usize {
 }
 
 fn lineEnd(src: []const u8, from: usize) usize {
+    // SIMD 找行尾（行注释/shebang/非法恢复路径）。此前是标量逐字节循环，
+    // 行注释密集语料上的明显遗漏。
     var i = from;
-    while (i < src.len and src[i] != '\n') i += 1;
+    while (i < src.len) {
+        if (src.len - i >= simd.block_size) {
+            const chunk = simd.load(src, i);
+            const nl = simd.newlineMask(chunk);
+            if (nl == 0) {
+                i += simd.block_size;
+                continue;
+            }
+            return i + @as(usize, @ctz(nl));
+        }
+        if (src[i] == '\n') return i;
+        i += 1;
+    }
     return i;
 }
 

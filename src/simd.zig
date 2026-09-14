@@ -66,6 +66,18 @@ pub inline fn stringStopMask(chunk: Chunk, quote: u8) Mask {
     return @bitCast(q | esc | nl | cr);
 }
 
+/// 模板子表达式平衡扫描的关注字符：{ } ' " ` /
+/// （花括号计深度；引号进 skipQuoted；反引号递归模板；斜杠判注释）
+pub inline fn substitutionStopMask(chunk: Chunk) Mask {
+    const open = chunk == splat('{');
+    const close = chunk == splat('}');
+    const sq = chunk == splat('\'');
+    const dq = chunk == splat('"');
+    const bt = chunk == splat('`');
+    const slash = chunk == splat('/');
+    return @bitCast(open | close | sq | dq | bt | slash);
+}
+
 /// 模板串里的关注字符：反引号、反斜杠（转义）、'$'（可能的 `${`）。
 /// 模板允许跨行，所以不含换行；行数由调用方对最终区间统一 popcount。
 pub inline fn templateStopMask(chunk: Chunk) Mask {
@@ -192,8 +204,12 @@ inline fn unicodeWsLeadMask(chunk: Chunk) Mask {
 
 /// 本块开头是否悬挂着跨块 Unicode whitespace 码点的尾部：
 /// 返回该码点在本块内的字节数（1 或 2），0 表示没有。
-/// prev2/prev1 是前一块的最后两个字节。
-fn danglingUnicodeWs(src: []const u8, i: usize, prev2: u8, prev1: u8) usize {
+/// 直接读块首前两字节（i >= 2 恒成立——第一块 i=0 由调用方排除），
+/// 免去跨块 prev 状态机的每块两次载入。
+pub fn danglingUnicodeWs(src: []const u8, i: usize) usize {
+    if (i < 2) return 0;
+    const prev1 = src[i - 1];
+    const prev2 = src[i - 2];
     const s = src;
     if (i >= s.len) return 0;
     // prev1 是码点首字节（2 字节码点差 1 字节；3 字节码点差 2 字节）
@@ -217,13 +233,15 @@ fn danglingUnicodeWs(src: []const u8, i: usize, prev2: u8, prev1: u8) usize {
         else => {},
     }
     // prev2 是首字节、prev1 是第二字节，本块首字节收尾
-    if (prev2 == 0xE1 and prev1 == 0x9A and s[i] == 0x80) return 1;
+    // （E2 80 分支曾在一次清理中被误删，由随机交叉验证抓回——
+    // 它覆盖 U+2000..U+200A/U+2028/U+2029/U+202F 的跨块形态）
     if (prev2 == 0xE2 and prev1 == 0x80) {
         return switch (s[i]) {
             0x80...0x8A, 0xA8, 0xA9, 0xAF => 1,
             else => 0,
         };
     }
+    if (prev2 == 0xE1 and prev1 == 0x9A and s[i] == 0x80) return 1;
     if (prev2 == 0xE2 and prev1 == 0x81 and s[i] == 0x9F) return 1;
     if (prev2 == 0xE3 and prev1 == 0x80 and s[i] == 0x80) return 1;
     if (prev2 == 0xEF and prev1 == 0xBB and s[i] == 0xBF) return 1;
@@ -256,9 +274,6 @@ pub fn classifyTokenStarts(
     var carry_lf: u32 = 0;
     // 前块末字节是否 \r：若是且本块首是 \n，前块尾 \r 的乐观换行标记要回改
     var prev_was_cr = false;
-    // 跨块 U+2028/U+2029：保留前两字节
-    var prev2: u8 = 0;
-    var prev1: u8 = 0;
 
     for (masks, 0..) |*out, bi| {
         const i = bi * block_size;
@@ -285,9 +300,9 @@ pub fn classifyTokenStarts(
         // 会被消费后的 pos 越过，无需排除）。
         // 纯 ASCII 块（且前块末尾无悬挂）整体跳过——corpus 大多是这种。
         var brk_marked: u32 = 0;
-        if (high != 0 or prev2 >= 0x80 or prev1 >= 0x80) {
+        if (high != 0 or (i >= 1 and src[i - 1] >= 0x80) or (i >= 2 and src[i - 2] >= 0x80)) {
             // 跨块悬挂：lead 在前块、末字节在本块开头，清其 id_after
-            const dangle = danglingUnicodeWs(src, i, prev2, prev1);
+            const dangle = danglingUnicodeWs(src, i);
             if (dangle != 0) {
                 id_after &= ~(@as(u32, 1) << @intCast(dangle - 1));
                 // 悬挂的是 U+2028/29（末字节 A8/A9 精确对应）则 break 位
@@ -338,28 +353,24 @@ pub fn classifyTokenStarts(
         carry_lf = lf >> (block_size - 1);
         prev_was_cr = (cr & valid & (@as(u32, 1) << (block_size - 1))) != 0;
 
-        // U+2028/U+2029：块内完整（E2 80 A8/A9），位标记在末字节；
-        // 纯 ASCII 块跳过三个 eq
-        if (high != 0) {
+        // U+2028/U+2029：块内完整（E2 80 A8/A9），位标记在末字节。
+        // 中文密集块（E4-E9）大多无 E2：先用一个 eq 探 E2，命中才做
+        // m80/a8a9 的两个 eq——cn-dense 类语料省两条
+        if (high != 0 and (eqMask(chunk, 0xE2) & valid) != 0) {
             const e2 = eqMask(chunk, 0xE2);
             const m80 = eqMask(chunk, 0x80);
             const a8a9 = eqMask(chunk, 0xA8) | eqMask(chunk, 0xA9);
             brk |= ((e2 << 2) & (m80 << 1) & a8a9) & valid;
         }
+        // 跨块 U+2028/29 收尾（E2 80 在前块尾、A8/A9 在本块首）
+        if (i >= 2 and src[i - 2] == 0xE2 and src[i - 1] == 0x80 and rem >= 1 and
+            (src[i] == 0xA8 or src[i] == 0xA9))
+        {
+            brk |= 1;
+        }
         brk |= brk_marked;
         line_breaks[bi] = brk;
         newlines += @as(usize, @popCount(brk));
-        // 保留本块末两字节供跨块码点判定（注意用本块长度 blen，rem 是到
-        // 文件尾的距离，非末块会取到文件末尾的字节——曾因此漏判跨块码点）。
-        // 纯 ASCII 块直接置 0：dangle 只关心 prev >= 0x80，等价且免两次 load。
-        if (high != 0) {
-            const blen = @min(rem, block_size);
-            prev2 = if (blen >= 2) src[i + blen - 2] else 0;
-            prev1 = if (blen >= 1) src[i + blen - 1] else 0;
-        } else {
-            prev2 = 0;
-            prev1 = 0;
-        }
     }
 
     return .{ .starts = .{ .masks = masks }, .line_breaks = line_breaks, .newlines = newlines };
@@ -710,6 +721,10 @@ test "classifyTokenStarts 与标量版交叉验证" {
         "let \u{53d8}\u{91cf} = 1;",
         "\u{00a0}a\u{3000}b\u{feff}",
         "a\u{4e2d}b \u{2603} c",
+        // 跨块 U+2003/U+2028（E2 80 恰在块尾、末字节在块首）——防回归
+        "a" ** 30 ++ "\u{2003}\u{00a0}x",
+        "b" ** 31 ++ "\u{2028}y",
+        "c" ** 30 ++ "\u{2029}\u{2000}z",
         "x\\y", // 反斜杠
         "// comment\n/* block */ a",
     };
@@ -763,7 +778,17 @@ test "classifyTokenStarts 与标量版随机交叉验证" {
             }
             return e;
         };
-        try testing.expectEqualSlices(u32, scalar_r.line_breaks, simd_r.line_breaks);
+        testing.expectEqualSlices(u32, scalar_r.line_breaks, simd_r.line_breaks) catch |e| {
+            for (scalar_r.line_breaks, simd_r.line_breaks, 0..) |sb, vb, b| {
+                if (sb != vb) {
+                    const d = sb ^ vb;
+                    const off = b * block_size + @ctz(d);
+                    std.debug.print("line_breaks diff @block {d} bit {d} (offset {d}): scalar={b:0>8} simd={b:0>8}\nbytes: {any}\n", .{ b, @ctz(d), off, sb, vb, src[@min(off, 6)..@min(off + 10, src.len)] });
+                    break;
+                }
+            }
+            return e;
+        };
         try testing.expectEqual(scalar_r.newlines, simd_r.newlines);
     }
 }
