@@ -64,12 +64,13 @@ M2 / ReleaseFast / 20 轮取最优：
 
 | 文件 | my-scanner | yuku | mine/yuku |
 | --- | --- | --- | --- |
-| typescript.js | 0.41 GB/s · 56.6 Mtok/s | 0.57 GB/s · 78.3 Mtok/s | 0.72x |
-| checker.ts | 0.47 GB/s · 52.8 Mtok/s | 0.65 GB/s · 72.7 Mtok/s | 0.73x |
-| react.js | 0.71 GB/s · 83.2 Mtok/s | 0.91 GB/s · 105.8 Mtok/s | 0.79x |
-| lib.dom.d.ts | 1.05 GB/s · 65.3 Mtok/s | 1.04 GB/s · 65.1 Mtok/s | 1.00x |
+| typescript.js | 0.55 GB/s · 75.8 Mtok/s | 0.57 GB/s · 78.0 Mtok/s | 0.97x |
+| checker.ts | 0.61 GB/s · 68.6 Mtok/s | 0.63 GB/s · 71.1 Mtok/s | 0.97x |
+| react.js | ~0.9 GB/s · ~105 Mtok/s | ~0.9 GB/s · ~103 Mtok/s | ≈1.0x |
+| lib.dom.d.ts | 1.04 GB/s · 64.7 Mtok/s | 1.01 GB/s · 63.2 Mtok/s | 1.02x |
 
-（两阶段重构前 my-scanner 为 0.25-0.59 GB/s，本次架构变更带来 1.56-2.03x 提升。）
+（演进：单阶段 0.25-0.59 → 两阶段分类 0.41-1.05 → 块内迭代 + 标量快路径 +
+关键字两级判别 0.55-1.07 GB/s，累计约 2.2x，现已追平 yuku。）
 
 ## 正确性验证
 
@@ -152,7 +153,8 @@ for (result.tokens) |tok| { ... }
 
 ## Roadmap
 
-- [ ] 吞吐优化：token 批量产出、关键字识别去 hash 化、错误路径冷热分离（对标 yuku：当前 0.72-1.00x，两阶段重构已带来 1.56-2.03x）
+- [x] 吞吐优化：两阶段分类 + 块内 ctz 迭代 + 标量快路径 + 关键字两级判别（对标 yuku：0.72-1.00x → 0.97-1.02x，已追平）
+- [ ] 更进一步：profile 显示每 token 框架开销（分发 + emit + append）仍占大头，token 批量构造是下一个方向
 - [ ] 宽度实验：block_size = 16 / 32 / 64（AVX-512）横评
 - [ ] 标量 baseline + 各 SIMD 化子阶段单独 A/B 计量（把"每个环节拿到多少"量化出来）
 - [ ] unicode 标识符与 `\u` 转义

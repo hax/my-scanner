@@ -38,13 +38,9 @@ inline fn splat(c: u8) Chunk {
 /// JS 空白 + 行终止符集合：' ' \t \n \r \v \f。
 /// 多字节空白（U+00A0 等）由 scanner 层处理（见 TODO）。
 pub inline fn whitespaceMask(chunk: Chunk) Mask {
-    const m1 = chunk == splat(' ');
-    const m2 = chunk == splat('\t');
-    const m3 = chunk == splat('\n');
-    const m4 = chunk == splat('\r');
-    const m5 = chunk == splat(0x0b); // \v
-    const m6 = chunk == splat(0x0c); // \f
-    return @bitCast(m1 | m2 | m3 | m4 | m5 | m6);
+    const space = chunk == splat(' ');
+    const control = (chunk >= splat('\t')) & (chunk <= splat('\r'));
+    return @bitCast(space | control);
 }
 
 pub inline fn newlineMask(chunk: Chunk) Mask {
@@ -219,8 +215,8 @@ inline fn classPlanes(chunk: Chunk) struct {
     const under = chunk == splat('_');
     const dollar = chunk == splat('$');
     return .{
-        .ws = (chunk == splat(' ')) | (chunk == splat('\t')) | (chunk == splat('\n')) |
-            (chunk == splat('\r')) | (chunk == splat(0x0b)) | (chunk == splat(0x0c)),
+        .ws = (chunk == splat(' ')) |
+            ((chunk >= splat('\t')) & (chunk <= splat('\r'))),
         .ip = lower | upper | digit | under | dollar,
         .istart = lower | upper | under | dollar,
         .digit = digit,

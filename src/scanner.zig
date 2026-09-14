@@ -28,6 +28,9 @@ pub const Result = struct {
 /// 外加 let/static/async/of 这几个上下文关键字（完全合法的标识符，
 /// 归入 keyword 只是给上层的提示，文本仍是判别依据）。
 /// TS 类型层关键字（interface/type/namespace 等）不在列，留给上层。
+///
+/// 判别用 isKeyword（长度 + 首字符两级分发，无 hash）；本表仅作
+/// 交叉验证与文档。
 const keywords = std.StaticStringMap(void).initComptime(.{
     .{ "async", {} },
     .{ "await", {} },
@@ -76,6 +79,77 @@ const keywords = std.StaticStringMap(void).initComptime(.{
     .{ "yield", {} },
 });
 
+/// 关键字判别的热路径：长度先排除（2..11），再按首字符分发到
+/// 少量 memcmp 候选。与 keywords 表的等价性由测试交叉验证。
+fn isKeyword(text: []const u8) bool {
+    const eql = std.mem.eql;
+    if (text.len < 2 or text.len > 10) return false;
+    return switch (text.len) {
+        2 => switch (text[0]) {
+            'd' => eql(u8, text, "do"),
+            'i' => eql(u8, text, "if") or eql(u8, text, "in"),
+            'o' => eql(u8, text, "of"),
+            else => false,
+        },
+        3 => switch (text[0]) {
+            'f' => eql(u8, text, "for"),
+            'l' => eql(u8, text, "let"),
+            'n' => eql(u8, text, "new"),
+            't' => eql(u8, text, "try"),
+            'v' => eql(u8, text, "var"),
+            else => false,
+        },
+        4 => switch (text[0]) {
+            'c' => eql(u8, text, "case"),
+            'e' => eql(u8, text, "else") or eql(u8, text, "enum"),
+            't' => eql(u8, text, "this"),
+            'v' => eql(u8, text, "void"),
+            'w' => eql(u8, text, "with"),
+            else => false,
+        },
+        5 => switch (text[0]) {
+            'a' => eql(u8, text, "async") or eql(u8, text, "await"),
+            'b' => eql(u8, text, "break"),
+            'c' => eql(u8, text, "catch") or eql(u8, text, "class") or eql(u8, text, "const"),
+            's' => eql(u8, text, "super"),
+            't' => eql(u8, text, "throw"),
+            'w' => eql(u8, text, "while"),
+            'y' => eql(u8, text, "yield"),
+            else => false,
+        },
+        6 => switch (text[0]) {
+            'd' => eql(u8, text, "delete"),
+            'e' => eql(u8, text, "export"),
+            'i' => eql(u8, text, "import"),
+            'p' => eql(u8, text, "public"),
+            'r' => eql(u8, text, "return"),
+            's' => eql(u8, text, "static") or eql(u8, text, "switch"),
+            't' => eql(u8, text, "typeof"),
+            else => false,
+        },
+        7 => switch (text[0]) {
+            'd' => eql(u8, text, "default"),
+            'e' => eql(u8, text, "extends"),
+            'f' => eql(u8, text, "finally"),
+            'p' => eql(u8, text, "package") or eql(u8, text, "private"),
+            else => false,
+        },
+        8 => switch (text[0]) {
+            'c' => eql(u8, text, "continue"),
+            'd' => eql(u8, text, "debugger"),
+            'f' => eql(u8, text, "function"),
+            else => false,
+        },
+        9 => switch (text[0]) {
+            'i' => eql(u8, text, "interface"),
+            'p' => eql(u8, text, "protected"),
+            else => false,
+        },
+        10 => eql(u8, text, "implements") or eql(u8, text, "instanceof"),
+        else => false,
+    };
+}
+
 /// 扫描 src，返回 token 序列（以 eof 收尾）。
 pub fn scan(allocator: std.mem.Allocator, src: []const u8, options: Options) !Result {
     std.debug.assert(src.len <= std.math.maxInt(u32));
@@ -100,14 +174,28 @@ pub fn scanInto(
     var cls = try simd.classifyTokenStarts(allocator, src);
     defer cls.starts.deinit(allocator);
 
-    // 阶段 2：从候选点贪心消费，token 区间内的假起点被自然越过
     var s = Scanner{ .src = src, .options = options, .starts = &cls.starts };
-    while (true) {
-        const tok = s.next();
-        if (tok.kind == .comment and !options.keep_comments) continue;
-        try tokens.append(allocator, tok);
-        if (tok.kind == .eof) break;
+
+    // 阶段 2：按块迭代候选位，贪心消费。token 区间内的假起点
+    // 用 `start < s.pos` 一并越过。
+    if (src.len >= 2 and src[0] == '#' and src[1] == '!') {
+        try tokens.append(allocator, s.scanShebang());
     }
+    for (cls.starts.masks, 0..) |mask, bi| {
+        // 一块最多 32 个候选 → 每 token 的容量检查摊薄为每块一次
+        try tokens.ensureUnusedCapacity(allocator, simd.block_size);
+        var m = mask;
+        while (m != 0) {
+            const start = bi * simd.block_size + @as(usize, @ctz(m));
+            m &= m - 1;
+            if (start < s.pos) continue; // 上一个 token 已越过该假候选
+            s.pos = start;
+            const tok = s.tokenAt(start);
+            if (tok.kind == .comment and !options.keep_comments) continue;
+            tokens.appendAssumeCapacity(tok);
+        }
+    }
+    try tokens.append(allocator, s.emit(src.len, .eof));
     return cls.newlines + 1;
 }
 
@@ -120,20 +208,9 @@ const Scanner = struct {
     /// 上一个非注释 token，用于判断 `/` 是正则还是除号
     prev: ?Token = null,
 
-    fn next(s: *Scanner) Token {
+    /// 在候选起点处分发贪心消费（由 scanInto 的块内迭代驱动）。
+    fn tokenAt(s: *Scanner, start: usize) Token {
         const src = s.src;
-
-        // shebang 只允许出现在整个文件的最前面
-        if (s.pos == 0 and src.len >= 2 and src[0] == '#' and src[1] == '!') {
-            return s.scanShebang();
-        }
-
-        const start = s.starts.nextAt(s.pos) orelse {
-            s.pos = src.len;
-            return s.emit(src.len, .eof);
-        };
-        s.pos = start;
-
         const c = src[start];
         return switch (c) {
             '"', '\'' => s.scanString(c),
@@ -279,29 +356,34 @@ const Scanner = struct {
         return i;
     }
 
-    /// 标识符/关键字。SIMD 定位结尾：`@ctz(~identPartMask)` 直接给出长度。
+    /// 标识符/关键字。快路径标量扫前 8 字节（多数标识符不长），
+    /// 更长才 SIMD 续扫：`@ctz(~identPartMask)` 直接给出结尾偏移。
     fn scanIdentifier(s: *Scanner) Token {
         const start = s.pos;
         const src = s.src;
-        var i = start + 1; // 首字符合法性由 next() 的分发保证
-        while (i < src.len) {
-            if (src.len - i >= simd.block_size) {
-                const chunk = simd.load(src, i);
-                const inv = ~simd.identPartMask(chunk);
-                if (inv == 0) {
-                    i += simd.block_size;
-                    continue;
+        var i = start + 1; // 首字符合法性由 tokenAt 的分发保证
+        const fast_end = @min(i + 8, src.len);
+        while (i < fast_end and simd.isIdentPart(src[i])) i += 1;
+        if (i == fast_end and i < src.len) {
+            while (i < src.len) {
+                if (src.len - i >= simd.block_size) {
+                    const chunk = simd.load(src, i);
+                    const inv = ~simd.identPartMask(chunk);
+                    if (inv == 0) {
+                        i += simd.block_size;
+                        continue;
+                    }
+                    i += @as(usize, @ctz(inv));
+                    break;
                 }
-                i += @as(usize, @ctz(inv));
-                break;
+                if (simd.isIdentPart(src[i])) {
+                    i += 1;
+                } else break;
             }
-            if (simd.isIdentPart(src[i])) {
-                i += 1;
-            } else break;
         }
         s.pos = i;
         const kind: TokenKind =
-            if (keywords.has(src[start..i])) .keyword else .identifier;
+            if (isKeyword(src[start..i])) .keyword else .identifier;
         return s.emit(start, kind);
     }
 
@@ -784,4 +866,44 @@ test "非法输入容错（不中断）" {
         .{ .identifier, "cd" },
         .{ .eof, "" },
     });
+}
+
+test "isKeyword 与关键字表交叉验证" {
+    // 全表逐项验证
+    // StaticStringMap 的 KV 无法直接枚举，改用已知的完整清单
+    const all = [_][]const u8{
+        "async",      "await",   "break",    "case",       "catch",
+        "class",      "const",   "continue", "debugger",   "default",
+        "delete",     "do",      "else",     "enum",       "export",
+        "extends",    "finally", "for",      "function",   "if",
+        "implements", "import",  "in",       "instanceof", "interface",
+        "let",        "new",     "of",       "package",    "private",
+        "protected",  "public",  "return",   "static",     "super",
+        "switch",     "this",    "throw",    "try",        "typeof",
+        "var",        "void",    "while",    "with",       "yield",
+    };
+    for (all) |kw| {
+        try testing.expect(keywords.has(kw));
+        try testing.expect(isKeyword(kw));
+    }
+    // 非关键字：长度变体与单字符替换
+    for (all) |kw| {
+        var buf: [16]u8 = undefined;
+        @memcpy(buf[0..kw.len], kw);
+        buf[kw.len - 1] ^= 1; // 改尾字符
+        try testing.expect(!isKeyword(buf[0..kw.len]));
+        if (kw.len < 16) {
+            @memcpy(buf[0..kw.len], kw);
+            buf[kw.len] = 'x'; // 加长
+            try testing.expect(!isKeyword(buf[0 .. kw.len + 1]));
+        }
+    }
+    // 常见标识符与边界
+    for ([_][]const u8{
+        "a",      "x1",  "foo", "barBaz",      "undefined",  "NaN",  "globalThis",
+        "getter", "ofx", "iff", "doo",         "instanceOf", "letx", "_let",
+        "$if",    "",    "0",   "constructor",
+    }) |word| {
+        try testing.expectEqual(keywords.has(word), isKeyword(word));
+    }
 }
