@@ -296,9 +296,9 @@ test "whitespaceMask" {
     var buf: [block_size]u8 = @splat('x');
     buf[1] = ' ';
     buf[5] = '\t';
-    buf[31] = '\n';
+    buf[block_size - 1] = '\n';
     const m = whitespaceMask(buf);
-    try testing.expectEqual(@as(Mask, (1 << 1) | (1 << 5) | (1 << 31)), m);
+    try testing.expectEqual(@as(Mask, (1 << 1) | (1 << 5) | (1 << (block_size - 1))), m);
 }
 
 test "identPartMask" {

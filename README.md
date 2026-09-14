@@ -60,17 +60,19 @@ N 轮取最优。yuku 纯 scanner 与 tsc 同款把正则/模板续扫推迟给 
 bench 里按 yuku parser 的方式调 `reScanAsRegex` / `reScanTemplateContinuation`
 对齐（正则决策与 my-scanner 完全一致，模板用花括号平衡栈跟踪）。
 
-M2 / ReleaseFast / 20 轮取最优：
+M2 / ReleaseFast / 30 轮取最优：
 
 | 文件 | my-scanner | yuku | mine/yuku |
 | --- | --- | --- | --- |
-| typescript.js | 0.55 GB/s · 75.8 Mtok/s | 0.57 GB/s · 78.0 Mtok/s | 0.97x |
-| checker.ts | 0.61 GB/s · 68.6 Mtok/s | 0.63 GB/s · 71.1 Mtok/s | 0.97x |
-| react.js | ~0.9 GB/s · ~105 Mtok/s | ~0.9 GB/s · ~103 Mtok/s | ≈1.0x |
-| lib.dom.d.ts | 1.04 GB/s · 64.7 Mtok/s | 1.01 GB/s · 63.2 Mtok/s | 1.02x |
+| typescript.js | 0.59 GB/s · 80.1 Mtok/s | 0.58 GB/s · 80.0 Mtok/s | 1.00x |
+| checker.ts | 0.65 GB/s · 73.0 Mtok/s | 0.67 GB/s · 76.0 Mtok/s | 0.96x |
+| react.js | ~0.9 GB/s · ~105 Mtok/s | ~0.85 GB/s · ~99 Mtok/s | ≈1.0x |
+| lib.dom.d.ts | 1.13 GB/s · 70.2 Mtok/s | 1.10 GB/s · 68.8 Mtok/s | 1.02x |
 
-（演进：单阶段 0.25-0.59 → 两阶段分类 0.41-1.05 → 块内迭代 + 标量快路径 +
-关键字两级判别 0.55-1.07 GB/s，累计约 2.2x，现已追平 yuku。）
+（演进：单阶段 0.25-0.59 → 两阶段分类 0.41-1.05 → 块内迭代等微优化 0.55-1.07 →
+数据流化 + 冷路径分离 + 打包 punct 0.59-1.13 GB/s，累计约 2.3x，与 yuku 全面对等。
+被数据否决的尝试：阶段融合（classify+consume 逐块流水，-3~12%，两阶段分离的
+缓存行为更好）与 block_size=16（-9%，块循环开销翻倍高于 NEON 单指令收益）。）
 
 ## 正确性验证
 
@@ -153,8 +155,8 @@ for (result.tokens) |tok| { ... }
 
 ## Roadmap
 
-- [x] 吞吐优化：两阶段分类 + 块内 ctz 迭代 + 标量快路径 + 关键字两级判别（对标 yuku：0.72-1.00x → 0.97-1.02x，已追平）
-- [ ] 更进一步：profile 显示每 token 框架开销（分发 + emit + append）仍占大头，token 批量构造是下一个方向
+- [x] 吞吐优化：两阶段分类 + 块内 ctz 迭代 + 数据流化（纯函数扫描、寄存器驻留状态）+ 冷路径分离 + 打包 punct（对标 yuku：0.44x → 全面对等 0.96-1.02x，累计 ~2.3x）
+- [ ] 更进一步：单字节 punct 批量块路径（先测命中率）、SoA token 输出、token 簇融合
 - [ ] 宽度实验：block_size = 16 / 32 / 64（AVX-512）横评
 - [ ] 标量 baseline + 各 SIMD 化子阶段单独 A/B 计量（把"每个环节拿到多少"量化出来）
 - [ ] unicode 标识符与 `\u` 转义
