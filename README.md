@@ -158,13 +158,15 @@ for (result.tokens) |tok| { ... }
 ## Roadmap
 
 - [x] 吞吐优化：两阶段分类 + 块内 ctz 迭代 + 数据流化 + 冷路径分离 + 打包 punct + 类别码分发（comptime 256 项 dispatch 表 + `{}();,` 单字节 punct 零调用快路径；对标 yuku：0.44x → 1.16-1.40x，累计 ~3x）
+- [ ] **boundary v2：四位连接关系粗筛**（[设计文档](docs/simd-token-boundary-prefilter.md)）：candidate 公式升级为 `afterMask(prev) & beforeMask(next)` 的 impossible 关系（ID/OP/ESC/WS），新增 OP/ESC 平面与 lineBreakPlane（\r\n、U+2028/2029 逻辑换行）。主要收益是正确性与 Unicode 地基（非 ASCII whitespace 不再误判、中文码点假候选 3→1 个/字），速度 <2%。OP 集合用 docs/op_cont_audit.js 审计过的 `%^&|*/<=?` × `=&|*?`；落地会**有意改变行为**，tsc 差分口径同步更新。实现层手法见 [类别码与 SIMD 查表纪要](docs/class-code-and-simd-lookup.md)
+- [ ] whitespace 平面改「tbl/pshufb 查表+验证」（simdjson 现行手法，2 条指令替代 11 条，预估总吞吐 3-5%；JS 空白 6 字符低 nibble 互不冲突恰好适用；需 arm64/x86 各一小段内联汇编）
+- [ ] SIMD 查表分类第二阶段：四位关系需要 ≥6 个位平面，全表 LUT / packed tag 的翻正条件在此点亮——矩形约束框架 + GF(2) 变换搜索（见类别码纪要）
 - [ ] 更进一步：单字节 punct 批量块路径（先测命中率）、SoA token 输出、token 簇融合
-- [ ] SIMD 查表分类（NEON `tbl` / x86 `pshufb` 的 256 项全表查，一次产出每字节完整类别码）：与「阶段 2 改用类别码分发」绑定做才划算——实测分类 pass 占总扫描 8-15%（token 密度越高占比越低；类别码分发落地后阶段 2 变快，占比升至 9-18%，bench 的 cls 行常设输出），单独替换平面合成的收益上限约 3-6%；nibble 十字分解对 punct 集合不可行（simdjson 手法不适用）；注意 Zig `@shuffle` 仅支持 comptime 索引，运行时查表需内联汇编。另：分类 pass 自身吞吐已达 7.2-7.8 GB/s（simdjson 量级），瓶颈全在阶段 2 的每 token 框架成本
 - [x] 宽度实验：block_size=16 在 M2 上 -9%（块循环开销翻倍，高于 NEON 单指令收益）被否决，32 定稿；64（AVX-512）待有对应硬件再测
 - [ ] 标量 baseline + 各 SIMD 化子阶段单独 A/B 计量（把"每个环节拿到多少"量化出来）
-- [ ] unicode 标识符与 `\u` 转义
+- [ ] unicode 标识符与 `\u` 转义（boundary v2 是其地基：非 ASCII ID-like 快路径 + 19 个 ECMAScript whitespace 修正，见设计文档）
 - [ ] 模板子表达式递归调 scanner 本体
-- [ ] token 行列号（SIMD 行计数已就绪）
+- [ ] token 行列号（lineBreakPlane 就绪后按逻辑换行计）
 - [ ] 对齐 Test262 / 真实大型 JS 代码库的模糊正确性验证
 - [ ] 与 esbuild / swc / oxc 的 scanner 吞吐对比
 
