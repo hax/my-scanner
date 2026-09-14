@@ -173,7 +173,10 @@ for (result.tokens) |tok| { ... }
 - [ ] SIMD 查表分类第二阶段（packed tag / 全表 LUT）：前提已变化——boundary v2 实测砍掉 OP/ESC 后只剩 ID 平面，多平面需求暂不存在；若将来做「candidate 免验证」激进阶段 2（OP/ESC 回归），此项随之复活（矩形约束 + GF(2) 变换搜索，见类别码纪要）
 - [x] 单字节 punct 批量块路径：**否决**——实测纯 punct_single 块仅 4.3-7.4%，run≥2 覆盖的 token 检测成本与省下的 dispatch 查询相抵；现有 dispatch 表的单 token 快路径已覆盖该场景
 - [x] 模板子表达式：平衡扫描已感知嵌套模板（递归 scanTemplate）、行/块注释与字符串；正则字面量里的 `}` 仍为已知限制
-- [ ] **注释密集语料的差距定位**：yuku-main 在 lib.dom.d.ts 上反超 24%（96.5 vs 73.5 Mtok/s），其增益主要来自块注释两段式向量化（标量首行 + @Vector(16) 双 mask 搜 `*/`）；我们的块注释同为 SIMD 且方案指令数更少，差距从哪来需先 profile 再动——候选怀疑点：JSDoc 首行的处理路径、块注释区间的重复扫描、候选迭代在低密度语料下的开销占比
+- [x] **注释密集语料的差距定位与部分修复**（2026-09-15）：
+  - ✅ **整块跳过**：块注释/长 token 覆盖的整块直接 continue，不再逐假候选迭代（JSDoc 内 `*` `/` 全是假候选）——lib.dom.d.ts 73.5 → ~82 Mtok/s（+12%），与 yuku-main 差距 0.76x → **0.86x**
+  - ❌ 块内 ws 判定内联、`|0x20` fold 压缩 identPartMask：均无实测收益，回退（教训：profile 的 ReleaseFast 行号归因不可靠——曾被误导追查 45 个码点的「热点」；指令数减少不必然转化为吞吐）
+  - 剩余 -14% 为**结构性**：classify pass 在注释密集、低 token 密度语料上占总时间 26%（1.9MB 文件 0.38ms），单阶段的 yuku 没有这一趟；两阶段架构的语料谱系 trade-off——minified 端 +6~9%，注释密集端 -14%。进一步收敛需架构级改动（阶段融合已实测否决）或阶段 2 批量 token 化
 - [ ] 更进一步：SoA token 输出、token 簇融合
 - [x] 宽度实验：block_size=16 在 M2 上 -9%（块循环开销翻倍，高于 NEON 单指令收益）被否决，32 定稿；64（AVX-512）待有对应硬件再测
 - [x] 标量 baseline + A/B 计量：`classifyTokenStartsScalar` 与 SIMD 版经交叉验证（固定用例 + 200 轮随机字节流逐位一致，顺带抓出 SIMD 版三个跨块边界 bug：ws lead 候选性、跨块 CRLF 回改、跨块 U+2028 变体）；bench 的 `cls-s` 行常设输出。**SIMD 分类 pass = 标量的 8.8-11.9x**（4.9 vs ~0.45 GB/s）

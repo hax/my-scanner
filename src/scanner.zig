@@ -249,6 +249,10 @@ fn consume(
         try tokens.append(allocator, t);
     }
     for (starts.masks, 0..) |mask, bi| {
+        // 整块已被上一个 token 覆盖（如长块注释/长字符串的后续块）：
+        // 直接跳过整块，避免逐假候选迭代（lib.dom.d.ts 这类 JSDoc 密集
+        // 语料里，块注释内的 `*` `/` 全是假候选，这里是主要成本）
+        if (bi * simd.block_size + simd.block_size <= pos) continue;
         // 一块最多 32 个候选 → 每 token 的容量检查摊薄为每块一次
         try tokens.ensureUnusedCapacity(allocator, simd.block_size);
         var m = mask;
