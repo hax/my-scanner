@@ -174,12 +174,18 @@ pub fn scanInto(
     var cls = try simd.classifyTokenStarts(allocator, src);
     defer cls.starts.deinit(allocator);
 
-    var s = Scanner{ .src = src, .options = options, .starts = &cls.starts };
+    // 阶段 2：按块迭代候选位，贪心消费。token 区间内的假起点用
+    // `start < pos` 越过。所有状态（pos/prev）都是循环局部变量，
+    // 由编译器驻进寄存器——这是数据流化的核心：扫描函数全是纯函数，
+    // 没有隐藏的 store/load 链。
+    var pos: usize = 0;
+    var prev: ?Token = null; // 上一个非注释 token，供 `/` 的正则/除号判别
 
-    // 阶段 2：按块迭代候选位，贪心消费。token 区间内的假起点
-    // 用 `start < s.pos` 一并越过。
     if (src.len >= 2 and src[0] == '#' and src[1] == '!') {
-        try tokens.append(allocator, s.scanShebang());
+        const t = scanShebang(src);
+        pos = t.end;
+        prev = t;
+        try tokens.append(allocator, t);
     }
     for (cls.starts.masks, 0..) |mask, bi| {
         // 一块最多 32 个候选 → 每 token 的容量检查摊薄为每块一次
@@ -188,304 +194,251 @@ pub fn scanInto(
         while (m != 0) {
             const start = bi * simd.block_size + @as(usize, @ctz(m));
             m &= m - 1;
-            if (start < s.pos) continue; // 上一个 token 已越过该假候选
-            s.pos = start;
-            const tok = s.tokenAt(start);
-            if (tok.kind == .comment and !options.keep_comments) continue;
+            if (start < pos) continue; // 上一个 token 已越过该假候选
+            const tok = tokenAt(src, start, prev);
+            pos = tok.end;
+            if (tok.kind == .comment) {
+                if (options.keep_comments) tokens.appendAssumeCapacity(tok);
+                continue;
+            }
+            prev = tok;
             tokens.appendAssumeCapacity(tok);
         }
     }
-    // 尾部空白（如末行换行）不在候选起点里，s.pos 可能落后于 src.len；
-    // 推到末尾再出 eof，保证 start == end == src.len。
-    s.pos = src.len;
-    try tokens.append(allocator, s.emit(src.len, .eof));
+    // 尾部空白不是候选起点，pos 可能落后于 src.len；eof 固定 start == end == src.len
+    try tokens.append(allocator, .{ .kind = .eof, .start = @intCast(src.len), .end = @intCast(src.len) });
     return cls.newlines + 1;
 }
 
-const Scanner = struct {
-    src: []const u8,
-    pos: usize = 0,
-    options: Options = .{},
-    /// 阶段 1 产出的 token 候选起点位图
-    starts: *const simd.TokenStarts,
-    /// 上一个非注释 token，用于判断 `/` 是正则还是除号
-    prev: ?Token = null,
+fn tokenAt(src: []const u8, start: usize, prev: ?Token) Token {
+    const c = src[start];
+    return switch (c) {
+        '"', '\'' => scanString(src, start, c),
+        '`' => scanTemplate(src, start),
+        '0'...'9' => scanNumber(src, start),
+        '.' => blk: {
+            // `.5` 是数字，`.` 单独是 punctuator
+            if (start + 1 < src.len and simd.isDigit(src[start + 1])) {
+                break :blk scanNumber(src, start);
+            }
+            break :blk scanPunct(src, start);
+        },
+        'a'...'z', 'A'...'Z', '_', '$' => scanIdentifier(src, start),
+        '#' => scanPrivateName(src, start),
+        '/' => blk: {
+            // 注释、除号、正则三解
+            if (tryComment(src, start)) |comment| break :blk comment;
+            if (regexAllowedAfter(prev, src)) break :blk scanRegex(src, start);
+            break :blk scanPunct(src, start);
+        },
+        else => blk: {
+            if (isPunctByte(c)) break :blk scanPunct(src, start);
+            break :blk scanNonAscii(src, start);
+        },
+    };
+}
 
-    /// 在候选起点处分发贪心消费（由 scanInto 的块内迭代驱动）。
-    fn tokenAt(s: *Scanner, start: usize) Token {
-        const src = s.src;
-        const c = src[start];
-        return switch (c) {
-            '"', '\'' => s.scanString(c),
-            '`' => s.scanTemplate(),
-            '0'...'9' => s.scanNumber(),
-            '.' => blk: {
-                // `.5` 是数字，`.` 单独是 punctuator
-                if (start + 1 < src.len and simd.isDigit(src[start + 1])) {
-                    break :blk s.scanNumber();
+// -- trivia --------------------------------------------------------------
+
+/// start 处若是注释则返回 token；否则返回 null。
+fn tryComment(src: []const u8, start: usize) ?Token {
+    if (start + 1 >= src.len or src[start] != '/') return null;
+
+    if (src[start + 1] == '/') {
+        return .{ .kind = .comment, .start = @intCast(start), .end = @intCast(lineEnd(src, start)) };
+    }
+    if (src[start + 1] == '*') {
+        if (simd.findBlockCommentEnd(src, start + 2)) |end| {
+            return .{ .kind = .comment, .start = @intCast(start), .end = @intCast(end) };
+        }
+        // 未闭合的块注释：吞掉余下全部，容错继续（与真实引擎行为一致）
+        return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(src.len) };
+    }
+    return null;
+}
+
+// -- token 扫描（全部纯函数：src + start 进，Token 出）--------------------
+
+/// 单/双引号字符串。SIMD 定位 `引号|反斜杠|换行`，转义对直接跳 2 字节。
+/// 合法字符串不跨行，所以中途不用维护行数。
+fn scanString(src: []const u8, start: usize, quote: u8) Token {
+    var i = start + 1;
+    while (i < src.len) {
+        const chunk = simd.load(src, i);
+        const m = simd.stringStopMask(chunk, quote);
+        if (m == 0) {
+            i += simd.block_size;
+            continue;
+        }
+        const idx = i + @as(usize, @ctz(m));
+        const c = src[idx];
+        if (c == quote) {
+            return .{ .kind = .string, .start = @intCast(start), .end = @intCast(idx + 1) };
+        }
+        if (c == '\\') {
+            // TODO: 行继续 `\<newline>` 的换行数目前漏计（编辑器物理行视角）
+            i = idx + 2;
+            continue;
+        }
+        // 裸换行：非法字符串，吞到行尾当 illegal，容错继续
+        return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(lineEnd(src, idx)) };
+    }
+    return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(src.len) }; // EOF 未闭合
+}
+
+/// 模板字面量：允许跨行。SIMD 定位 `` ` ``、`\`、`$`。
+/// `${}` 子表达式用简易花括号平衡扫描（TODO: 子表达式里的嵌套模板、
+/// 注释等还会骗过计数，后续改为递归调用 scanner 本体）。
+fn scanTemplate(src: []const u8, start: usize) Token {
+    var i = start + 1;
+    while (i < src.len) {
+        const chunk = simd.load(src, i);
+        const m = simd.templateStopMask(chunk);
+        if (m == 0) {
+            i += simd.block_size;
+            continue;
+        }
+        const idx = i + @as(usize, @ctz(m));
+        switch (src[idx]) {
+            '`' => return .{ .kind = .template, .start = @intCast(start), .end = @intCast(idx + 1) },
+            '\\' => i = idx + 2,
+            '$' => {
+                if (idx + 1 < src.len and src[idx + 1] == '{') {
+                    i = scanTemplateSubstitution(src, idx + 2);
+                } else {
+                    i = idx + 1;
                 }
-                break :blk s.scanPunct();
             },
-            'a'...'z', 'A'...'Z', '_', '$' => s.scanIdentifier(),
-            '#' => s.scanPrivateName(),
-            '/' => blk: {
-                // 注释、除号、正则三解
-                if (s.tryComment()) |comment| break :blk comment;
-                if (regexAllowedAfter(s.prev, src)) break :blk s.scanRegex();
-                break :blk s.scanPunct();
-            },
-            else => blk: {
-                if (isPunctByte(c)) break :blk s.scanPunct();
-                // 非 ASCII：按完整 UTF-8 码点消费，避免中文注释碎成一堆 illegal
-                s.pos = start + @min(utf8Len(c), src.len - start);
-                break :blk s.emit(start, .illegal);
-            },
-        };
-    }
-
-    // -- trivia ----------------------------------------------------------
-
-    /// 当前位置若是注释则消费掉并返回 token；否则不动、返回 null。
-    /// 只在候选起点为 `/` 时被调用。
-    fn tryComment(s: *Scanner) ?Token {
-        const src = s.src;
-        const start = s.pos;
-        if (start + 1 >= src.len or src[start] != '/') return null;
-
-        if (src[start + 1] == '/') {
-            s.pos = lineEnd(src, start);
-            return s.emit(start, .comment);
+            else => unreachable, // mask 只含以上三种
         }
-        if (src[start + 1] == '*') {
-            if (simd.findBlockCommentEnd(src, start + 2)) |end| {
-                s.pos = end;
-                return s.emit(start, .comment);
-            }
-            // 未闭合的块注释：吞掉余下全部，容错继续（与真实引擎行为一致）
-            s.pos = src.len;
-            return s.emit(start, .illegal);
-        }
-        return null;
     }
+    return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(src.len) }; // EOF 未闭合
+}
 
-    // -- token 扫描 --------------------------------------------------------
-
-    /// 单/双引号字符串。SIMD 定位 `引号|反斜杠|换行`，转义对直接跳 2 字节。
-    /// 合法字符串不跨行，所以中途不用维护行数。
-    fn scanString(s: *Scanner, quote: u8) Token {
-        const start = s.pos;
-        const src = s.src;
-        var i = start + 1;
-        while (i < src.len) {
-            const chunk = simd.load(src, i);
-            const m = simd.stringStopMask(chunk, quote);
-            if (m == 0) {
-                i += simd.block_size;
-                continue;
-            }
-            const idx = i + @as(usize, @ctz(m));
-            const c = src[idx];
-            if (c == quote) {
-                s.pos = idx + 1;
-                return s.emit(start, .string);
-            }
-            if (c == '\\') {
-                // TODO: 行继续 `\<newline>` 的换行数目前漏计（编辑器物理行视角）
-                i = idx + 2;
-                continue;
-            }
-            // 裸换行：非法字符串，吞到行尾当 illegal，容错继续
-            s.pos = lineEnd(src, idx);
-            return s.emit(start, .illegal);
-        }
-        s.pos = src.len; // EOF 未闭合
-        return s.emit(start, .illegal);
-    }
-
-    /// 模板字面量：允许跨行。SIMD 定位 `` ` ``、`\`、`$`。
-    /// `${}` 子表达式用简易花括号平衡扫描（TODO: 子表达式里的嵌套模板、
-    /// 注释等还会骗过计数，后续改为递归调用 scanner 本体）。
-    fn scanTemplate(s: *Scanner) Token {
-        const start = s.pos;
-        const src = s.src;
-        var i = start + 1;
-        while (i < src.len) {
-            const chunk = simd.load(src, i);
-            const m = simd.templateStopMask(chunk);
-            if (m == 0) {
-                i += simd.block_size;
-                continue;
-            }
-            const idx = i + @as(usize, @ctz(m));
-            switch (src[idx]) {
-                '`' => {
-                    s.pos = idx + 1;
-                    return s.emit(start, .template);
-                },
-                '\\' => i = idx + 2,
-                '$' => {
-                    if (idx + 1 < src.len and src[idx + 1] == '{') {
-                        i = scanTemplateSubstitution(src, idx + 2);
-                    } else {
-                        i = idx + 1;
-                    }
-                },
-                else => unreachable, // mask 只含以上三种
-            }
-        }
-        s.pos = src.len; // EOF 未闭合
-        return s.emit(start, .illegal);
-    }
-
-    /// `${...}` 简易平衡扫描：返回配对 `}` 之后的位置。
-    /// 顺带跳过子表达式里的普通字符串，防止其中的花括号干扰计数。
-    fn scanTemplateSubstitution(src: []const u8, from: usize) usize {
-        var depth: usize = 1;
-        var i = from;
-        while (i < src.len and depth > 0) {
-            const c = src[i];
-            if (c == '{') {
-                depth += 1;
-                i += 1;
-            } else if (c == '}') {
-                depth -= 1;
-                i += 1;
-            } else if (c == '\'' or c == '"') {
-                i = skipQuoted(src, i);
-            } else {
-                i += 1;
-            }
-        }
-        return i;
-    }
-
-    /// 标识符/关键字。快路径标量扫前 8 字节（多数标识符不长），
-    /// 更长才 SIMD 续扫：`@ctz(~identPartMask)` 直接给出结尾偏移。
-    fn scanIdentifier(s: *Scanner) Token {
-        const start = s.pos;
-        const src = s.src;
-        var i = start + 1; // 首字符合法性由 tokenAt 的分发保证
-        const fast_end = @min(i + 8, src.len);
-        while (i < fast_end and simd.isIdentPart(src[i])) i += 1;
-        if (i == fast_end and i < src.len) {
-            while (i < src.len) {
-                if (src.len - i >= simd.block_size) {
-                    const chunk = simd.load(src, i);
-                    const inv = ~simd.identPartMask(chunk);
-                    if (inv == 0) {
-                        i += simd.block_size;
-                        continue;
-                    }
-                    i += @as(usize, @ctz(inv));
-                    break;
-                }
-                if (simd.isIdentPart(src[i])) {
-                    i += 1;
-                } else break;
-            }
-        }
-        s.pos = i;
-        const kind: TokenKind =
-            if (isKeyword(src[start..i])) .keyword else .identifier;
-        return s.emit(start, kind);
-    }
-
-    /// 私有名 `#foo`；`#` 后不是标识符起始则整个算 illegal。
-    fn scanPrivateName(s: *Scanner) Token {
-        const start = s.pos;
-        if (start + 1 < s.src.len and simd.isIdentStart(s.src[start + 1])) {
-            s.pos = start + 1;
-            const body = s.scanIdentifier();
-            return .{
-                .kind = .private_name,
-                .start = @intCast(start),
-                .end = body.end,
-            };
-        }
-        s.pos = start + 1;
-        return s.emit(start, .illegal);
-    }
-
-    /// 数字字面量：0x/0o/0b、十进制、小数、指数、`_` 分隔符、BigInt `n` 后缀。
-    /// 标量实现：数字 token 平均只有几字节，SIMD 收益存疑，先求正确。
-    /// TODO: legacy 八进制、`1.e3`、紧跟标识符字符的非法恢复。
-    fn scanNumber(s: *Scanner) Token {
-        const start = s.pos;
-        const src = s.src;
-        var i = start;
-        if (src[i] == '0' and i + 1 < src.len) {
-            switch (src[i + 1]) {
-                'x', 'X' => i = scanRadixDigits(src, i + 2, simd.isHexDigit),
-                'o', 'O' => i = scanRadixDigits(src, i + 2, simd.isOctalDigit),
-                'b', 'B' => i = scanRadixDigits(src, i + 2, simd.isBinaryDigit),
-                else => i = scanDecimal(src, i),
-            }
+/// `${...}` 简易平衡扫描：返回配对 `}` 之后的位置。
+/// 顺带跳过子表达式里的普通字符串，防止其中的花括号干扰计数。
+fn scanTemplateSubstitution(src: []const u8, from: usize) usize {
+    var depth: usize = 1;
+    var i = from;
+    while (i < src.len and depth > 0) {
+        const c = src[i];
+        if (c == '{') {
+            depth += 1;
+            i += 1;
+        } else if (c == '}') {
+            depth -= 1;
+            i += 1;
+        } else if (c == '\'' or c == '"') {
+            i = skipQuoted(src, i);
         } else {
-            i = scanDecimal(src, i);
-        }
-        if (i < src.len and src[i] == 'n') i += 1; // BigInt 后缀
-        while (i < src.len and src[i] == '_') i += 1; // 尾部非法分隔符一并吞掉
-        s.pos = i;
-        return s.emit(start, .number);
-    }
-
-    /// 正则字面量 `/pattern/flags`：不能跨行，字符类 `[...]` 里的 `/` 不算结束。
-    fn scanRegex(s: *Scanner) Token {
-        const start = s.pos;
-        const src = s.src;
-        var i = start + 1;
-        var in_class = false;
-        var closed = false;
-        while (i < src.len) {
-            const c = src[i];
-            if (c == '\\') {
-                i += 2;
-                continue;
-            }
-            if (c == '\n' or c == '\r') break;
-            if (c == '[') {
-                in_class = true;
-            } else if (c == ']') {
-                in_class = false;
-            } else if (c == '/' and !in_class) {
-                i += 1;
-                while (i < src.len and simd.isIdentPart(src[i])) i += 1; // flags
-                closed = true;
-                break;
-            }
             i += 1;
         }
-        if (closed) {
-            s.pos = i;
-            return s.emit(start, .regex);
+    }
+    return i;
+}
+
+/// 标识符/关键字。快路径标量扫前 8 字节（多数标识符不长），
+/// 更长才 SIMD 续扫：`@ctz(~identPartMask)` 直接给出结尾偏移。
+fn scanIdentifier(src: []const u8, start: usize) Token {
+    var i = start + 1; // 首字符合法性由 tokenAt 的分发保证
+    const fast_end = @min(i + 8, src.len);
+    while (i < fast_end and simd.isIdentPart(src[i])) i += 1;
+    if (i == fast_end and i < src.len) {
+        while (i < src.len) {
+            if (src.len - i >= simd.block_size) {
+                const chunk = simd.load(src, i);
+                const inv = ~simd.identPartMask(chunk);
+                if (inv == 0) {
+                    i += simd.block_size;
+                    continue;
+                }
+                i += @as(usize, @ctz(inv));
+                break;
+            }
+            if (simd.isIdentPart(src[i])) {
+                i += 1;
+            } else break;
         }
-        s.pos = lineEnd(src, start); // 失败：吞到行尾当 illegal，容错继续
-        return s.emit(start, .illegal);
     }
+    const kind: TokenKind =
+        if (isKeyword(src[start..i])) .keyword else .identifier;
+    return .{ .kind = kind, .start = @intCast(start), .end = @intCast(i) };
+}
 
-    /// punctuator，最长匹配（4→3→2→1）。
-    fn scanPunct(s: *Scanner) Token {
-        const start = s.pos;
-        s.pos = start + punctLen(s.src[start..]);
-        return s.emit(start, .punct);
+/// 私有名 `#foo`；`#` 后不是标识符起始则整个算 illegal。
+fn scanPrivateName(src: []const u8, start: usize) Token {
+    if (start + 1 < src.len and simd.isIdentStart(src[start + 1])) {
+        const body = scanIdentifier(src, start + 1);
+        return .{ .kind = .private_name, .start = @intCast(start), .end = body.end };
     }
+    return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(start + 1) };
+}
 
-    fn scanShebang(s: *Scanner) Token {
-        const start = s.pos;
-        s.pos = lineEnd(s.src, start);
-        return s.emit(start, .shebang);
+/// 数字字面量：0x/0o/0b、十进制、小数、指数、`_` 分隔符、BigInt `n` 后缀。
+/// 标量实现：数字 token 平均只有几字节，SIMD 收益存疑，先求正确。
+/// TODO: legacy 八进制、`1.e3`、紧跟标识符字符的非法恢复。
+fn scanNumber(src: []const u8, start: usize) Token {
+    var i = start;
+    if (src[i] == '0' and i + 1 < src.len) {
+        switch (src[i + 1]) {
+            'x', 'X' => i = scanRadixDigits(src, i + 2, simd.isHexDigit),
+            'o', 'O' => i = scanRadixDigits(src, i + 2, simd.isOctalDigit),
+            'b', 'B' => i = scanRadixDigits(src, i + 2, simd.isBinaryDigit),
+            else => i = scanDecimal(src, i),
+        }
+    } else {
+        i = scanDecimal(src, i);
     }
+    if (i < src.len and src[i] == 'n') i += 1; // BigInt 后缀
+    while (i < src.len and src[i] == '_') i += 1; // 尾部非法分隔符一并吞掉
+    return .{ .kind = .number, .start = @intCast(start), .end = @intCast(i) };
+}
 
-    fn emit(s: *Scanner, start: usize, kind: TokenKind) Token {
-        const t = Token{
-            .kind = kind,
-            .start = @intCast(start),
-            .end = @intCast(s.pos),
-        };
-        if (kind != .comment) s.prev = t;
-        return t;
+/// 正则字面量 `/pattern/flags`：不能跨行，字符类 `[...]` 里的 `/` 不算结束。
+fn scanRegex(src: []const u8, start: usize) Token {
+    var i = start + 1;
+    var in_class = false;
+    while (i < src.len) {
+        const c = src[i];
+        if (c == '\\') {
+            i += 2;
+            continue;
+        }
+        if (c == '\n' or c == '\r') break;
+        if (c == '[') {
+            in_class = true;
+        } else if (c == ']') {
+            in_class = false;
+        } else if (c == '/' and !in_class) {
+            i += 1;
+            while (i < src.len and simd.isIdentPart(src[i])) i += 1; // flags
+            return .{ .kind = .regex, .start = @intCast(start), .end = @intCast(i) };
+        }
+        i += 1;
     }
-};
+    // 失败：吞到行尾当 illegal，容错继续
+    return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(lineEnd(src, start)) };
+}
+
+/// punctuator，最长匹配（4→3→2→1）。
+fn scanPunct(src: []const u8, start: usize) Token {
+    return .{
+        .kind = .punct,
+        .start = @intCast(start),
+        .end = @intCast(start + punctLen(src[start..])),
+    };
+}
+
+fn scanShebang(src: []const u8) Token {
+    return .{ .kind = .shebang, .start = 0, .end = @intCast(lineEnd(src, 0)) };
+}
+
+/// 非 ASCII 字节：按完整 UTF-8 码点消费成 illegal，
+/// 避免中文注释碎成一堆单字节 illegal。
+fn scanNonAscii(src: []const u8, start: usize) Token {
+    const len = @min(utf8Len(src[start]), src.len - start);
+    return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(start + len) };
+}
 
 /// `/` 出现在什么 token 之后时是正则开头，否则是除号。
 /// 单 token 回看的启发式，按真实代码的先验取舍，不追语法完备：
