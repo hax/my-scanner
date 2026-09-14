@@ -323,6 +323,13 @@ inline fn tokenAt(src: []const u8, start: usize, prev: ?Token) Token {
         return scanPunct(src, start);
     }
     if (code & Dispatch.hash != 0) return scanPrivateName(src, start);
+    if (c == '\\') {
+        // \uXXXX 转义标识符（tsc 纯 scanner 不合并 \u{...}，对齐）
+        if (decodeIdentEscape(src, start)) |r| {
+            if (isIdentStartRune(r.cp)) return scanIdentifier(src, start);
+        }
+        return illegalBackslash(start);
+    }
     if (code & Dispatch.punct_multi != 0) {
         // `.5` 是数字，`.` 单独是 punctuator
         if (c == '.' and start + 1 < src.len and simd.isDigit(src[start + 1])) {
@@ -444,15 +451,49 @@ fn scanTemplateSubstitution(src: []const u8, from: usize) usize {
     return i;
 }
 
+/// 解码 i 处（指向 `\`）的标识符转义 `\uXXXX`，返回码点与总长 6。
+/// 只支持四十六进制形式——`\u{...}` 形式 tsc 纯 scanner 不合并
+/// （拆成普通 token），对齐该行为。
+fn decodeIdentEscape(src: []const u8, i: usize) ?unicode.Rune {
+    if (i + 6 > src.len or src[i + 1] != 'u') return null;
+    var cp: u21 = 0;
+    for (src[i + 2 .. i + 6]) |h| {
+        const d: u21 = switch (h) {
+            '0'...'9' => h - '0',
+            'a'...'f' => h - 'a' + 10,
+            'A'...'F' => h - 'A' + 10,
+            else => return null,
+        };
+        cp = cp * 16 + d;
+    }
+    return .{ .cp = cp, .len = 6 };
+}
+
+inline fn isIdentStartRune(cp: u21) bool {
+    return if (cp < 0x80) simd.isIdentStart(@intCast(cp)) else unicode.isIdStart(cp);
+}
+
+inline fn isIdentPartRune(cp: u21) bool {
+    return if (cp < 0x80) simd.isIdentPart(@intCast(cp)) else unicode.isIdContinue(cp);
+}
+
 /// 标识符/关键字。ASCII 段走快路径（标量 8 字节 + SIMD 续扫），
 /// 遇非 ASCII 字节按 UTF-8 解码查 ID_Continue 表续扫——unicode 标识符
 /// 字符在真实代码中罕见，二分查表（~10 次比较）的代价可接受。
 fn scanIdentifier(src: []const u8, start: usize) Token {
-    // 首字符合法性由分发保证（ASCII ident start 或已验证的非 ASCII ID_Start）；
-    // 非 ASCII 首字符按码点长度推进，不能假设 +1
-    var i = if (src[start] < 0x80) start + 1 else start + unicode.decode(src, start).?.len;
+    // 首字符合法性由分发保证（ASCII ident start、已验证的非 ASCII
+    // ID_Start、或已验证的 \uXXXX 转义）；按实际宽度推进，不能假设 +1
+    var i = if (src[start] == '\\') start + 6 else if (src[start] < 0x80) start + 1 else start + unicode.decode(src, start).?.len;
     while (i < src.len) {
-        if (src[i] < 0x80) {
+        const c = src[i];
+        if (c == '\\') {
+            // \uXXXX 转义：解码后按码点判定（$ _ 等 ASCII 转义合法）
+            const r = decodeIdentEscape(src, i) orelse break;
+            if (!isIdentPartRune(r.cp)) break;
+            i += 6;
+            continue;
+        }
+        if (c < 0x80) {
             i = asciiIdentEnd(src, i);
             if (i < src.len and src[i] >= 0x80) continue;
             break;
@@ -498,7 +539,7 @@ fn asciiIdentEnd(src: []const u8, from: usize) usize {
 fn scanPrivateName(src: []const u8, start: usize) Token {
     if (start + 1 < src.len) {
         const c = src[start + 1];
-        const ok = simd.isIdentStart(c) or
+        const ok = simd.isIdentStart(c) or (c == '\\' and if (decodeIdentEscape(src, start + 1)) |r| isIdentStartRune(r.cp) else false) or
             (c >= 0x80 and if (unicode.decode(src, start + 1)) |r| unicode.isIdStart(r.cp) else false);
         if (ok) {
             const body = scanIdentifier(src, start + 1);
@@ -624,6 +665,11 @@ fn unterminatedBlockComment(src: []const u8, start: usize) Token {
 fn illegalString(start: usize, end: usize) Token {
     @branchHint(.unlikely);
     return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(end) };
+}
+
+fn illegalBackslash(start: usize) Token {
+    @branchHint(.unlikely);
+    return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(start + 1) };
 }
 
 fn illegalRegex(src: []const u8, start: usize) Token {
@@ -1319,4 +1365,64 @@ test "行号索引：空文件与单行" {
             try testing.expectEqual(@as(usize, 1), result.lines.lineAt(t.start));
         }
     }
+}
+
+test "\\uXXXX 转义标识符" {
+    // 基本形式与后接 ASCII/中文
+    try expectTokens("let \\u0041bc = 1;", &.{
+        .{ .keyword, "let" },
+        .{ .identifier, "\\u0041bc" },
+        .{ .punct, "=" },
+        .{ .number, "1" },
+        .{ .punct, ";" },
+        .{ .eof, "" },
+    });
+    // 转义的 $ 和 _（ASCII 合法标识符字符）
+    try expectTokens("let \\u0024\\u005F = 1;", &.{
+        .{ .keyword, "let" },
+        .{ .identifier, "\\u0024\\u005F" },
+        .{ .punct, "=" },
+        .{ .number, "1" },
+        .{ .punct, ";" },
+        .{ .eof, "" },
+    });
+    // 转义出现在中间
+    try expectTokens("a\\u0042c = 1", &.{
+        .{ .identifier, "a\\u0042c" },
+        .{ .punct, "=" },
+        .{ .number, "1" },
+        .{ .eof, "" },
+    });
+    // 私有名转义（对齐 tsc：合并为 PrivateIdentifier）
+    try expectTokens("this.#\\u0041;", &.{
+        .{ .keyword, "this" },
+        .{ .punct, "." },
+        .{ .private_name, "#\\u0041" },
+        .{ .punct, ";" },
+        .{ .eof, "" },
+    });
+    // 坏转义：\ 消费 1 字节 illegal，u00ZZ 是普通标识符（对齐 tsc 边界）
+    try expectTokens("let \\u00ZZ = 1;", &.{
+        .{ .keyword, "let" },
+        .{ .illegal, "\\" },
+        .{ .identifier, "u00ZZ" },
+        .{ .punct, "=" },
+        .{ .number, "1" },
+        .{ .punct, ";" },
+        .{ .eof, "" },
+    });
+    // \u{...} 形式不合并（对齐 tsc 纯 scanner）：\ 为 illegal，
+    // u、{...} 按普通 token
+    try expectTokens("let \\u{41} = 1;", &.{
+        .{ .keyword, "let" },
+        .{ .illegal, "\\" },
+        .{ .identifier, "u" },
+        .{ .punct, "{" },
+        .{ .number, "41" },
+        .{ .punct, "}" },
+        .{ .punct, "=" },
+        .{ .number, "1" },
+        .{ .punct, ";" },
+        .{ .eof, "" },
+    });
 }

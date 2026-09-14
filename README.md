@@ -166,8 +166,8 @@ for (result.tokens) |tok| { ... }
 - [ ] 更进一步：SoA token 输出、token 簇融合
 - [x] 宽度实验：block_size=16 在 M2 上 -9%（块循环开销翻倍，高于 NEON 单指令收益）被否决，32 定稿；64（AVX-512）待有对应硬件再测
 - [x] 标量 baseline + A/B 计量：`classifyTokenStartsScalar` 与 SIMD 版经交叉验证（固定用例 + 200 轮随机字节流逐位一致，顺带抓出 SIMD 版三个跨块边界 bug：ws lead 候选性、跨块 CRLF 回改、跨块 U+2028 变体）；bench 的 `cls-s` 行常设输出。**SIMD 分类 pass = 标量的 8.8-11.9x**（4.9 vs ~0.45 GB/s）
-- [ ] 其余 SIMD 子环节（字符串/模板/标识符 SIMD 定位）的单独 A/B 计量
-- [x] unicode 标识符：ID_Start/ID_Continue 范围表（tools/gen_unicode_tables.mjs 从 UCD 生成，Unicode 17.0.0，682/795 范围二分）+ 严格 UTF-8 解码；scanIdentifier 遇非 ASCII 解码续扫（含混排、unicode 私有名 `#π`）；ID_Continue 含 ECMAScript 显式的 ZWNJ/ZWJ。已知容错差异：ident 后裸跟非 ident 非 ws 的非 ASCII 字符（非法 JS）会被 ID-like 连接静默跳过。`\u` 转义标识符暂未支持
+- [x] SIMD 原语 A/B 计量（bench `--prim`）：identPartMask **19-24x**（16-17 vs 0.7-0.8 GB/s）、stringStopMask **17-21x**（21.6 vs 1.0-1.25）、whitespaceMask **仅 2.2x**（28.5 vs 12.9）——后者标量循环被 LLVM 自动向量化到接近手写 SIMD；前两者的标量版因逐位打包（`m |= 1<<j` 的变量移位）阻止 autovectorize。教训：**标量基线的写法决定 A/B 的公平性**，能被自动向量化的模式 SIMD 增益有限
+- [x] unicode 标识符：ID_Start/ID_Continue 范围表（tools/gen_unicode_tables.mjs 从 UCD 生成，Unicode 17.0.0，682/795 范围二分）+ 严格 UTF-8 解码；scanIdentifier 遇非 ASCII 解码续扫（含混排、unicode 私有名 `#π`）；ID_Continue 含 ECMAScript 显式的 ZWNJ/ZWJ。已知容错差异：ident 后裸跟非 ident 非 ws 的非 ASCII 字符（非法 JS）会被 ID-like 连接静默跳过。`\uXXXX` 转义标识符已支持（含转义 `$`/`_`/unicode 私有名；`\u{...}` 形式对齐 tsc 纯 scanner 不合并；转义出的关键字我们产 identifier 而 tsc 产 keyword——差分 soft 类别）
 - [ ] 模板子表达式递归调 scanner 本体
 - [x] token 行号：`Result.lines`（LineIndex，每块逻辑换行位图 + 前缀和，O(1) `lineAt(offset)`；零 token 流开销——不改 Token 结构，`--dump` 输出加行号列）。列号可由消费方从行首 offset 推导，暂不内置
 - [ ] 对齐 Test262 / 真实大型 JS 代码库的模糊正确性验证

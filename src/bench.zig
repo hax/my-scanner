@@ -37,10 +37,13 @@ pub fn main(init: std.process.Init) !void {
     const out = &stdout_file_writer.interface;
 
     var repeats: usize = 10;
+    var prim = false;
     var files: std.ArrayList([]const u8) = .empty;
     for (args[1..]) |arg| {
         if (std.mem.startsWith(u8, arg, "--repeats=")) {
             repeats = std.fmt.parseInt(usize, arg["--repeats=".len..], 10) catch 10;
+        } else if (std.mem.eql(u8, arg, "--prim")) {
+            prim = true;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try out.writeAll(usage_text);
             try out.flush();
@@ -56,7 +59,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     for (files.items) |path| {
-        try benchFile(arena, init.io, out, path, repeats);
+        try benchFile(arena, init.io, out, path, repeats, prim);
     }
     try out.flush();
 }
@@ -67,6 +70,7 @@ fn benchFile(
     out: *Io.Writer,
     path: []const u8,
     repeats: usize,
+    prim: bool,
 ) !void {
     const src = std.Io.Dir.readFileAlloc(.cwd(), io, path, arena, .limited(1 << 32)) catch |err| {
         try out.print("{s}: 读取失败: {s}\n", .{ path, @errorName(err) });
@@ -218,6 +222,62 @@ fn benchFile(
     if (yuku_err) |e| try out.print("  （yuku 中途报 {s}，计扫到出错为止）\n", .{e});
     const ratio = @as(f64, @floatFromInt(yuku_best)) / @as(f64, @floatFromInt(mine_best));
     try out.print("  吞吐比 mine/yuku = {d:.2}x\n\n", .{ratio});
+
+    if (prim) try primBench(io, out, src, repeats);
+}
+
+/// SIMD 原语 A/B：同一数据上 SIMD mask 版 vs 严格标量逐字节合成版，
+/// 量化各原语自身的加速比（工作等价：都产出每块一个 u32 mask）。
+fn primBench(io: Io, out: *Io.Writer, src: []const u8, repeats: usize) !void {
+    const bs = my_scanner.simd.block_size;
+    var acc: u32 = 0;
+
+    inline for (.{ "identPartMask", "stringStopMask", "whitespaceMask" }) |name| {
+        var best_s: i96 = std.math.maxInt(i96);
+        var best_v: i96 = std.math.maxInt(i96);
+        for (0..repeats) |_| {
+            {
+                var x: u32 = 0;
+                const t0 = Io.Timestamp.now(io, .awake);
+                var i: usize = 0;
+                while (i + bs <= src.len) : (i += bs) {
+                    const chunk = my_scanner.simd.load(src, i);
+                    x ^= if (comptime std.mem.eql(u8, name, "identPartMask"))
+                        my_scanner.simd.identPartMask(chunk)
+                    else if (comptime std.mem.eql(u8, name, "stringStopMask"))
+                        my_scanner.simd.stringStopMask(chunk, '"')
+                    else
+                        my_scanner.simd.whitespaceMask(chunk);
+                }
+                acc +%= x;
+                best_s = @min(best_s, t0.durationTo(Io.Timestamp.now(io, .awake)).nanoseconds);
+            }
+            {
+                var x: u32 = 0;
+                const t0 = Io.Timestamp.now(io, .awake);
+                var i: usize = 0;
+                while (i + bs <= src.len) : (i += bs) {
+                    var m: u32 = 0;
+                    for (src[i .. i + bs], 0..) |c, j| {
+                        const hit = if (comptime std.mem.eql(u8, name, "identPartMask"))
+                            my_scanner.simd.isIdentPart(c)
+                        else if (comptime std.mem.eql(u8, name, "stringStopMask"))
+                            (c == '"' or c == '\\' or c == '\n' or c == '\r')
+                        else
+                            (c == ' ' or (c >= 9 and c <= 13));
+                        if (hit) m |= @as(u32, 1) << @intCast(j);
+                    }
+                    x ^= m;
+                }
+                acc +%= x;
+                best_v = @min(best_v, t0.durationTo(Io.Timestamp.now(io, .awake)).nanoseconds);
+            }
+        }
+        const sgbps = @as(f64, @floatFromInt(src.len)) / @as(f64, @floatFromInt(best_s));
+        const vgbps = @as(f64, @floatFromInt(src.len)) / @as(f64, @floatFromInt(best_v));
+        try out.print("  prim {s: <16} SIMD {d:>6.2} GB/s   标量 {d:>6.2} GB/s   {d:>5.1}x\n", .{ name, sgbps, vgbps, @as(f64, @floatFromInt(best_v)) / @as(f64, @floatFromInt(best_s)) });
+    }
+    std.mem.doNotOptimizeAway(acc);
 }
 
 fn printRow(out: *Io.Writer, comptime label: []const u8, ns: i96, bytes: usize, count: usize) !void {
