@@ -89,27 +89,34 @@ pub fn scan(allocator: std.mem.Allocator, src: []const u8, options: Options) !Re
 }
 
 /// scan 的复用缓冲版本：调用方管理 token 列表（bench 循环里避免反复分配）。
+/// 返回物理行数。
 pub fn scanInto(
     tokens: *std.ArrayList(Token),
     allocator: std.mem.Allocator,
     src: []const u8,
     options: Options,
 ) !usize {
-    var s = Scanner{ .src = src, .options = options };
+    // 阶段 1：一次 SIMD 分类 pass 产出 token 候选起点位图
+    var cls = try simd.classifyTokenStarts(allocator, src);
+    defer cls.starts.deinit(allocator);
+
+    // 阶段 2：从候选点贪心消费，token 区间内的假起点被自然越过
+    var s = Scanner{ .src = src, .options = options, .starts = &cls.starts };
     while (true) {
         const tok = s.next();
         if (tok.kind == .comment and !options.keep_comments) continue;
         try tokens.append(allocator, tok);
         if (tok.kind == .eof) break;
     }
-    return s.line;
+    return cls.newlines + 1;
 }
 
 const Scanner = struct {
     src: []const u8,
     pos: usize = 0,
-    line: usize = 1,
     options: Options = .{},
+    /// 阶段 1 产出的 token 候选起点位图
+    starts: *const simd.TokenStarts,
     /// 上一个非注释 token，用于判断 `/` 是正则还是除号
     prev: ?Token = null,
 
@@ -121,15 +128,11 @@ const Scanner = struct {
             return s.scanShebang();
         }
 
-        // trivia：空白与注释交错，直到撞上真正的 token
-        while (true) {
-            s.skipWhitespace();
-            const comment = s.tryComment() orelse break;
-            if (s.options.keep_comments) return comment;
-        }
-
-        const start = s.pos;
-        if (start >= src.len) return s.emit(start, .eof);
+        const start = s.starts.nextAt(s.pos) orelse {
+            s.pos = src.len;
+            return s.emit(src.len, .eof);
+        };
+        s.pos = start;
 
         const c = src[start];
         return switch (c) {
@@ -146,7 +149,8 @@ const Scanner = struct {
             'a'...'z', 'A'...'Z', '_', '$' => s.scanIdentifier(),
             '#' => s.scanPrivateName(),
             '/' => blk: {
-                // 注释已在 trivia 阶段排除，剩下除号与正则两解
+                // 注释、除号、正则三解
+                if (s.tryComment()) |comment| break :blk comment;
                 if (regexAllowedAfter(s.prev, src)) break :blk s.scanRegex();
                 break :blk s.scanPunct();
             },
@@ -161,40 +165,8 @@ const Scanner = struct {
 
     // -- trivia ----------------------------------------------------------
 
-    /// SIMD 跳过空白。整块全空白时顺手 popcount 换行数。
-    fn skipWhitespace(s: *Scanner) void {
-        const src = s.src;
-        var i = s.pos;
-        while (i < src.len) {
-            if (src.len - i >= simd.block_size) {
-                const chunk = simd.load(src, i);
-                const inv = ~simd.whitespaceMask(chunk);
-                if (inv == 0) {
-                    s.line += @as(usize, @popCount(simd.newlineMask(chunk)));
-                    i += simd.block_size;
-                    continue;
-                }
-                const off: usize = @ctz(inv);
-                const nl_before =
-                    simd.newlineMask(chunk) & ((@as(simd.Mask, 1) << @as(std.math.Log2Int(simd.Mask), @intCast(off))) - 1);
-                s.line += @as(usize, @popCount(nl_before));
-                i += off;
-                break;
-            }
-            // 尾部不足一块，标量收尾
-            switch (src[i]) {
-                ' ', '\t', '\r', 0x0b, 0x0c => i += 1,
-                '\n' => {
-                    i += 1;
-                    s.line += 1;
-                },
-                else => break,
-            }
-        }
-        s.pos = i;
-    }
-
     /// 当前位置若是注释则消费掉并返回 token；否则不动、返回 null。
+    /// 只在候选起点为 `/` 时被调用。
     fn tryComment(s: *Scanner) ?Token {
         const src = s.src;
         const start = s.pos;
@@ -206,7 +178,6 @@ const Scanner = struct {
         }
         if (src[start + 1] == '*') {
             if (simd.findBlockCommentEnd(src, start + 2)) |end| {
-                s.line += simd.countNewlines(src[start..end]);
                 s.pos = end;
                 return s.emit(start, .comment);
             }
@@ -269,7 +240,6 @@ const Scanner = struct {
             switch (src[idx]) {
                 '`' => {
                     s.pos = idx + 1;
-                    s.line += simd.countNewlines(src[start..s.pos]);
                     return s.emit(start, .template);
                 },
                 '\\' => i = idx + 2,
@@ -284,7 +254,6 @@ const Scanner = struct {
             }
         }
         s.pos = src.len; // EOF 未闭合
-        s.line += simd.countNewlines(src[start..s.pos]);
         return s.emit(start, .illegal);
     }
 
@@ -805,7 +774,9 @@ test "非法输入容错（不中断）" {
         .{ .illegal, "\"abc" },
         .{ .eof, "" },
     });
+    // 未闭合块注释：吞掉剩余全部，产出 illegal（错误可见，容错不中断）
     try expectTokens("/* 未闭合", &.{
+        .{ .illegal, "/* 未闭合" },
         .{ .eof, "" },
     });
     try expectTokens("\"ab\ncd", &.{

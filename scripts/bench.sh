@@ -18,7 +18,16 @@ fi
 
 DEFAULT_FILES=(corpus/typescript.js corpus/checker.ts corpus/react.js corpus/lib.dom.d.ts)
 
+# 分离 flag 与文件；没有文件时用默认 corpus
+ARGS=()
+FILES=()
+for a in "$@"; do
+  ARGS+=("$a")
+  case "$a" in --*) ;; *) FILES+=("$a") ;; esac
+done
+if [ ${#FILES[@]} -eq 0 ]; then
+  ARGS+=("${DEFAULT_FILES[@]}")
+fi
+
 echo "==> zig build bench（ReleaseFast）"
-# shellcheck disable=SC2086
-exec zig build -Doptimize=ReleaseFast bench -- \
-  $(if [ $# -eq 0 ]; then echo "${DEFAULT_FILES[*]}"; else echo "$*"; fi)
+exec zig build -Doptimize=ReleaseFast bench -- "${ARGS[@]}"

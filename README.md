@@ -12,15 +12,34 @@ simdjson 证明了"结构性跳过"式的向量化能让解析的 I/O 密集阶�
 
 所有向量化集中在 [src/simd.zig](src/simd.zig)：用 Zig 的 `@Vector` 表达，
 由编译器按目标平台自动降到 AVX2 / NEON，不写 intrinsics。
-每个原语返回一个 bitmask（第 i 位 = 第 i 个字节命中），语义由调用方用 `@ctz` / `@popCount` 组合：
+scanner 采用 simdjson 式**两阶段架构**：
+
+**阶段 1（分类 pass，纯 SIMD 无分支）**：一次扫描为每个字节建立分类位平面
+（空白 / 标识符字符），纯位运算推导 token 候选起点掩码：
+
+```
+candidate[i] = !whitespace[i] & !(ident_part[i] & ident_part[i-1])
+```
+
+即"非空白，且不是标识符的中间字节"，跨块用 carry 位衔接。字符串/注释/
+正则内部的字节同样命中候选（阶段 1 不做范围剔除），但阶段 2 贪心消费完
+token 后从它的终点继续迭代候选位，假起点自然被越过——无需在分类阶段
+处理字符串/注释范围。多个分类平面还可经"矩阵旋转"（`packClasses`）打包成
+每字节一个 u8 类别码（`Class`），后续平面继续叠位即可。
+换行统计也在这一趟用 `@popCount` 一次算完，替代散落在各 token 扫描里的行数维护。
+
+**阶段 2（token 化）**：`@ctz` 迭代候选起点位图，在每个起点按首字符分发
+贪心消费（复用各 scanXxx），token 区间内的假候选位被自动跳过。
+
+热路径的向量扫描模式一览：
 
 | 环节 | 手法 |
 | --- | --- |
-| 跳空白 | 32 字节空白掩码 + `@ctz(~mask)` 定位第一个非空白；整块全空白时 `@popCount` 批量数换行 |
+| 跳空白 | ~~逐 token 重扫~~ 两阶段：候选位图 + `@ctz` 一步到下一个 token 起点 |
 | 标识符 | 范围比较合成 `[A-Za-z0-9_$]` 掩码，`@ctz(~mask)` 直接得到结尾偏移 |
 | 字符串 / 模板 | 掩码定位 `引号 \| 反斜杠 \| 换行`，转义对直接跳 2 字节；模板另加 `$`（`${`）|
 | 块注释 | `slash_mask & (star_mask << 1)` 一条位逻辑同时探测 32 个位置的 `*/`，跨块用 carry 位衔接 |
-| 行数统计 | `@popCount(newline_mask)`，注释 / 模板跨行批量计数 |
+| 行数统计 | 阶段 1 的 `@popCount(newline_mask)` 一趟算完 |
 
 数字、正则、punctuator 目前是标量：数字 token 平均只有几字节，
 punctuator 是 O(1) 的首字符前缀树，先求正确，等 profile 说话再决定是否向量化。
@@ -41,16 +60,16 @@ N 轮取最优。yuku 纯 scanner 与 tsc 同款把正则/模板续扫推迟给 
 bench 里按 yuku parser 的方式调 `reScanAsRegex` / `reScanTemplateContinuation`
 对齐（正则决策与 my-scanner 完全一致，模板用花括号平衡栈跟踪）。
 
-M2 / ReleaseFast / 10 轮取最优：
+M2 / ReleaseFast / 20 轮取最优：
 
 | 文件 | my-scanner | yuku | mine/yuku |
 | --- | --- | --- | --- |
-| typescript.js | 0.25 GB/s · 34.1 Mtok/s | 0.56 GB/s · 77.3 Mtok/s | 0.44x |
-| checker.ts | 0.30 GB/s · 33.9 Mtok/s | 0.63 GB/s · 70.6 Mtok/s | 0.48x |
-| react.js | 0.35 GB/s · 40.9 Mtok/s | 0.90 GB/s · 104.9 Mtok/s | 0.39x |
-| lib.dom.d.ts | 0.59 GB/s · 36.8 Mtok/s | 1.02 GB/s · 63.9 Mtok/s | 0.58x |
+| typescript.js | 0.41 GB/s · 56.6 Mtok/s | 0.57 GB/s · 78.3 Mtok/s | 0.72x |
+| checker.ts | 0.47 GB/s · 52.8 Mtok/s | 0.65 GB/s · 72.7 Mtok/s | 0.73x |
+| react.js | 0.71 GB/s · 83.2 Mtok/s | 0.91 GB/s · 105.8 Mtok/s | 0.79x |
+| lib.dom.d.ts | 1.05 GB/s · 65.3 Mtok/s | 1.04 GB/s · 65.1 Mtok/s | 1.00x |
 
-yuku 的成熟实现目前快约 2 倍——这正是起步骨架的优化空间量化，见 roadmap。
+（两阶段重构前 my-scanner 为 0.25-0.59 GB/s，本次架构变更带来 1.56-2.03x 提升。）
 
 ## 正确性验证
 
@@ -133,7 +152,7 @@ for (result.tokens) |tok| { ... }
 
 ## Roadmap
 
-- [ ] 吞吐优化：token 批量产出、关键字识别去 hash 化、错误路径冷热分离（对标 yuku：当前 0.44-0.58x）
+- [ ] 吞吐优化：token 批量产出、关键字识别去 hash 化、错误路径冷热分离（对标 yuku：当前 0.72-1.00x，两阶段重构已带来 1.56-2.03x）
 - [ ] 宽度实验：block_size = 16 / 32 / 64（AVX-512）横评
 - [ ] 标量 baseline + 各 SIMD 化子阶段单独 A/B 计量（把"每个环节拿到多少"量化出来）
 - [ ] unicode 标识符与 `\u` 转义

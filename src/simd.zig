@@ -116,6 +116,144 @@ pub fn countNewlines(bytes: []const u8) usize {
 }
 
 // ---------------------------------------------------------------------------
+// 阶段 1：字节分类 pass（两阶段 scanner 的第一段）
+//
+// 一次 SIMD 扫描为每个字节建立分类位平面（空白 / 标识符字符），
+// 再用纯位运算推导出 token 候选起点掩码：
+//
+//     candidate[i] = !whitespace[i] & !(ident_part[i] & ident_part[i-1])
+//
+// 即"非空白，且不是标识符的中间字节"。字符串/注释/正则内部的字节
+// 同样会命中候选（阶段 1 不做范围剔除），但阶段 2 贪心消费完一个
+// token 后从它的终点继续迭代候选位，假起点自然被越过。
+// ---------------------------------------------------------------------------
+
+/// token 候选起点位图：每 block 一个 u32。
+pub const TokenStarts = struct {
+    masks: []u32,
+
+    pub fn deinit(self: *TokenStarts, allocator: std.mem.Allocator) void {
+        allocator.free(self.masks);
+        self.masks = &.{};
+    }
+
+    /// from 之后（含 from）下一个候选起点的字节偏移。
+    pub fn nextAt(self: *const TokenStarts, from: usize) ?usize {
+        var bi = from / block_size;
+        if (bi >= self.masks.len) return null;
+        // 清掉 from 所在块中位于 from 之前的位
+        var m = self.masks[bi] & ~((@as(u32, 1) << @intCast(from % block_size)) - 1);
+        while (true) {
+            if (m != 0) return bi * block_size + @as(usize, @ctz(m));
+            bi += 1;
+            if (bi >= self.masks.len) return null;
+            m = self.masks[bi];
+        }
+    }
+};
+
+/// 阶段 1 主体：产出候选起点位图，顺带 popcount 出全文件换行总数
+/// （含注释/字符串/模板内部的换行，物理行口径）。
+pub fn classifyTokenStarts(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+) !struct { starts: TokenStarts, newlines: usize } {
+    const nblocks = (src.len + block_size - 1) / block_size;
+    const masks = try allocator.alloc(u32, nblocks);
+    errdefer allocator.free(masks);
+
+    var newlines: usize = 0;
+    var carry_ip: u32 = 0; // 前一块最后一个字节是否为标识符字符（放在 bit0）
+    for (masks, 0..) |*out, bi| {
+        const i = bi * block_size;
+        const chunk = load(src, i);
+        // 尾块：padding 字节（0x7f）非空白也非标识符字符，会算出假候选，
+        // 也可能被误计换行——都不会，但统一砍掉越界位最稳
+        const rem = src.len - i;
+        const valid: u32 = if (rem >= block_size)
+            std.math.maxInt(u32)
+        else
+            (@as(u32, 1) << @intCast(rem)) - 1;
+
+        const ws = whitespaceMask(chunk);
+        const ip = identPartMask(chunk);
+        // prev_ip 的第 j 位 = 第 j-1 个字节是否标识符字符；
+        // 块内左移衔接 + 跨块 carry
+        const prev_ip = (ip << 1) | carry_ip;
+        out.* = ~ws & ~(ip & prev_ip) & valid;
+
+        carry_ip = ip >> (block_size - 1);
+        newlines += @as(usize, @popCount(newlineMask(chunk) & valid));
+    }
+
+    return .{ .starts = .{ .masks = masks }, .newlines = newlines };
+}
+
+// ---------------------------------------------------------------------------
+// 字节类别码：多个分类平面经"矩阵旋转"打包成每字节一个 u8 码。
+// plane-major（每个平面一条向量）→ byte-major（每个字节一个 packed 码），
+// 后续平面在码上继续叠位即可。
+// ---------------------------------------------------------------------------
+
+pub const Class = struct {
+    pub const whitespace: u8 = 1 << 0; // ' ' \t \n \r \v \f
+    pub const ident_part: u8 = 1 << 1; // [A-Za-z0-9_$]
+    pub const ident_start: u8 = 1 << 2; // [A-Za-z_$]
+    pub const digit: u8 = 1 << 3; // 0-9
+    pub const punct: u8 = 1 << 4; // 可能的 punctuator 首字节（含 '#'）
+    pub const quote: u8 = 1 << 5; // ' " `
+};
+
+/// 各平面的向量判定（bool 向量，packClasses 的原料）
+inline fn classPlanes(chunk: Chunk) struct {
+    ws: @Vector(block_size, bool),
+    ip: @Vector(block_size, bool),
+    istart: @Vector(block_size, bool),
+    digit: @Vector(block_size, bool),
+    punct: @Vector(block_size, bool),
+    quote: @Vector(block_size, bool),
+} {
+    const lower = (chunk >= splat('a')) & (chunk <= splat('z'));
+    const upper = (chunk >= splat('A')) & (chunk <= splat('Z'));
+    const digit = (chunk >= splat('0')) & (chunk <= splat('9'));
+    const under = chunk == splat('_');
+    const dollar = chunk == splat('$');
+    return .{
+        .ws = (chunk == splat(' ')) | (chunk == splat('\t')) | (chunk == splat('\n')) |
+            (chunk == splat('\r')) | (chunk == splat(0x0b)) | (chunk == splat(0x0c)),
+        .ip = lower | upper | digit | under | dollar,
+        .istart = lower | upper | under | dollar,
+        .digit = digit,
+        .punct = blk: {
+            var v: @Vector(block_size, bool) = @splat(false);
+            inline for ("{}()[];,<>+-*/%&|^!~?:.=@#") |c| v |= (chunk == splat(c));
+            break :blk v;
+        },
+        .quote = (chunk == splat('\'')) | (chunk == splat('"')) | (chunk == splat('`')),
+    };
+}
+
+inline fn punctMask(chunk: Chunk) Mask {
+    var v: @Vector(block_size, bool) = @splat(false);
+    inline for ("{}()[];,<>+-*/%&|^!~?:.=@#") |c| v |= (chunk == splat(c));
+    return @bitCast(v);
+}
+
+/// 矩阵旋转：分类平面 → 每字节类别码（bit i 来自第 i 个平面）。
+pub fn packClasses(chunk: Chunk) @Vector(block_size, u8) {
+    const planes = classPlanes(chunk);
+    const zero = @as(@Vector(block_size, u8), @splat(0));
+    var code = zero;
+    code |= @select(u8, planes.ws, @as(@Vector(block_size, u8), @splat(Class.whitespace)), zero);
+    code |= @select(u8, planes.ip, @as(@Vector(block_size, u8), @splat(Class.ident_part)), zero);
+    code |= @select(u8, planes.istart, @as(@Vector(block_size, u8), @splat(Class.ident_start)), zero);
+    code |= @select(u8, planes.digit, @as(@Vector(block_size, u8), @splat(Class.digit)), zero);
+    code |= @select(u8, planes.punct, @as(@Vector(block_size, u8), @splat(Class.punct)), zero);
+    code |= @select(u8, planes.quote, @as(@Vector(block_size, u8), @splat(Class.quote)), zero);
+    return code;
+}
+
+// ---------------------------------------------------------------------------
 // 标量版字符分类（SIMD mask 的人类可读对照，供冷路径与尾部收尾使用）
 // ---------------------------------------------------------------------------
 
@@ -203,4 +341,102 @@ test "countNewlines" {
     try testing.expectEqual(@as(usize, 2), countNewlines("\r\n\n")); // 只数 \n
     const many = "\n" ** 100;
     try testing.expectEqual(@as(usize, 100), countNewlines(many));
+}
+
+test "classifyTokenStarts：候选起点规则" {
+    // "let x = 42;" → l、x、=、4、; 是候选；et/x 后的空白被跳过
+    const src = "let x = 42;";
+    var r = try classifyTokenStarts(testing.allocator, src);
+    defer r.starts.deinit(testing.allocator);
+    try testing.expectEqualSlices(usize, &.{ 0, 4, 6, 8, 10 }, collectStarts(&r.starts));
+    try testing.expectEqual(@as(usize, 0), r.newlines);
+}
+
+test "classifyTokenStarts：标识符中间字节不算候选" {
+    // a1b 是一个标识符：只有 0 是候选；.5 从 '.' 起算（'5' 也是候选，
+    // 属于被阶段 2 贪心消费越过的假候选）
+    const src = "a1b .5 x_1";
+    var r = try classifyTokenStarts(testing.allocator, src);
+    defer r.starts.deinit(testing.allocator);
+    try testing.expectEqualSlices(usize, &.{ 0, 4, 5, 7 }, collectStarts(&r.starts));
+}
+
+test "classifyTokenStarts：字符串内部字节是假候选（阶段 2 越过）" {
+    // "a b" 内的 a、b、闭引号都是候选，但属于 string token 区间或紧邻
+    const src = "\"a b\" x";
+    var r = try classifyTokenStarts(testing.allocator, src);
+    defer r.starts.deinit(testing.allocator);
+    try testing.expectEqualSlices(usize, &.{ 0, 1, 3, 4, 6 }, collectStarts(&r.starts));
+}
+
+test "classifyTokenStarts：跨块 carry 与尾块 padding" {
+    // 80 字节标识符 + 分隔，跨 32 字节块边界验证 carry
+    var buf: [block_size * 3]u8 = undefined;
+    @memset(&buf, 'a'); // 全标识符字符
+    buf[block_size - 1] = ' ';
+    buf[block_size * 2 - 1] = '\n';
+    const src = buf[0 .. block_size * 3];
+    var r = try classifyTokenStarts(testing.allocator, src);
+    defer r.starts.deinit(testing.allocator);
+    // 每块首字节（0、32、64）是候选，其余标识符中间字节都不是
+    try testing.expectEqualSlices(usize, &.{ 0, block_size, block_size * 2 }, collectStarts(&r.starts));
+    try testing.expectEqual(@as(usize, 1), r.newlines);
+}
+
+test "classifyTokenStarts：空文件与纯空白" {
+    {
+        var r = try classifyTokenStarts(testing.allocator, "");
+        defer r.starts.deinit(testing.allocator);
+        try testing.expectEqual(@as(?usize, null), r.starts.nextAt(0));
+    }
+    {
+        var r = try classifyTokenStarts(testing.allocator, "  \n\t ");
+        defer r.starts.deinit(testing.allocator);
+        try testing.expectEqual(@as(?usize, null), r.starts.nextAt(0));
+    }
+}
+
+test "classifyTokenStarts：nextAt 从任意位置起查" {
+    const src = "a b  c";
+    var r = try classifyTokenStarts(testing.allocator, src);
+    defer r.starts.deinit(testing.allocator);
+    try testing.expectEqual(@as(?usize, 0), r.starts.nextAt(0));
+    try testing.expectEqual(@as(?usize, 2), r.starts.nextAt(1));
+    try testing.expectEqual(@as(?usize, 5), r.starts.nextAt(3));
+    try testing.expectEqual(@as(?usize, 5), r.starts.nextAt(5));
+    try testing.expectEqual(@as(?usize, null), r.starts.nextAt(6));
+}
+
+test "packClasses：平面矩阵旋转成每字节类别码" {
+    var buf: [block_size]u8 = @splat('x');
+    buf[0] = ' ';
+    buf[1] = '9';
+    buf[2] = '$';
+    buf[3] = '"';
+    buf[4] = '+';
+    const code = packClasses(buf);
+    // 逐字节核对：码位来自对应平面
+    try testing.expectEqual(Class.whitespace, code[0]);
+    try testing.expect((code[0] & Class.whitespace) != 0);
+    try testing.expect((code[1] & Class.digit) != 0);
+    try testing.expect((code[1] & Class.ident_part) != 0);
+    try testing.expect((code[1] & Class.ident_start) == 0);
+    try testing.expect((code[2] & Class.ident_start) != 0);
+    try testing.expect((code[2] & Class.digit) == 0);
+    try testing.expect((code[3] & Class.quote) != 0);
+    try testing.expect((code[4] & Class.punct) != 0);
+    try testing.expect((code[5] & Class.ident_part) != 0); // 'x'
+}
+
+/// 收集全部候选起点（测试辅助）
+fn collectStarts(starts: *const TokenStarts) []usize {
+    var list: [1024]usize = undefined;
+    var n: usize = 0;
+    var pos: usize = 0;
+    while (starts.nextAt(pos)) |p| {
+        list[n] = p;
+        n += 1;
+        pos = p + 1;
+    }
+    return list[0..n];
 }
