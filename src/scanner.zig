@@ -210,32 +210,67 @@ pub fn scanInto(
     return cls.newlines + 1;
 }
 
-fn tokenAt(src: []const u8, start: usize, prev: ?Token) Token {
+/// 分发类别码：token 首字节 → 位集，comptime 打进 256 项标量表。
+/// 表在 L1 常驻，替代字符 range switch，并给纯单字节 punctuator
+/// 提供零调用快路径。
+const Dispatch = struct {
+    /// 单字节 punctuator（`{}()[];,:~@`）：token 恒为 (start, start+1)，
+    /// 无需 punctLen。注意 `.` 不在此列（`.5` 是数字）。
+    pub const punct_single: u8 = 1 << 0;
+    pub const quote: u8 = 1 << 1; // ' " `
+    pub const digit: u8 = 1 << 2; // 0-9
+    pub const ident_start: u8 = 1 << 3; // A-Za-z_$
+    /// 多字节潜在 punctuator（=<>+-*%&|^!?%.，需要 punctLen 贪心）
+    pub const punct_multi: u8 = 1 << 4;
+    pub const slash: u8 = 1 << 5; // / 注释/正则/除号三义
+    pub const hash: u8 = 1 << 6; // #
+    // 其余（非 ASCII 等）为 0，走容错路径
+};
+
+const dispatch_table: [256]u8 = blk: {
+    var t: [256]u8 = @splat(0);
+    for ("{}()[];,:~@") |ch| t[ch] |= Dispatch.punct_single;
+    for ("'\"`") |ch| t[ch] |= Dispatch.quote;
+    // 注意 Zig 的 a..b 是半开区间（会漏掉 'z'/'Z'/'9'），用显式集合
+    for ("0123456789") |ch| t[ch] |= Dispatch.digit;
+    for ("abcdefghijklmnopqrstuvwxyz") |ch| t[ch] |= Dispatch.ident_start;
+    for ("ABCDEFGHIJKLMNOPQRSTUVWXYZ") |ch| t[ch] |= Dispatch.ident_start;
+    for ("_$") |ch| t[ch] |= Dispatch.ident_start;
+    for ("=<>+-*%&|^!?") |ch| t[ch] |= Dispatch.punct_multi;
+    t['.'] |= Dispatch.punct_multi;
+    t['/'] |= Dispatch.slash;
+    t['#'] |= Dispatch.hash;
+    break :blk t;
+};
+
+inline fn tokenAt(src: []const u8, start: usize, prev: ?Token) Token {
     const c = src[start];
-    return switch (c) {
-        '"', '\'' => scanString(src, start, c),
-        '`' => scanTemplate(src, start),
-        '0'...'9' => scanNumber(src, start),
-        '.' => blk: {
-            // `.5` 是数字，`.` 单独是 punctuator
-            if (start + 1 < src.len and simd.isDigit(src[start + 1])) {
-                break :blk scanNumber(src, start);
-            }
-            break :blk scanPunct(src, start);
-        },
-        'a'...'z', 'A'...'Z', '_', '$' => scanIdentifier(src, start),
-        '#' => scanPrivateName(src, start),
-        '/' => blk: {
-            // 注释、除号、正则三解
-            if (tryComment(src, start)) |comment| break :blk comment;
-            if (regexAllowedAfter(prev, src)) break :blk scanRegex(src, start);
-            break :blk scanPunct(src, start);
-        },
-        else => blk: {
-            if (isPunctByte(c)) break :blk scanPunct(src, start);
-            break :blk scanNonAscii(src, start);
-        },
-    };
+    const code = dispatch_table[c];
+
+    // 最高频先行：纯单字节 punctuator，直接构造，零函数调用
+    if (code & Dispatch.punct_single != 0) {
+        return .{ .kind = .punct, .start = @intCast(start), .end = @intCast(start + 1) };
+    }
+    if (code & Dispatch.ident_start != 0) return scanIdentifier(src, start);
+    if (code & Dispatch.digit != 0) return scanNumber(src, start);
+    if (code & Dispatch.quote != 0) {
+        return if (c == '`') scanTemplate(src, start) else scanString(src, start, c);
+    }
+    if (code & Dispatch.slash != 0) {
+        // 注释、除号、正则三解
+        if (tryComment(src, start)) |comment| return comment;
+        if (regexAllowedAfter(prev, src)) return scanRegex(src, start);
+        return scanPunct(src, start);
+    }
+    if (code & Dispatch.hash != 0) return scanPrivateName(src, start);
+    if (code & Dispatch.punct_multi != 0) {
+        // `.5` 是数字，`.` 单独是 punctuator
+        if (c == '.' and start + 1 < src.len and simd.isDigit(src[start + 1])) {
+            return scanNumber(src, start);
+        }
+        return scanPunct(src, start);
+    }
+    return scanNonAscii(src, start);
 }
 
 // -- trivia --------------------------------------------------------------
@@ -514,13 +549,6 @@ fn regexAllowedAfter(prev: ?Token, src: []const u8) bool {
             break :blk !std.mem.eql(u8, text, "this") and !std.mem.eql(u8, text, "super");
         },
         else => true,
-    };
-}
-
-fn isPunctByte(c: u8) bool {
-    return switch (c) {
-        '{', '}', '(', ')', '[', ']', ';', ',', '<', '>', '+', '-', '*', '/', '%', '&', '|', '^', '!', '~', '?', ':', '.', '=', '@' => true,
-        else => false,
     };
 }
 
