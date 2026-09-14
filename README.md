@@ -159,7 +159,7 @@ for (result.tokens) |tok| { ... }
 
 - [x] 吞吐优化：两阶段分类 + 块内 ctz 迭代 + 数据流化 + 冷路径分离 + 打包 punct + 类别码分发（comptime 256 项 dispatch 表 + `{}();,` 单字节 punct 零调用快路径；对标 yuku：0.44x → 1.16-1.40x，累计 ~3x）
 - [x] **boundary v2（精简版落地）**：[设计文档](docs/simd-token-boundary-prefilter.md) 的 ID 连接 + Unicode whitespace（19 码点 trivia 化）+ 逻辑换行（\r\n、U+2028/2029）+ ASCII 快路径。实测砍掉了 OP/ESC 平面（粗筛精化在 pos 跳过兜底下负收益，端到端 -25~30%），语义成本 ~13-16%，OP 集合审计成果留给将来免验证阶段 2。实验全记录见 [类别码纪要](docs/class-code-and-simd-lookup.md) 的 boundary v2 一节
-- [ ] whitespace 平面改「tbl/pshufb 查表+验证」（simdjson 现行手法，2 条指令替代 11 条，预估总吞吐 3-5%；JS 空白 6 字符低 nibble 互不冲突恰好适用；需 arm64/x86 各一小段内联汇编）
+- [x] whitespace 平面查表实验：**否决**——JS 空白恰为连续区间 {09..0D}+20，范围比较（3 条/16B）已最优；simdjson 查表是被 JSON 空白的不连续布局逼的。结论：等值查表只对「低 nibble 互异**且不连续**」的集合有意义（[实验记录](docs/class-code-and-simd-lookup.md)）
 - [ ] SIMD 查表分类第二阶段：四位关系需要 ≥6 个位平面，全表 LUT / packed tag 的翻正条件在此点亮——矩形约束框架 + GF(2) 变换搜索（见类别码纪要）
 - [ ] 更进一步：单字节 punct 批量块路径（先测命中率）、SoA token 输出、token 簇融合
 - [x] 宽度实验：block_size=16 在 M2 上 -9%（块循环开销翻倍，高于 NEON 单指令收益）被否决，32 定稿；64（AVX-512）待有对应硬件再测

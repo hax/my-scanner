@@ -118,11 +118,29 @@ whitespace = in.eq( pshufb(whitespace_table, in) );
 - **ident（区域类）**：查表+验证不适用（每桶多字符），维持范围比较。
 - **packed 多类别码**：十字 AND 不可行（假阳性共享 bit）；只有全表法。
 
+## 🔬 whitespace 查表+验证实验（2026-09-15）：负结果
+
+按计划实现了手法二（tbl/pshufb 16 项期望表 + cmpeq 验证，arm64/x86
+内联汇编），实测分类 pass 反而从 4.89 降到 4.62-4.80 GB/s——回退。
+
+**根因是对手法适用条件漏了关键一环**：手法二的价值取决于集合的字节
+布局。simdjson 用查表是被 JSON 逼的——JSON 空白 {0x09,0x0A,0x0D,0x20}
+中间隔着 0x0B/0x0C（JSON 非空白），不连续，范围比较无法覆盖。而
+**JS 空白恰好是连续区间 {0x09..0x0D} + 0x20**：范围比较
+（cmpls + cmeq + orr，3 条/16B）天然最优；查表（and + tbl + cmpeq，
+3 条/16B，另加 mask 拼接）在指令数上打平还引入了汇编阻碍编译器
+调度。手法一节的表格需补充一行适用条件：**等值查表只对"低 nibble
+互异且不连续"的集合有意义；连续区间用范围比较**。
+
+（推论：opAfter 集合 `%^&|*/<=?` 不连续且散布，若将来要它的平面，
+查表才是对的工具——但它已被 boundary v2 实验否决。）
+
 ## 📋 计划
 
 （读完 boundary-prefilter 文档后重排：正确性与 Unicode 地基优先于纯提速。）
 
-1. **第一步：四位连接关系落地（boundary v2）**，见
+1. ~~**第一步：四位连接关系落地（boundary v2）**~~ 已落地（精简版），
+   见上文实验记录。~~
    simd-token-boundary-prefilter.md。把 `classifyTokenStarts` 的
    candidate 公式升级为 impossible 关系（`afterMask(prev) &
    beforeMask(next)`），新增 ESC/OP 平面与 lineBreakPlane
@@ -132,9 +150,8 @@ whitespace = in.eq( pshufb(whitespace_table, in) );
    中文码点假候选 3→1 个/字），速度收益预估 <2%。
    注意会**有意改变行为**（非 ASCII whitespace 从 illegal 变 trivia），
    tsc 差分口径同步更新。
-2. **第二步：whitespace 平面改「tbl/pshufb 查表+验证」**（手法二），
-   2 条指令替代 11 条，预估总吞吐 3-5%。与第一步独立，纯提速项。
-   首次引入内联汇编，作为标注例外。
+2. ~~**第二步：whitespace 平面改查表+验证**~~ 已实验并否决（见上）：
+   JS 空白是连续区间，范围比较已最优。
 3. **第三步：OP 平面进 nibble LUT + packed tag 评估**。四维关系需要
    ≥6 个位平面（after/before×3 + ESC + 换行），全表 LUT / packed tag
    的翻正条件（类别 ≥4 且消费点 ≥2）在此点亮。用矩形约束框架 +
