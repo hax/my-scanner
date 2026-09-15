@@ -1,5 +1,8 @@
-//! Unicode 标识符判定：范围表二分 + 严格 UTF-8 解码。
-//! 表由 tools/gen_unicode_tables.mjs 从 UCD 生成（见 unicode_tables.zig）。
+//! Unicode 标识符判定：两级位图直查 + 严格 UTF-8 解码。
+//! 表由 tools/gen_unicode_tables.mjs 从 UCD 生成（见 unicode_tables.zig）：
+//! root[cp >> 9] → 去重叶（512 bit = 8 u64），一次查询 2 次 load，
+//! 替代范围表二分（~10 次比较）——unicode 标识符字符密集语料（如
+//! 中文标识符）每字符都查，常数差异直接体现在吞吐上。
 
 const std = @import("std");
 const tables = @import("unicode_tables.zig");
@@ -27,29 +30,24 @@ pub fn decode(src: []const u8, i: usize) ?Rune {
     return .{ .cp = cp, .len = len };
 }
 
-fn inRanges(comptime ranges: []const tables.Range, cp: u21) bool {
-    var lo: usize = 0;
-    var hi: usize = ranges.len;
-    while (lo < hi) {
-        const mid = (lo + hi) / 2;
-        if (cp < ranges[mid].lo) {
-            hi = mid;
-        } else if (cp > ranges[mid].hi) {
-            lo = mid + 1;
-        } else return true;
-    }
-    return false;
+inline fn lookup(root: []const u8, leaves: []const u64, cp: u21) bool {
+    // decode 对 F4 序列不校验第二字节上限，可能给出 > U+10FFFF 的码点
+    //（合法输入不会触发；位图只覆盖到 0x10FFFF，必须先挡住）
+    if (cp > 0x10FFFF) return false;
+    const leaf = root[cp >> tables.chunk_shift];
+    const word = leaves[@as(usize, leaf) * tables.leaf_words + ((cp >> 6) & 7)];
+    return (word >> @intCast(cp & 63)) & 1 != 0;
 }
 
 /// 非 ASCII 码点能否作标识符首字符（ID_Start；`$`/`_` 走 ASCII 路径）。
 pub fn isIdStart(cp: u21) bool {
-    return cp >= 0x80 and inRanges(&tables.id_start, cp);
+    return cp >= 0x80 and lookup(&tables.id_start_root, &tables.id_start_leaves, cp);
 }
 
 /// 非 ASCII 码点能否作标识符后续字符
 /// （ID_Continue，含 ECMAScript 显式加入的 ZWNJ/ZWJ）。
 pub fn isIdContinue(cp: u21) bool {
-    return cp >= 0x80 and inRanges(&tables.id_continue, cp);
+    return cp >= 0x80 and lookup(&tables.id_continue_root, &tables.id_continue_leaves, cp);
 }
 
 // ---------------------------------------------------------------------------
