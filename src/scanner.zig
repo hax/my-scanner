@@ -164,7 +164,7 @@ pub fn scanInto(
 }
 
 /// 正则收集容量预留：正则字面量数以源中 `/` 数为上界。
-fn reserveRegexStarts(
+pub fn reserveRegexStarts(
     allocator: std.mem.Allocator,
     src: []const u8,
     list: *std.ArrayList(u32),
