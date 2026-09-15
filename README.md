@@ -8,6 +8,20 @@ simdjson 证明了"结构性跳过"式的向量化能让解析的 I/O 密集阶�
 但主流 JS 工具链（V8、esbuild、swc、oxc）的 scanner 至今仍以逐字节标量循环为主。
 这个项目想系统地回答：**JS scanner 的每个环节各能从 SIMD 拿到多少收益，瓶颈最终会停在哪里。**
 
+## 架构与文档
+
+- [docs/architecture.md](docs/architecture.md)：两阶段架构全景、决策史
+  （带数字的演进）、两阶段 vs 单阶段 trade-off、第三形态设想
+- [docs/experiment-methodology.md](docs/experiment-methodology.md)：实验
+  循环的方法论教训（profile 陷阱、A/B 公平性、寄存器压力、回滚方向性、
+  语料盲区）
+- [docs/class-code-and-simd-lookup.md](docs/class-code-and-simd-lookup.md)：
+  类别码分发与 SIMD 查表调研
+- [docs/jump-driven-classify-experiment.md](docs/jump-driven-classify-experiment.md)：
+  跳跃驱动分类实验（否决）
+- [docs/simd-token-boundary-prefilter.md](docs/simd-token-boundary-prefilter.md)：
+  边界粗筛设计文档（四位连接关系）
+
 ## SIMD 技巧
 
 所有向量化集中在 [src/simd.zig](src/simd.zig)：用 Zig 的 `@Vector` 表达，
@@ -88,16 +102,30 @@ checker.ts 持平。**lib.dom.d.ts 上 yuku-main 反超我们 24%**——注释�
 
 ## 正确性验证
 
-单元测试之外，用 [tools/compare-tsc.mjs](tools/compare-tsc.mjs) 把 tsc 的 scanner
-（typescript 包的 `ts.createScanner`）当参考实现做 token 级差分：以切分（字节偏移）
-对齐为主，语义分类从宽。四个真实大文件全部对齐，零分类硬差异：
+四层防线（`scripts/check.sh` 一键跑前两层）：
 
-| 文件 | tokens | 结果 |
+1. **单元测试**（~50 个）：token 化各路径 + SIMD 块边界 + Unicode 边界
+   （跨块码点、悬挂尾部、CRLF、U+2028）+ 防回归用例（历史上被随机
+   验证抓回的分支各有专属用例）。
+2. **tsc 差分**：[tools/compare-tsc.mjs](tools/compare-tsc.mjs) 把 tsc 的
+   scanner（`ts.createScanner`）当参考实现做 token 级差分——切分（字节
+   偏移）对齐为主、语义分类从宽。**七个语料**全部对齐、零分类硬差异：
+
+| 文件 | tokens | 特征 |
 | --- | --- | --- |
-| typescript.js | 1,122,439 | ✓ 切分完全一致 |
-| checker.ts | 348,152 | ✓ 切分完全一致 |
-| lib.dom.d.ts | 116,895 | ✓ 切分完全一致 |
-| react.js | 8,411 | ✓ 切分完全一致 |
+| typescript.js | 1,122,439 | bundled tsc（minified 高密度） |
+| checker.ts | 348,152 | tsc 源码 |
+| lib.dom.d.ts | 116,895 | JSDoc 块注释密集 |
+| react.js | 8,411 | 短文件 |
+| cn-dense.ts | 88,002 | 中文注释/标识符密集 |
+| line-comments.js | 90,002 | 行注释 + URL 密集 |
+| strings.js | 84,002 | 字符串/模板密集 |
+
+3. **标量随机交叉验证**：`classifyTokenStartsScalar`（逐码点状态机）与
+   SIMD 版在 200 轮确定性随机字节流上**逐位一致**（masks/line_breaks/
+   newlines）。曾抓出 SIMD 版三个跨块边界 bug 与一次清理误删的分支。
+4. **OP 集合审计**：`docs/op_cont_audit.js` 按 JS/JSX/TS/TSX 四模式
+   对边界连接关系做反例搜索（现役集合 0 反例）。
 
 对比口径中归一的 tsc scanner 设计差异（推迟给 parser 重扫，不是谁对谁错）：
 
