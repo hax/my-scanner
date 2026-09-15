@@ -130,7 +130,7 @@ block_size=16（-9%）、完整四位连接 OP/ESC（-25~30%）、whitespace 查
 | 实现名 | 架构族 | 驱动 | 跳跃 | 第三方参照 |
 | --- | --- | --- | --- | --- |
 | `scalar` | 全标量单阶段 | pos 循环 | 纯标量 | yuku-old（0.10.1） |
-| `jump_vec` | 单阶段 + SIMD 长跳跃 | pos 循环 | SIMD 原语 | yuku-main；swc/oxc（待接入） |
+| `jump_vec` | 单阶段 + SIMD 长跳跃 | pos 循环 | SIMD 原语 + 空白块扫 + 注释快跳 | yuku-main；swc/oxc（待接入） |
 | `two_phase` | 两阶段 SIMD（主线） | 位图 ctz 迭代 | SIMD 原语 | — |
 | （未实施） | 单阶段 + 按块候选缓冲 | 块内产掩码即消费 | SIMD 原语 | — |
 
@@ -144,10 +144,28 @@ CI 25 轮为准）：scalar 0.59x → jump_vec 0.72x → two_phase 0.82x。
 cn-dense 上 jump_vec ≈ two_phase——中文密集语料两阶段无优势，
 与"token 越稀两阶段越亏"的判断一致。
 
-单阶段变体的行号口径：跳跃区间（字符串/模板/块注释等）产 token 后
-补一趟标量逻辑换行计数（与 classify 位图语义逐条对齐：`\n`、孤立
-`\r`、CRLF 单计、U+2028/29）。这是单阶段架构为行号付的成本，
-计入计时（yuku 在 advance 循环里逐字符判断，殊途同归）。
+jump_vec 成熟化后（2026-09-16，M3 Pro / CI 口径 25 轮取最优，
+几何平均 vs yuku-main）：scalar 0.71x、two_phase 0.88x、
+**jump_vec 0.99x（真实语料 1.00x 追平 yuku-main）**——9/10 语料
+成为矩阵最快：minified 端 typescript.min.js 1.06x，CJK 端
+cn-dense 1.14x / hanzi-chai 1.09x，注释密集端 lib.dom 0.80x→0.93x、
+line-comments 0.65x→0.92x 结构性收敛（cls pass 白工被整端消去）。
+仍落后的 strings 0.86x 与 react 0.90x：换行 pass（行号口径成本）
+在跳跃/ token 密集语料上占 jump_vec 总时间 20%+——exp 分支的
+惰性 LineIndex（扫描期零行号成本）口径下同配置全 7 语料
+1.07-1.26x 反超 yuku-main，口径取舍留作提案待 hax 决策。
+实验弧（v1/E1-E8，含 E3 否决）见
+[类别码纪要](class-code-and-simd-lookup.md) 的单阶段一节。
+
+单阶段变体的行号口径：早期实现是跳跃区间产 token 后逐 span 补一趟
+标量逻辑换行计数；jump_vec 成熟化（2026-09-16，见
+[类别码纪要](class-code-and-simd-lookup.md) 的单阶段一节）后改为
+`simd.classifyLineBreaks` 独立换行 pass（~4 GB/s 的裁剪版分类，
+语义与 classify 位图逐条对齐：`\n`、孤立 `\r`、CRLF 单计、
+U+2028/29）——集中式 SIMD pass 的 0.25 cycles/byte 远低于逐 span
+增量标记的 per-span 调用开销（E3 实验，react -18%/strings -30%
+否决）。两种方案都计入 scanInto 计时（yuku 在 advance 循环里逐字符
+判断，殊途同归）。
 
 ## CI：每次 push 自动对比 + 趋势
 

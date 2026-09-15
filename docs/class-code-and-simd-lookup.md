@@ -201,6 +201,60 @@ Current-relation counterexamples: 0）。实测推翻了两处预估，结论如
 lead 处统一产 `.whitespace` token，默认过滤，keep_comments 时可见）；
 `line_count` 从「\n 计数」变「逻辑换行计数」。tsc 差分四文件切分不变。
 
+## ✅ 单阶段引擎成熟化（2026-09-15/16，exp/single-stage → 并入 jump_vec）
+
+**起点假设**（hax 提出，部分被数据证实）：单字符 token 的切分用标量
+分发可能比向量块预计算更划算——真正产生「跳跃」的只有 ident、
+number、大段 whitespace 与长 token（字符串/注释/模板），SIMD 只该
+花在这些地方；两或三字符的 op 跳 1-2 字节，预计算候选位图的全文件
+pass 盖不过省下的迭代成本。
+
+**实验弧**（exp/single-stage 分支上完成；mine-1 = 单阶段，
+mine = 两阶段，yuku-main 为外部对照，同 run 比值才可信）：
+
+| 步骤 | 做法 | 结果 |
+| --- | --- | --- |
+| v1 单阶段 | 裁剪换行 pass + 标量驱动循环 | token 密集语料慢 10-23%（候选位图的 ctz 迭代有 OoO 重叠优势）；注释密集赢（省掉 classify 白工） |
+| E1+E2 | `ident_part_table`、dispatch 表加 ws 位合并判断、`skipWhitespace` 展开+SIMD | 7 语料赢 4；strings +12%、line-comments +10% |
+| ❌ E3 | LineTracker 逐 span 增量行标记替代换行 pass | **全面回退**（react -18%、strings -30%）——span 多为 1-4 字节，per-span 开销远超 0.25 cycles/byte 的集中式 SIMD pass。**集中式换行 pass genuinely 高效，逐 span 增量标记是死路** |
+| E5 | **惰性 LineIndex**：扫描期不建任何行数据结构，首次 `lineAt`/`lineCount` 才跑换行 pass | 对齐 yuku 口径（它扫描期只带 1-bit 换行 flag）。单阶段全面反超两阶段（1.00-1.35）——**未并入主干**：主干口径要求行号成本计入 scanInto 计时（architecture.md），jump_vec 用 classifyLineBreaks 满足；惰化作为口径提案另行决策 |
+| E6 | 注释 trivia 快跳：`!keep_comments` 时不构造 token 直接跳 | line-comments 追平 yuku（2.15 vs 2.12 GB/s） |
+| E7 | unicode ID 两级位图（root[cp>>9] → 去重叶 8×u64，2 次 load）替代 795 范围二分 | cn-dense 0.88→1.12 vs yuku（0.84→1.07 GB/s，反超 yuku 的 0.92）。79/86 叶与 yuku 独立实现叶数一致 |
+| E8 | token 容量按 src.len/8 预留 + 内联容量检查（逐 token 调 `ensureUnusedCapacity` 实测占 12%）；isKeyword 换完美哈希 `(c0+c1+clast*62+len*27)&127`（原 len+首字符 switch+memcmp 链占 11.5%，间接跳转对多样标识符不友好） | **全 7 语料反超 yuku-main：1.07-1.26**（exp 分支口径，含惰性行号） |
+
+**exp 分支最终数据**（M2，ReleaseFast，20 轮取最优；惰性行号口径，
+mine-1/mine 与 mine-1/yuku-main）。并入主干后的口径数字见
+[architecture.md](architecture.md) 变体矩阵：
+
+| 文件 | mine-1/mine | mine-1/yuku-main |
+| --- | --- | --- |
+| typescript.js | 1.06 | 1.12 |
+| checker.ts | 1.05 | 1.10 |
+| react.js | 1.06 | 1.07 |
+| lib.dom.d.ts | 1.34 | 1.11 |
+| cn-dense.ts | 1.42 | 1.26 |
+| line-comments.js | 1.68 | 1.12 |
+| strings.js | 1.34 | 1.09 |
+
+**结论**：
+
+1. **假设一半成立**：预计算位图对短 token 不值，但省掉它之后还必须
+   把逐 token 的固定成本（容量检查、关键字判别、调用开销）一并压下去
+   才能兑现——v1 单阶段曾因 ctz 迭代的 OoO 重叠劣势慢 10-23%，是
+   E5-E8 的 per-token 常数优化把差距填平再反超的。
+2. **SIMD 的落脚点收敛为「跳跃原语」**：ident 边界、字符串/模板停止
+   集合、`*/` 探测、行尾查找、换行 pass——与起点脑洞一致；op 边界
+   不需要向量（boundary v2 的 OP 平面否决记录互相印证）。
+3. **并入 jump_vec 而非新变体**：单阶段 pos 驱动 + SIMD 长跳跃正是
+   jump_vec 的架构族定义，成熟化是它的族内演化（主干为变体矩阵，
+   不存在「默认引擎」；E1/E6/E7/E8 全部移植，行号按主干口径由
+   simd.classifyLineBreaks 独立 pass 维护）。
+4. 已知差异（有意保留，合法输入不受影响）：token 位置上紧跟标识符
+   字符的非法非 ASCII 字节，单阶段产 illegal（近 tsc Unknown）而
+   两阶段静默吞（tradeoff T2 的变体间行为差）；行注释/字符串/正则内
+   的 U+2028/29 不按 LineTerminator 处理（E3 精确化的开销不值，
+   tsc 差分语料无此形态）。
+
 ## ❌ 已否决项存档
 
 - 阶段融合（classify+consume 逐块流水、消灭 masks 数组）：实测 -3~12%，
