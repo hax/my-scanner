@@ -177,6 +177,7 @@ for (result.tokens) |tok| { ... }
   - ✅ **整块跳过**：块注释/长 token 覆盖的整块直接 continue，不再逐假候选迭代（JSDoc 内 `*` `/` 全是假候选）——lib.dom.d.ts 73.5 → ~82 Mtok/s（+12%），与 yuku-main 差距 0.76x → **0.86x**
   - ❌ 块内 ws 判定内联、`|0x20` fold 压缩 identPartMask：均无实测收益，回退（教训：profile 的 ReleaseFast 行号归因不可靠——曾被误导追查 45 个码点的「热点」；指令数减少不必然转化为吞吐）
   - 剩余 -14% 为**结构性**：classify pass 在注释密集、低 token 密度语料上占总时间 26%（1.9MB 文件 0.38ms），单阶段的 yuku 没有这一趟；两阶段架构的语料谱系 trade-off——minified 端 +6~9%，注释密集端 -14%。进一步收敛需架构级改动（阶段融合已实测否决）或阶段 2 批量 token 化
+- [x] **跳跃驱动分类 pass（长跳跃前移）**：**完整实验后否决**（[实验记录](docs/jump-driven-classify-experiment.md)）——把字符串/模板/注释的跳跃终点判定前移进分类 pass（起点无正则歧义 + 顺序状态 + 正则误触发溢出回滚），正确性达成（7 语料差分全绿），但 line-comments 账本证明跳跃工作只是等量搬迁（cls +0.27ms / 阶段 2 -0.27ms，零净收益）且 cls 检测税 + 巨函数寄存器退化使其 4.5→2.0-2.5 GB/s。**根本教训：yuku 的注释向量化收益来自单阶段架构（字节只触一次），两阶段里搬跳跃是换位置付钱**；洞察的完全兑现需要第三形态——单阶段 + 按块产出即消费的 SIMD 候选缓冲，记为独立大方向
 - [ ] 更进一步：SoA token 输出、token 簇融合
 - [x] 宽度实验：block_size=16 在 M2 上 -9%（块循环开销翻倍，高于 NEON 单指令收益）被否决，32 定稿；64（AVX-512）待有对应硬件再测
 - [x] 标量 baseline + A/B 计量：`classifyTokenStartsScalar` 与 SIMD 版经交叉验证（固定用例 + 200 轮随机字节流逐位一致，顺带抓出 SIMD 版三个跨块边界 bug：ws lead 候选性、跨块 CRLF 回改、跨块 U+2028 变体）；bench 的 `cls-s` 行常设输出。**SIMD 分类 pass = 标量的 8.8-11.9x**（4.9 vs ~0.45 GB/s）
