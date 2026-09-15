@@ -1,11 +1,18 @@
-//! 对比基准：my-scanner vs yuku lexer。
+//! 架构矩阵对比基准：my-scanner 各变体 vs yuku lexer。
 //!
-//! 同进程、同文件、同计时器，口径对称：两个 lexer 都把产出的每个 token
-//! append 到复用的 ArrayList（读文件与初始化不计入），取 N 轮最优。
-//! 由 scripts/bench.sh 驱动（负责把 yuku 源码放到 .bench-deps/）。
+//! 同进程、同文件、同计时器，口径对称：所有 Zig 实现都把产出的每个
+//! token append 到复用的 ArrayList（读文件与初始化不计入），取 N 轮
+//! 最优。由 scripts/bench.sh 驱动（负责把 yuku 源码放到 .bench-deps/）。
+//!
+//! 矩阵（架构族 → 自有实现 + 第三方参照）：
+//!   全标量单阶段        → scalar     vs yuku-old（0.10.1 快照）
+//!   单阶段 + SIMD 长跳跃 → jump_vec   vs yuku-main（perf(lexer) 之后）
+//!   两阶段 SIMD         → two_phase  （主线）
+//! swc / oxc 由 tools/lexbench-rs 独立计时，报告在 scripts/make-report.mjs
+//! 汇总（跨语言进程无法同进程对拍）。
 //!
 //! 注意 yuku 纯 scanner 与 tsc 同款设计：`>` 家族不合并、`/` 保守判除号，
-//! 因此它的 token 数偏多，吞吐按各自 token 数计，互不影响对比。
+//! 因此各实现的 token 数不同，吞吐按各自 token 数计，互不影响对比。
 
 const std = @import("std");
 const Io = std.Io;
@@ -14,12 +21,23 @@ const yuku_old = @import("yuku_lexer");
 const yuku_main = @import("yuku_lexer_main");
 
 const usage_text =
-    \\bench — my-scanner vs yuku lexer 对比基准
+    \\bench — my-scanner 架构矩阵 vs yuku lexer 对比基准
     \\
     \\用法:
-    \\  bench [--repeats=N] <file>...
+    \\  bench [--repeats=N] [--json=<path>] [--prim] <file>...
     \\
 ;
+
+/// 一个实现的计时结果；yuku 中途报错记 null（输出里注明）
+const RunResult = struct { best_ns: i96, tokens: usize };
+
+const NamedResult = struct { name: []const u8, result: ?RunResult };
+
+const FileRun = struct {
+    path: []const u8,
+    bytes: usize,
+    results: []NamedResult,
+};
 
 pub fn main(init: std.process.Init) !void {
     const arena: std.mem.Allocator = init.arena.allocator();
@@ -31,10 +49,13 @@ pub fn main(init: std.process.Init) !void {
 
     var repeats: usize = 10;
     var prim = false;
+    var json_path: ?[]const u8 = null;
     var files: std.ArrayList([]const u8) = .empty;
     for (args[1..]) |arg| {
         if (std.mem.startsWith(u8, arg, "--repeats=")) {
             repeats = std.fmt.parseInt(usize, arg["--repeats=".len..], 10) catch 10;
+        } else if (std.mem.startsWith(u8, arg, "--json=")) {
+            json_path = arg["--json=".len..];
         } else if (std.mem.eql(u8, arg, "--prim")) {
             prim = true;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
@@ -51,10 +72,14 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    var runs: std.ArrayList(FileRun) = .empty;
     for (files.items) |path| {
-        try benchFile(arena, init.io, out, path, repeats, prim);
+        const run = try benchFile(arena, init.io, out, path, repeats, prim);
+        try runs.append(arena, run);
     }
     try out.flush();
+
+    if (json_path) |p| try writeJson(arena, init.io, p, runs.items);
 }
 
 fn benchFile(
@@ -64,23 +89,35 @@ fn benchFile(
     path: []const u8,
     repeats: usize,
     prim: bool,
-) !void {
+) !FileRun {
     const src = std.Io.Dir.readFileAlloc(.cwd(), io, path, arena, .limited(1 << 32)) catch |err| {
         try out.print("{s}: 读取失败: {s}\n", .{ path, @errorName(err) });
-        return;
+        std.process.exit(1);
     };
-    // ---- my-scanner ----
-    var tokens: std.ArrayList(my_scanner.Token) = .empty;
-    defer tokens.deinit(arena);
-    var mine_best: i96 = std.math.maxInt(i96);
-    var mine_count: usize = 0;
-    for (0..repeats) |_| {
-        const t0 = Io.Timestamp.now(io, .awake);
-        _ = try my_scanner.scanInto(&tokens, arena, src, .{});
-        const ns = t0.durationTo(Io.Timestamp.now(io, .awake)).nanoseconds;
-        mine_best = @min(mine_best, ns);
-        mine_count = tokens.items.len;
-        tokens.clearRetainingCapacity();
+
+    var results: std.ArrayList(NamedResult) = .empty;
+    defer results.deinit(arena);
+
+    // ---- 自家矩阵：two_phase / scalar / jump_vec（同一驱动跑三遍）----
+    const zig_impls = [_]struct { name: []const u8, variant: my_scanner.Variant }{
+        .{ .name = "two_phase", .variant = .two_phase },
+        .{ .name = "scalar", .variant = .scalar },
+        .{ .name = "jump_vec", .variant = .jump_vec },
+    };
+    for (zig_impls) |impl| {
+        var tokens: std.ArrayList(my_scanner.Token) = .empty;
+        defer tokens.deinit(arena);
+        var best: i96 = std.math.maxInt(i96);
+        var count: usize = 0;
+        for (0..repeats) |_| {
+            const t0 = Io.Timestamp.now(io, .awake);
+            _ = try impl.variant.scanInto(&tokens, arena, src, .{});
+            const ns = t0.durationTo(Io.Timestamp.now(io, .awake)).nanoseconds;
+            best = @min(best, ns);
+            count = tokens.items.len;
+            tokens.clearRetainingCapacity();
+        }
+        try results.append(arena, .{ .name = impl.name, .result = .{ .best_ns = best, .tokens = count } });
     }
 
     // 阶段 1（SIMD 分类 pass）单独计时，隔离它在总扫描里的占比。
@@ -121,31 +158,90 @@ fn benchFile(
         }
     }
 
-    const r_old = try runYuku(yuku_old, "yuku-old", arena, io, out, src, regex_starts, repeats);
-    const r_main = try runYuku(yuku_main, "yuku-main", arena, io, out, src, regex_starts, repeats);
+    const find = struct {
+        fn byName(list: []const NamedResult, name: []const u8) RunResult {
+            for (list) |nr| {
+                if (std.mem.eql(u8, nr.name, name)) return nr.result.?;
+            }
+            unreachable;
+        }
+    };
 
     try out.print("{s}  ({d} bytes, x{d} 轮取最优)\n", .{ path, src.len, repeats });
-    try printRow(out, "mine", mine_best, src.len, mine_count);
+    for (zig_impls) |impl| {
+        const r = find.byName(results.items, impl.name);
+        try printRow(out, impl.name, r.best_ns, src.len, r.tokens);
+    }
     {
-        const pct = @as(f64, @floatFromInt(cls_best)) * 100.0 / @as(f64, @floatFromInt(mine_best));
+        const mine = find.byName(results.items, "two_phase");
+        const pct = @as(f64, @floatFromInt(cls_best)) * 100.0 / @as(f64, @floatFromInt(mine.best_ns));
         const ms = @as(f64, @floatFromInt(cls_best)) / 1e6;
         const gbps = @as(f64, @floatFromInt(src.len)) / @as(f64, @floatFromInt(cls_best));
-        try out.print("  {s: <5} best {d:>8.2} ms   {d:>6.2} GB/s   （阶段 1 分类 pass，占总扫描 {d:>5.1}%）\n", .{ "cls", ms, gbps, pct });
+        try out.print("  {s: <10} best {d:>8.2} ms   {d:>6.2} GB/s   （两阶段的阶段 1 分类 pass，占总扫描 {d:>5.1}%）\n", .{ "cls", ms, gbps, pct });
         const sms = @as(f64, @floatFromInt(scalar_best)) / 1e6;
         const sgbps = @as(f64, @floatFromInt(src.len)) / @as(f64, @floatFromInt(scalar_best));
         const speedup = @as(f64, @floatFromInt(scalar_best)) / @as(f64, @floatFromInt(cls_best));
-        try out.print("  {s: <5} best {d:>8.2} ms   {d:>6.2} GB/s   （标量对照，SIMD {d:.1}x）\n", .{ "cls-s", sms, sgbps, speedup });
+        try out.print("  {s: <10} best {d:>8.2} ms   {d:>6.2} GB/s   （标量对照，SIMD {d:.1}x）\n", .{ "cls-s", sms, sgbps, speedup });
     }
-    try printRow(out, "yuku-old", r_old.best, src.len, r_old.count);
-    if (r_old.err) |e| try out.print("  （yuku-old 中途报 {s}，计扫到出错为止）\n", .{e});
-    try printRow(out, "yuku-main", r_main.best, src.len, r_main.count);
-    if (r_main.err) |e| try out.print("  （yuku-main 中途报 {s}，计扫到出错为止）\n", .{e});
-    const ratio_old = @as(f64, @floatFromInt(r_old.best)) / @as(f64, @floatFromInt(mine_best));
-    const ratio_main = @as(f64, @floatFromInt(r_main.best)) / @as(f64, @floatFromInt(mine_best));
-    const yuku_gain = @as(f64, @floatFromInt(r_old.best)) / @as(f64, @floatFromInt(r_main.best));
-    try out.print("  吞吐比 mine/yuku-old = {d:.2}x   mine/yuku-main = {d:.2}x   （yuku 向量化收益 {d:.2}x）\n\n", .{ ratio_old, ratio_main, yuku_gain });
+
+    {
+        const r = try runYuku(yuku_old, "yuku-old", arena, io, out, src, regex_starts, repeats);
+        try printRow(out, "yuku-old", r.best, src.len, r.count);
+        if (r.err) |e| try out.print("  （yuku-old 中途报 {s}，计扫到出错为止）\n", .{e});
+        try results.append(arena, .{ .name = "yuku_old", .result = .{ .best_ns = r.best, .tokens = r.count } });
+    }
+    {
+        const r = try runYuku(yuku_main, "yuku-main", arena, io, out, src, regex_starts, repeats);
+        try printRow(out, "yuku-main", r.best, src.len, r.count);
+        if (r.err) |e| try out.print("  （yuku-main 中途报 {s}，计扫到出错为止）\n", .{e});
+        try results.append(arena, .{ .name = "yuku_main", .result = .{ .best_ns = r.best, .tokens = r.count } });
+    }
+
+    // 相对值一览（锚点：yuku-main）
+    {
+        const anchor = find.byName(results.items, "yuku_main");
+        try out.print("  ", .{});
+        for ([_][]const u8{ "two_phase", "scalar", "jump_vec" }) |name| {
+            const r = find.byName(results.items, name);
+            const ratio = @as(f64, @floatFromInt(anchor.best_ns)) / @as(f64, @floatFromInt(r.best_ns));
+            try out.print("{s}/yuku-main={d:.2}x ", .{ name, ratio });
+        }
+        const yuku_gain = @as(f64, @floatFromInt(find.byName(results.items, "yuku_old").best_ns)) / @as(f64, @floatFromInt(anchor.best_ns));
+        try out.print("（yuku 向量化收益 {d:.2}x）\n\n", .{yuku_gain});
+    }
 
     if (prim) try primBench(io, out, src, repeats);
+    return .{ .path = path, .bytes = src.len, .results = try results.toOwnedSlice(arena) };
+}
+
+/// 把全部 run 写成 JSON（供 scripts/make-report.mjs 汇总；路径由 ASCII
+/// 语料名构成，无需转义）。
+fn writeJson(arena: std.mem.Allocator, io: Io, path: []const u8, runs: []const FileRun) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(arena);
+    const ap = std.fmt.allocPrint;
+
+    try buf.appendSlice(arena, "{\"runs\":[");
+    for (runs, 0..) |run, i| {
+        if (i > 0) try buf.append(arena, ',');
+        try buf.appendSlice(arena, try ap(arena, "{{\"file\":\"{s}\",\"bytes\":{d},\"results\":{{", .{ run.path, run.bytes }));
+        for (run.results, 0..) |nr, j| {
+            if (j > 0) try buf.append(arena, ',');
+            if (nr.result) |r| {
+                try buf.appendSlice(arena, try ap(arena, "\"{s}\":{{\"best_ns\":{d},\"tokens\":{d}}}", .{ nr.name, r.best_ns, r.tokens }));
+            } else {
+                try buf.appendSlice(arena, try ap(arena, "\"{s}\":null", .{nr.name}));
+            }
+        }
+        try buf.appendSlice(arena, "}}");
+    }
+    try buf.appendSlice(arena, "]}\n");
+
+    // 原子写入：先写临时文件再 rename，避免 CI 上读到半截 JSON
+    const tmp = try ap(arena, "{s}.tmp", .{path});
+    defer arena.free(tmp);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = buf.items });
+    try std.Io.Dir.cwd().rename(tmp, std.Io.Dir.cwd(), path, io);
 }
 
 /// SIMD 原语 A/B：同一数据上 SIMD mask 版 vs 严格标量逐字节合成版，
@@ -202,11 +298,11 @@ fn primBench(io: Io, out: *Io.Writer, src: []const u8, repeats: usize) !void {
     std.mem.doNotOptimizeAway(acc);
 }
 
-fn printRow(out: *Io.Writer, comptime label: []const u8, ns: i96, bytes: usize, count: usize) !void {
+fn printRow(out: *Io.Writer, label: []const u8, ns: i96, bytes: usize, count: usize) !void {
     const ms = @as(f64, @floatFromInt(ns)) / 1e6;
     const gbps = @as(f64, @floatFromInt(bytes)) / @as(f64, @floatFromInt(ns));
     const mtoks = @as(f64, @floatFromInt(count)) * 1000.0 / @as(f64, @floatFromInt(ns));
-    try out.print("  {s: <5} best {d:>8.2} ms   {d:>6.2} GB/s   {d:>8.1} Mtok/s   ({d} tokens)\n", .{
+    try out.print("  {s: <10} best {d:>8.2} ms   {d:>6.2} GB/s   {d:>8.1} Mtok/s   ({d} tokens)\n", .{
         label, ms, gbps, mtoks, count,
     });
 }

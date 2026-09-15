@@ -5,3 +5,5 @@ corpus/
 node_modules/
 .bench-deps/
 docs/node_modules
+build/
+tools/lexbench-rs/target/

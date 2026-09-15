@@ -87,8 +87,10 @@ function classify(kind, tokenText) {
   return `other(${kind})`;
 }
 
-function myTokens(file) {
-  const dump = execFileSync(BIN, ["--dump", file], { maxBuffer: 1 << 28 });
+function myTokens(file, variant) {
+  const args = ["--dump"];
+  if (variant) args.push(`--variant=${variant}`);
+  const dump = execFileSync(BIN, [...args, file], { maxBuffer: 1 << 28 });
   return dump
     .toString("utf8")
     .split("\n")
@@ -106,11 +108,26 @@ function context(text, pos, span = 60) {
 }
 
 let failed = false;
-for (const file of process.argv.slice(2)) {
+
+// --variant=NAME 转发给 CLI；其余参数是语料文件
+const argv = process.argv.slice(2);
+let variant = null;
+const files = [];
+for (const a of argv) {
+  if (a.startsWith("--variant=")) variant = a.slice("--variant=".length);
+  else files.push(a);
+}
+if (files.length === 0) {
+  console.error("用法: node tools/compare-tsc.mjs [--variant=two_phase|scalar|jump_vec] <file>...");
+  process.exit(2);
+}
+const variantLabel = variant ? ` [${variant}]` : "";
+
+for (const file of files) {
   const buf = readFileSync(file);
   const text = buf.toString("latin1"); // 1 code unit = 1 byte
   const iter = makeTscIter(text);
-  const mine = myTokens(file);
+  const mine = myTokens(file, variant);
 
   let soft = 0;
   let merged = 0; // 吞噬同步的 token 数（tsc 侧 >> >= 等待 parser 合并的情况）
@@ -234,13 +251,13 @@ for (const file of process.argv.slice(2)) {
   if (mismatch) {
     failed = true;
     const { r, m } = mismatch;
-    console.log(`✗ ${file}: 切分错位（mine 第 ${j} 个 token）`);
+    console.log(`✗ ${file}${variantLabel}: 切分错位（mine 第 ${j} 个 token）`);
     if (r) console.log(`  tsc:  [${r.start},${r.end}) ${classify(r.kind, "")} ${JSON.stringify(text.slice(r.start, r.end))}`);
     if (m) console.log(`  mine: [${m.start},${m.end}) ${m.kind} ${JSON.stringify(text.slice(m.start, m.end))}`);
     const pos = r?.start ?? m.start;
     console.log(`  上下文: ${JSON.stringify(context(text, pos))}`);
   } else {
-    console.log(`✓ ${file}: 切分与 tsc 完全一致（${mine.length} tokens）`);
+    console.log(`✓ ${file}${variantLabel}: 切分与 tsc 完全一致（${mine.length} tokens）`);
   }
   if (soft > 0) console.log(`  keyword/identifier 取舍差异（soft）: ${soft}`);
   if (merged > 0) console.log(`  吞噬同步（tsc 待 parser 合并的 >> >= 等）: ${merged}`);

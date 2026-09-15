@@ -1,0 +1,51 @@
+name: bench
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write # 发布报告到 bench-reports 分支
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          zig-version: 0.16.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 安装对拍依赖(tsc)
+        working-directory: tools
+        run: npm ci
+
+      - name: 差分门禁 + 架构矩阵基准 + 报告
+        env:
+          BENCH_REPEATS: "25"
+        run: ./scripts/ci-bench.sh
+
+      - name: 摘要
+        run: cat build/bench/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 发布到 bench-reports 分支
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: node scripts/publish-report.mjs --dir build/bench
+
+      - name: 上传原始产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ github.sha }}
+          path: build/bench/
+          retention-days: 90

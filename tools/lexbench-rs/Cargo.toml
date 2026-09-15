@@ -1,0 +1,20 @@
+[package]
+name = "lexbench"
+version = "0.1.0"
+edition = "2021"
+description = "swc/oxc lexer 计时 harness，输出与 my-scanner bench 相同口径的 JSON"
+
+[dependencies]
+oxc_allocator = "0.150.0"
+oxc_span = "0.150.0"
+# lexer 模块仅在 benchmarking feature 下公开（oxc 官方 lexer benchmark 同款入口）
+oxc_parser = { version = "0.150.0", features = ["benchmarking"] }
+swc_common = "26.0.0"
+# unstable: 暴露 TokenAndSpan 等（决策注入驱动需要；见 docs/architecture.md 的 TODO）
+swc_ecma_parser = { version = "45.1.3", features = ["unstable"] }
+swc_ecma_ast = "29.0.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

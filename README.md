@@ -61,9 +61,17 @@ punctuator 是 O(1) 的首字符前缀树，先求正确，等 profile 说话再
 ## 两个脚本
 
 ```sh
-scripts/check.sh                    # 正确性：单元测试 + 与 tsc 差分对比
-scripts/bench.sh                    # 性能：my-scanner vs yuku lexer 吞吐对比
+scripts/check.sh                    # 正确性：单元测试 + 全部架构变体与 tsc 差分对比
+scripts/bench.sh                    # 性能：架构矩阵 vs yuku lexer 吞吐对比
+scripts/ci-bench.sh                 # CI 全链路：差分门禁 + 矩阵基准 + 报告（本地可跑）
 ```
+
+架构变体（`src/variants/`，共享语义层、独立演化）：`scalar`（全标量
+单阶段，对标 yuku 0.10.1）、`jump_vec`（单阶段 + SIMD 长跳跃，对标
+yuku main）、`two_phase`（两阶段主线）。CLI 加 `--variant=NAME` 可选。
+每次 push 到 main，CI 自动跑全变体差分 + 矩阵基准，报告归档到
+`bench-reports` 分支并累积趋势页（`index.html`）——见
+[docs/architecture.md](docs/architecture.md) 的"架构矩阵与 CI"。
 
 ## 与 yuku 的对比基准
 

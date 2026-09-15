@@ -115,7 +115,7 @@ const keywords = std.StaticStringMap(void).initComptime(.{
 
 /// 关键字判别的热路径：长度先排除（2..11），再按首字符分发到
 /// 少量 memcmp 候选。与 keywords 表的等价性由测试交叉验证。
-fn isKeyword(text: []const u8) bool {
+pub fn isKeyword(text: []const u8) bool {
     const eql = std.mem.eql;
     if (text.len < 2 or text.len > 10) return false;
     return switch (text.len) {
@@ -277,7 +277,7 @@ fn consume(
 /// 分发类别码：token 首字节 → 位集，comptime 打进 256 项标量表。
 /// 表在 L1 常驻，替代字符 range switch，并给纯单字节 punctuator
 /// 提供零调用快路径。
-const Dispatch = struct {
+pub const Dispatch = struct {
     /// 单字节 punctuator（`{}()[];,:~@`）：token 恒为 (start, start+1)，
     /// 无需 punctLen。注意 `.` 不在此列（`.5` 是数字）。
     pub const punct_single: u8 = 1 << 0;
@@ -291,7 +291,7 @@ const Dispatch = struct {
     // 其余（非 ASCII 等）为 0，走容错路径
 };
 
-const dispatch_table: [256]u8 = blk: {
+pub const dispatch_table: [256]u8 = blk: {
     var t: [256]u8 = @splat(0);
     for ("{}()[];,:~@") |ch| t[ch] |= Dispatch.punct_single;
     for ("'\"`") |ch| t[ch] |= Dispatch.quote;
@@ -307,7 +307,7 @@ const dispatch_table: [256]u8 = blk: {
     break :blk t;
 };
 
-inline fn tokenAt(src: []const u8, start: usize, prev: ?Token) Token {
+pub inline fn tokenAt(src: []const u8, start: usize, prev: ?Token) Token {
     const c = src[start];
     const code = dispatch_table[c];
 
@@ -490,7 +490,7 @@ fn scanTemplateSubstitution(src: []const u8, from: usize) usize {
 /// 解码 i 处（指向 `\`）的标识符转义 `\uXXXX`，返回码点与总长 6。
 /// 只支持四十六进制形式——`\u{...}` 形式 tsc 纯 scanner 不合并
 /// （拆成普通 token），对齐该行为。
-fn decodeIdentEscape(src: []const u8, i: usize) ?unicode.Rune {
+pub fn decodeIdentEscape(src: []const u8, i: usize) ?unicode.Rune {
     if (i + 6 > src.len or src[i + 1] != 'u') return null;
     var cp: u21 = 0;
     for (src[i + 2 .. i + 6]) |h| {
@@ -505,18 +505,18 @@ fn decodeIdentEscape(src: []const u8, i: usize) ?unicode.Rune {
     return .{ .cp = cp, .len = 6 };
 }
 
-inline fn isIdentStartRune(cp: u21) bool {
+pub inline fn isIdentStartRune(cp: u21) bool {
     return if (cp < 0x80) simd.isIdentStart(@intCast(cp)) else unicode.isIdStart(cp);
 }
 
-inline fn isIdentPartRune(cp: u21) bool {
+pub inline fn isIdentPartRune(cp: u21) bool {
     return if (cp < 0x80) simd.isIdentPart(@intCast(cp)) else unicode.isIdContinue(cp);
 }
 
 /// 标识符/关键字。ASCII 段走快路径（标量 8 字节 + SIMD 续扫），
 /// 遇非 ASCII 字节按 UTF-8 解码查 ID_Continue 表续扫——unicode 标识符
 /// 字符在真实代码中罕见，二分查表（~10 次比较）的代价可接受。
-fn scanIdentifier(src: []const u8, start: usize) Token {
+pub fn scanIdentifier(src: []const u8, start: usize) Token {
     // 首字符合法性由分发保证（ASCII ident start、已验证的非 ASCII
     // ID_Start、或已验证的 \uXXXX 转义）；按实际宽度推进，不能假设 +1
     var i = if (src[start] == '\\') start + 6 else if (src[start] < 0x80) start + 1 else start + unicode.decode(src, start).?.len;
@@ -572,7 +572,7 @@ fn asciiIdentEnd(src: []const u8, from: usize) usize {
 
 /// 私有名 `#foo`（也接受 unicode ID_Start，如 `#π`）；
 /// `#` 后不是标识符起始则整个算 illegal。
-fn scanPrivateName(src: []const u8, start: usize) Token {
+pub fn scanPrivateName(src: []const u8, start: usize) Token {
     if (start + 1 < src.len) {
         const c = src[start + 1];
         const ok = simd.isIdentStart(c) or (c == '\\' and if (decodeIdentEscape(src, start + 1)) |r| isIdentStartRune(r.cp) else false) or
@@ -588,7 +588,7 @@ fn scanPrivateName(src: []const u8, start: usize) Token {
 /// 数字字面量：0x/0o/0b、十进制、小数、指数、`_` 分隔符、BigInt `n` 后缀。
 /// 标量实现：数字 token 平均只有几字节，SIMD 收益存疑，先求正确。
 /// TODO: legacy 八进制、`1.e3`、紧跟标识符字符的非法恢复。
-fn scanNumber(src: []const u8, start: usize) Token {
+pub fn scanNumber(src: []const u8, start: usize) Token {
     var i = start;
     if (src[i] == '0' and i + 1 < src.len) {
         switch (src[i + 1]) {
@@ -606,7 +606,7 @@ fn scanNumber(src: []const u8, start: usize) Token {
 }
 
 /// 正则字面量 `/pattern/flags`：不能跨行，字符类 `[...]` 里的 `/` 不算结束。
-fn scanRegex(src: []const u8, start: usize) Token {
+pub fn scanRegex(src: []const u8, start: usize) Token {
     var i = start + 1;
     var in_class = false;
     while (i < src.len) {
@@ -633,7 +633,7 @@ fn scanRegex(src: []const u8, start: usize) Token {
 
 /// punctuator，最长匹配（4→3→2→1）。
 /// 主体路径一次 4 字节加载（无逐字节边界检查），文件尾不足 4 字节走慢版。
-fn scanPunct(src: []const u8, start: usize) Token {
+pub fn scanPunct(src: []const u8, start: usize) Token {
     const len = if (start + 4 <= src.len)
         punctLenW(std.mem.readInt(u32, src[start..][0..4], .little))
     else
@@ -670,7 +670,7 @@ fn punctLenW(w: u32) usize {
     };
 }
 
-fn scanShebang(src: []const u8) Token {
+pub fn scanShebang(src: []const u8) Token {
     return .{ .kind = .shebang, .start = 0, .end = @intCast(lineEnd(src, 0)) };
 }
 
@@ -722,7 +722,7 @@ fn illegalRegex(src: []const u8, start: usize) Token {
 /// - `)`/`]` 之后是除号：`if (x) /re/.test(y)` 这类无副作用的正则方法
 ///   调用作为单独语句，真实代码里几乎不出现；
 /// - 关键字里 this/super 是值，return/typeof/case 等都把 `/` 放进表达式位置。
-fn regexAllowedAfter(prev: ?Token, src: []const u8) bool {
+pub fn regexAllowedAfter(prev: ?Token, src: []const u8) bool {
     const t = prev orelse return true; // 文件开头
     return switch (t.kind) {
         .identifier, .number, .string, .template, .regex, .private_name => false,
@@ -807,7 +807,7 @@ fn scanRadixDigits(src: []const u8, from: usize, comptime pred: fn (u8) bool) us
 }
 
 /// 从一个引号字符起跳过整段字符串（含转义），返回其后位置。
-fn skipQuoted(src: []const u8, quote_at: usize) usize {
+pub fn skipQuoted(src: []const u8, quote_at: usize) usize {
     const quote = src[quote_at];
     var i = quote_at + 1;
     while (i < src.len) {
@@ -821,7 +821,7 @@ fn skipQuoted(src: []const u8, quote_at: usize) usize {
     return i;
 }
 
-fn lineEnd(src: []const u8, from: usize) usize {
+pub fn lineEnd(src: []const u8, from: usize) usize {
     // SIMD 找行尾（行注释/shebang/非法恢复路径）。此前是标量逐字节循环，
     // 行注释密集语料上的明显遗漏。
     var i = from;

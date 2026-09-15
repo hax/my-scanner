@@ -1,8 +1,9 @@
 # my-scanner 架构总览
 
-本文回答三个问题：当前架构长什么样、它为什么长这样（决策史）、
-以及两阶段/单阶段的本质 trade-off（含第三形态设想）。
-性能数字见 README 基准表；实验细节见各专题文档。
+本文回答四个问题：当前架构长什么样、它为什么长这样（决策史）、
+两阶段/单阶段的本质 trade-off（含第三形态设想）、以及多架构并行
+演化与 CI 对比的机制。性能数字见 README 基准表与 bench-reports
+分支趋势页；实验细节见各专题文档。
 
 ## 当前架构：两阶段
 
@@ -88,3 +89,76 @@ block_size=16（-9%）、完整四位连接 OP/ESC（-25~30%）、whitespace 查
 掩码、立即就地消费、然后丢弃，不落盘全文件数组。字节只读一遍
 （单阶段的优点），起点跳跃靠 SIMD 位图（两阶段的优点）。这是下一个
 架构级候选，需从头设计块间的 carry 与上下文传递。
+
+## 架构矩阵：并行演化机制
+
+历史教训：被局部优化数据否决的方向，可能只是那条线还没优化到位。
+为此架构不再"一条主线改到底"，而是**多架构共存于一个代码库，各自
+演化、同一 CI 对比**：
+
+- **共享语义层**（`scanner.zig`）：token 语义、数字/标点/正则/关键字/
+  Unicode 表、dispatch 表。语义修复单点生效。
+- **架构层**（`src/variants/`，每架构一个文件，驱动循环与跳跃策略自治）：
+
+| 实现名 | 架构族 | 驱动 | 跳跃 | 第三方参照 |
+| --- | --- | --- | --- | --- |
+| `scalar` | 全标量单阶段 | pos 循环 | 纯标量 | yuku-old（0.10.1） |
+| `jump_vec` | 单阶段 + SIMD 长跳跃 | pos 循环 | SIMD 原语 | yuku-main；swc/oxc（待接入） |
+| `two_phase` | 两阶段 SIMD（主线） | 位图 ctz 迭代 | SIMD 原语 | — |
+| （未实施） | 单阶段 + 按块候选缓冲 | 块内产掩码即消费 | SIMD 原语 | — |
+
+规则：任何语义修复/变更必须全变体差分全绿（`scripts/check.sh` 对
+每个变体跑 tsc 差分）；各架构独立优化不许互相拉扯；`jump_vec` 是
+第三形态的直接前驱（驱动一致，只差块内候选缓冲）。
+
+首批本地基线（M2 / 8 轮快测，几何平均 vs yuku-main，正式数字以
+CI 25 轮为准）：scalar 0.59x → jump_vec 0.72x → two_phase 0.82x。
+梯度分离了各层的净贡献：跳跃向量化 +22%，两阶段化再 +14%。
+cn-dense 上 jump_vec ≈ two_phase——中文密集语料两阶段无优势，
+与"token 越稀两阶段越亏"的判断一致。
+
+单阶段变体的行号口径：跳跃区间（字符串/模板/块注释等）产 token 后
+补一趟标量逻辑换行计数（与 classify 位图语义逐条对齐：`\n`、孤立
+`\r`、CRLF 单计、U+2028/29）。这是单阶段架构为行号付的成本，
+计入计时（yuku 在 advance 循环里逐字符判断，殊途同归）。
+
+## CI：每次 push 自动对比 + 趋势
+
+`scripts/ci-bench.sh`（本地同样可跑）四步：
+
+1. `zig build test` 单测；
+2. **差分门禁**：3 变体 × 全 corpus 对拍 tsc，任一失败即红；
+3. 架构矩阵基准（同进程 7 语料 × {scalar, jump_vec, two_phase,
+   yuku-old, yuku-main}，N 轮取最优，正则/模板歧义点按同一决策集
+   注入——yuku 走 `reScanAsRegex`/`reScanTemplateContinuation` 对拍）；
+4. `scripts/make-report.mjs` 汇总成 `report.md` + `data.json`。
+
+`.github/workflows/bench.yml`：push 到 main 触发，报告贴进 run
+summary + artifact，并归档到 **bench-reports 分支**
+（`scripts/publish-report.mjs` → `reports/<sha>.{md,json}`，
+`scripts/update-index.mjs` 重建 `index.html` 趋势页）。趋势页以
+"vs yuku-main 倍数"为主口径——绝对吞吐跨 runner 代际不可比，
+同 run 内相对值始终有效，每条架构线一条独立曲线，随提交演化。
+
+## TODO（接入 swc/oxc 的前置条件）
+
+`tools/lexbench-rs` 已能编译计时（oxc 经 `benchmarking` feature 的
+`Lexer::new_for_benchmarks`，swc 经 `unstable` Iterator），**但未接入
+CI 对比**。根因：公平对比的前提是**歧义点决策可控**——第三方 lexer
+必须能像 yuku 那样被指示"此 `/` 按正则重扫"（等价 `reScanAsRegex`
+对拍）。实测坑（2026-09，lexbench-rs 0.1）：
+
+- swc 独立 Iterator 内置"表达式位置 `/` 判正则"启发式，minified
+  语料误判后吞并大段代码（typescript.js 仅产出 ~13 万 token，应为
+  112 万）；词法错误返回 None 直接终止。
+- oxc 同样在 `/^#!.*/` 处判正则失败后中途终止（~11% 处，23 个 error）。
+- 正则中性化语料（`tools/prepare-lexbench.mjs`，等长替换）只治
+  `/` 一症，lib.dom.d.ts 零正则仍提前终止——还有别的歧义/错误路径。
+
+接入路径（择一）：
+1. 给两者写决策注入驱动：my-scanner 预扫产出歧义决策集 → 驱动
+   lexer 在决策点重扫（swc 需 `state.next_regexp` 类入口，oxc 需
+   暴露 re-lex；不排除 fork patch）；
+2. 或退一档：只在他们能完整扫完的语料子集上对比，报告标注口径。
+
+在做到歧义点可控之前，swc/oxc 的吞吐数字没有进入矩阵的意义。

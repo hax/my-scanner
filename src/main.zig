@@ -14,6 +14,7 @@ const usage_text =
     \\选项:
     \\  --dump           打印每个 token（偏移、类别、文本）
     \\  --keep-comments  输出注释 token（默认视为 trivia 跳过）
+    \\  --variant=NAME   架构变体: two_phase（默认）| scalar | jump_vec
     \\  --bench=N        额外扫描 N 轮，报告 best/avg 耗时与吞吐
     \\  -h, --help       显示本帮助
     \\
@@ -27,6 +28,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
     const out = &stdout_file_writer.interface;
 
+    var variant: my_scanner.Variant = .two_phase;
     var options: my_scanner.Options = .{};
     var dump = false;
     var bench: usize = 0;
@@ -41,6 +43,14 @@ pub fn main(init: std.process.Init) !void {
             dump = true;
         } else if (std.mem.eql(u8, arg, "--keep-comments")) {
             options.keep_comments = true;
+        } else if (std.mem.startsWith(u8, arg, "--variant=")) {
+            const name = arg["--variant=".len..];
+            variant = std.meta.stringToEnum(my_scanner.Variant, name) orelse {
+                try out.print("未知变体: {s}（可选 two_phase | scalar | jump_vec）\n\n", .{name});
+                try out.writeAll(usage_text);
+                try out.flush();
+                std.process.exit(2);
+            };
         } else if (std.mem.startsWith(u8, arg, "--bench=")) {
             bench = std.fmt.parseInt(usize, arg["--bench=".len..], 10) catch 0;
         } else if (std.mem.startsWith(u8, arg, "-")) {
@@ -61,7 +71,7 @@ pub fn main(init: std.process.Init) !void {
 
     var had_error = false;
     for (files.items) |path| {
-        had_error = try scanFile(arena, init.io, out, path, options, dump, bench) or had_error;
+        had_error = try scanFile(arena, init.io, out, path, variant, options, dump, bench) or had_error;
     }
     try out.flush();
     if (had_error) std.process.exit(1);
@@ -90,6 +100,7 @@ fn scanFile(
     io: Io,
     out: *Io.Writer,
     path: []const u8,
+    variant: my_scanner.Variant,
     options: my_scanner.Options,
     dump: bool,
     bench: usize,
@@ -99,7 +110,7 @@ fn scanFile(
         return true;
     };
 
-    const result = try my_scanner.scan(arena, src, options);
+    const result = try variant.scan(arena, src, options);
 
     if (dump) {
         // TSV：start \t end \t kind \t 转义后的文本（\n 等控制字符转成 \x 序列）\t 行号
@@ -135,7 +146,7 @@ fn scanFile(
         var total: i96 = 0;
         for (0..bench) |_| {
             const t0 = Io.Timestamp.now(io, .awake);
-            _ = try my_scanner.scanInto(&tokens, arena, src, options);
+            _ = try variant.scanInto(&tokens, arena, src, options);
             const ns = t0.durationTo(Io.Timestamp.now(io, .awake)).nanoseconds;
             best = @min(best, ns);
             total += ns;
