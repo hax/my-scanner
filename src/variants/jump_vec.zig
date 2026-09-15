@@ -62,7 +62,7 @@ pub fn scanInto(
         if (pos >= src.len) break;
 
         // SIMD 跳跃版分发（scanString/scanTemplate/lineEnd/块注释全向量化）
-        const tok = scanner.tokenAt(src, pos, prev);
+        const tok = scanner.tokenAt(src, pos, prev, null);
         pos = tok.end;
         // SIMD 跳跃不触碰区间内部字节，行号与 scalar 变体同款补计
         if (common.countsNewlines(tok.kind)) {

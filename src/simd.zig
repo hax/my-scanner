@@ -67,18 +67,6 @@ pub inline fn stringStopMask(chunk: Chunk, quote: u8) Mask {
     return @bitCast(q | esc | nl | cr);
 }
 
-/// 模板子表达式平衡扫描的关注字符：{ } ' " ` /
-/// （花括号计深度；引号进 skipQuoted；反引号递归模板；斜杠判注释）
-pub inline fn substitutionStopMask(chunk: Chunk) Mask {
-    const open = chunk == splat('{');
-    const close = chunk == splat('}');
-    const sq = chunk == splat('\'');
-    const dq = chunk == splat('"');
-    const bt = chunk == splat('`');
-    const slash = chunk == splat('/');
-    return @bitCast(open | close | sq | dq | bt | slash);
-}
-
 /// 模板串里的关注字符：反引号、反斜杠（转义）、'$'（可能的 `${`）。
 /// 模板允许跨行，所以不含换行；行数由调用方对最终区间统一 popcount。
 pub inline fn templateStopMask(chunk: Chunk) Mask {

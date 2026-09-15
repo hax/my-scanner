@@ -22,7 +22,7 @@ if [ ! -f "$YUKU_MAIN_DIR/src/parser/lexer.zig" ]; then
   rm -rf "$YUKU_MAIN_DIR/.git"
 fi
 
-DEFAULT_FILES=(corpus/typescript.js corpus/checker.ts corpus/react.js corpus/lib.dom.d.ts)
+DEFAULT_FILES=(corpus/real/typescript.min.js corpus/real/typescript.js corpus/real/checker.ts corpus/real/react.js corpus/real/lib.dom.d.ts)
 
 # 分离 flag 与文件；没有文件时用默认 corpus
 ARGS=()

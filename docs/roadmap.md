@@ -10,7 +10,7 @@ bench-reports 分支趋势页（机制见 architecture.md 的「CI」一节）�
 - [x] whitespace 平面查表实验：**否决**——JS 空白恰为连续区间 {09..0D}+20，范围比较（3 条/16B）已最优；simdjson 查表是被 JSON 空白的不连续布局逼的。结论：等值查表只对「低 nibble 互异**且不连续**」的集合有意义（[实验记录](class-code-and-simd-lookup.md)）
 - [ ] SIMD 查表分类第二阶段（packed tag / 全表 LUT）：前提已变化——boundary v2 实测砍掉 OP/ESC 后只剩 ID 平面，多平面需求暂不存在；若将来做「candidate 免验证」激进阶段 2（OP/ESC 回归），此项随之复活（矩形约束 + GF(2) 变换搜索，见类别码纪要）
 - [x] 单字节 punct 批量块路径：**否决**——实测纯 punct_single 块仅 4.3-7.4%，run≥2 覆盖的 token 检测成本与省下的 dispatch 查询相抵；现有 dispatch 表的单 token 快路径已覆盖该场景
-- [x] 模板子表达式：平衡扫描已感知嵌套模板（递归 scanTemplate）、行/块注释与字符串；正则字面量里的 `}` 仍为已知限制（[tradeoff.md](tradeoff.md) L1）
+- [x] 模板子表达式：感知嵌套模板（递归 scanTemplate）、行/块注释与字符串（初版为特设花括号平衡扫描，已被下一条取代）
 - [x] **注释密集语料的差距定位与部分修复**（2026-09-15）：
   - ✅ **整块跳过**：块注释/长 token 覆盖的整块直接 continue，不再逐假候选迭代（JSDoc 内 `*` `/` 全是假候选）——lib.dom.d.ts 73.5 → ~82 Mtok/s（+12%），与 yuku-main 差距 0.76x → **0.86x**
   - ❌ 块内 ws 判定内联、`|0x20` fold 压缩 identPartMask：均无实测收益，回退（教训：profile 的 ReleaseFast 行号归因不可靠——曾被误导追查 45 个码点的「热点」；指令数减少不必然转化为吞吐）
@@ -21,9 +21,11 @@ bench-reports 分支趋势页（机制见 architecture.md 的「CI」一节）�
 - [x] 标量 baseline + A/B 计量：`classifyTokenStartsScalar` 与 SIMD 版经交叉验证（固定用例 + 200 轮随机字节流逐位一致，顺带抓出 SIMD 版三个跨块边界 bug：ws lead 候选性、跨块 CRLF 回改、跨块 U+2028 变体）；bench 的 `cls-s` 行常设输出。**SIMD 分类 pass = 标量的 8.8-11.9x**（4.9 vs ~0.45 GB/s）
 - [x] SIMD 原语 A/B 计量（bench `--prim`）：identPartMask **19-24x**（16-17 vs 0.7-0.8 GB/s）、stringStopMask **17-21x**（21.6 vs 1.0-1.25）、whitespaceMask **仅 2.2x**（28.5 vs 12.9）——后者标量循环被 LLVM 自动向量化到接近手写 SIMD；前两者的标量版因逐位打包（`m |= 1<<j` 的变量移位）阻止 autovectorize。教训：**标量基线的写法决定 A/B 的公平性**，能被自动向量化的模式 SIMD 增益有限
 - [x] unicode 标识符：ID_Start/ID_Continue 范围表（tools/gen_unicode_tables.mjs 从 UCD 生成，Unicode 17.0.0，682/795 范围二分）+ 严格 UTF-8 解码；scanIdentifier 遇非 ASCII 解码续扫（含混排、unicode 私有名 `#π`）；ID_Continue 含 ECMAScript 显式的 ZWNJ/ZWJ。已知容错差异见 [tradeoff.md](tradeoff.md) T2/T3；`\uXXXX` 转义标识符已支持（含转义 `$`/`_`/unicode 私有名）
-- [ ] 模板子表达式递归调 scanner 本体
+- [x] **模板子表达式递归调 scanner 本体**（2026-09-16）：新语料 typescript.min.js 的差分抓出旧平衡扫描的塌方——子表达式内正则 `/\*\//g` 的 `//` 被当行注释，吞掉收尾反引号，整个模板塌成 illegal 直到 EOF。废除特设的花括号平衡扫描（共享层与 scalar 变体两份副本），`${}` 边界改用 tokenAt + regexAllowedAfter（与主循环同口径）逐 token 扫描，token 仅用于定边界、全部丢弃；tradeoff L1（正则 pattern 里的 `}`）随之根治并移出登记表。防回归用例 7 条：含 `//`/`/*`/`}` 的正则、URL 正则、除法不误判正则吞反引号、嵌套模板、对象字面量、未闭合容错。连带修复：compare-tsc.mjs 改 UTF-8 读入 + 字节↔code unit 坐标映射（旧 latin1 假设在 unicode 标识符语料上失效——UTF-8 续字节 0xA0 恰是 NBSP 被 tsc 当空白跳过，吞噬同步无法咬合）
 - [ ] 罕见 token 排列的重扫/二次切分协议：当前 `scan()` 一次性切分，歧义点（`/` 的正则/除号、`}` 后的正则等）按单 token 回看启发式硬判（[tradeoff.md](tradeoff.md) T1）；按 [goals.md](goals.md) 的分工设想，scanner 提供重扫指令（tsc `reScanAsRegex` 式），由 parser 在罕见形态上按语法上下文发起重扫或二次切分，scanner 不为罕见形态付出精确性成本
 - [x] token 行号：`Result.lines`（LineIndex，每块逻辑换行位图 + 前缀和，O(1) `lineAt(offset)`；零 token 流开销——不改 Token 结构，`--dump` 输出加行号列）。列号可由消费方从行首 offset 推导，暂不内置
 - [ ] 对齐 Test262 / 真实大型 JS 代码库的模糊正确性验证
 - [ ] 与 esbuild / swc / oxc 的 scanner 吞吐对比（swc/oxc 的接入前提与实测坑见 [architecture.md](architecture.md) 的 TODO 一节；esbuild 未开工）
 - [x] 架构矩阵与 CI：`src/variants/` 多架构共存（scalar / jump_vec / two_phase）+ push 自动差分门禁 + 矩阵基准 + 趋势页（见 [architecture.md](architecture.md)）
+- [x] **语料扩充与 real/synthetic 分列**（2026-09-16）：新增真实语料 typescript.min.js（与 unminified 同版配对）、hanzi-chai.ts（真实 CJK 标识符密集，54.7% ident 含中文）、mon-entreprise.ts（法文变音标识符）；语料迁移到 **corpus 孤儿分支**（唯一权威存储 + sha256 校验 + prepare/publish 脚本），补上 CI/新 clone 无语料来源的洞；checker.ts 重钉 v5.9.2（原为不可考快照）。报告矩阵化：语料谱系表 + 变体 × 语料矩阵 + real/synthetic 分组几何平均。谱系/来源/非 ASCII 标识符调研留档见 [corpus.md](corpus.md)。连带修复：bench 的 yuku 驱动正则起点集合曾漏收模板 `${}` 内的正则（my-scanner 模板整体一个 token，主流里没有），yuku 在 typescript.min.js 24KB 处报 InvalidUnicodeEscape、锚点整行失真——scanner 增加 `regex_starts` 旁路收集选项（容量按 `/` 计数预留，热路径零分配），修复后 yuku 全程扫完，锚点恢复有效
+- [ ] **混合策略**（按文件大小选架构，或以前 ~1KB 的统计特征中途切换）：候选方向。证据底座 = 报告的「变体 × 语料」矩阵——先把各架构在语料谱系上的胜负看清楚，再谈切换规则

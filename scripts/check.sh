@@ -6,6 +6,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# 语料来自 corpus 分支,缺失时自动拉取(幂等)
+scripts/prepare-corpus.sh
+
 echo "==== zig build test ===="
 zig build test
 
@@ -24,8 +27,9 @@ if [ $# -gt 0 ]; then
     node tools/compare-tsc.mjs --variant="$v" "$@"
   done
 else
+  # real(真实语料)与 synthetic(构造极端语料)全部参与差分
   for v in "${VARIANTS[@]}"; do
     echo "---- variant: $v ----"
-    node tools/compare-tsc.mjs --variant="$v" corpus/*.js corpus/*.ts
+    node tools/compare-tsc.mjs --variant="$v" corpus/real/*.js corpus/real/*.ts corpus/synthetic/*.js corpus/synthetic/*.ts
   done
 fi

@@ -4,8 +4,10 @@
 //
 // 与 tsc 的语义差异对齐（均为 tsc scanner 的设计，不是谁对谁错）：
 // 1. 偏移坐标系：tsc 按 UTF-16 code unit 计，my-scanner 按字节计。
-//    把源文件按 latin1 喂给 tsc（每字节恰一个 code unit）即可统一；
-//    非 ASCII 只出现在注释/字符串里，不影响 token 边界。
+//    源文件按 UTF-8 读入，预建「字节偏移 ↔ code unit」双向映射，
+//    tsc 侧 token 坐标全部换算成字节偏移后比较——非 ASCII 标识符也精确
+//    对齐（旧实现按 latin1 喂 tsc，靠吞噬同步兜底 unicode 标识符，
+//    遇到 UTF-8 续字节 0xA0（= NBSP，被 tsc 当空白跳过）必然错位）。
 // 2. tsc scanner 永远不合并 `>` 家族（>> >= >>> >>=），由 parser reScan
 //    合并（泛型 `A<B<C>>` 的需要）；`/` 的正则/除号也保守判除号。
 //    因此对比采用"双向吞噬同步"：完美对齐优先；否则一侧的一个 token
@@ -32,14 +34,35 @@ const KEYWORDS = new Set([
   "var", "void", "while", "with", "yield", "async",
 ]);
 
-function makeTscIter(text) {
+// 字节偏移 ↔ UTF-16 code unit 双向映射。token 边界必落在字符边界上，
+// 所以只保证字符边界处精确（字符内部的映射指向字符起点，不会被用到）。
+function buildOffsetMaps(text, byteLen) {
+  const cuToByte = new Uint32Array(text.length + 1);
+  const byteToCU = new Uint32Array(byteLen + 1);
+  let b = 0, cu = 0;
+  for (const ch of text) { // for..of 按码点迭代（代理对整体出现）
+    const u8 = Buffer.byteLength(ch, "utf8");
+    const w = ch.length; // UTF-16 code unit 数（1 或 2）
+    for (let k = 0; k < w; k++) cuToByte[cu + k] = b;
+    for (let k = 0; k < u8; k++) byteToCU[b + k] = cu;
+    cu += w;
+    b += u8;
+  }
+  cuToByte[cu] = b;
+  byteToCU[b] = cu;
+  return { cuToByte, byteToCU };
+}
+
+function makeTscIter(text, maps) {
   const scanner = ts.createScanner(ts.ScriptTarget.Latest, /*skipTrivia*/ true);
   scanner.setText(text);
+  const { cuToByte, byteToCU } = maps;
 
+  // tsc 坐标（code unit）→ 字节偏移，与 my-scanner 同一坐标系
   const grab = () => ({
     kind: scanner.getToken(),
-    start: scanner.getTokenStart(),
-    end: scanner.getTokenEnd(),
+    start: cuToByte[scanner.getTokenStart()],
+    end: cuToByte[scanner.getTokenEnd()],
   });
 
   const iter = {
@@ -56,7 +79,7 @@ function makeTscIter(text) {
     // scanner 无法给出整模板边界（parser 在类型位置不 reScan），模板起点
     // 验证一致后直接同步到 mine 的模板终点。
     skipTo(pos) {
-      scanner.setTextPos(pos);
+      scanner.setTextPos(byteToCU[pos]);
       scanner.scan();
       return (iter.cur = grab());
     },
@@ -125,8 +148,11 @@ const variantLabel = variant ? ` [${variant}]` : "";
 
 for (const file of files) {
   const buf = readFileSync(file);
-  const text = buf.toString("latin1"); // 1 code unit = 1 byte
-  const iter = makeTscIter(text);
+  const text = buf.toString("utf8");
+  const maps = buildOffsetMaps(text, buf.length);
+  const iter = makeTscIter(text, maps);
+  // 展示用切片：字节区间 → code unit 区间 → JS 字符串切片
+  const show = (a, b) => text.slice(maps.byteToCU[a], maps.byteToCU[b]);
   const mine = myTokens(file, variant);
 
   let soft = 0;
@@ -186,7 +212,7 @@ for (const file of files) {
 
     if (r.end === m.end) {
       // 完美对齐：对比 kind
-      const rk = classify(r.kind, text.slice(r.start, r.end));
+      const rk = classify(r.kind, show(r.start, r.end));
       if (rk !== m.kind) {
         const bothKwId = (rk === "keyword" || rk === "identifier") &&
           (m.kind === "keyword" || m.kind === "identifier");
@@ -196,7 +222,7 @@ for (const file of files) {
           const key = `${rk} != ${m.kind}`;
           hardKinds.set(key, (hardKinds.get(key) ?? 0) + 1);
           if (hardSamples.length < 5) {
-            hardSamples.push(`  [${r.start},${r.end}) tsc=${rk} mine=${m.kind} ${JSON.stringify(text.slice(r.start, r.end))}`);
+            hardSamples.push(`  [${r.start},${r.end}) tsc=${rk} mine=${m.kind} ${JSON.stringify(show(r.start, r.end))}`);
           }
         }
       }
@@ -252,10 +278,10 @@ for (const file of files) {
     failed = true;
     const { r, m } = mismatch;
     console.log(`✗ ${file}${variantLabel}: 切分错位（mine 第 ${j} 个 token）`);
-    if (r) console.log(`  tsc:  [${r.start},${r.end}) ${classify(r.kind, "")} ${JSON.stringify(text.slice(r.start, r.end))}`);
-    if (m) console.log(`  mine: [${m.start},${m.end}) ${m.kind} ${JSON.stringify(text.slice(m.start, m.end))}`);
+    if (r) console.log(`  tsc:  [${r.start},${r.end}) ${classify(r.kind, "")} ${JSON.stringify(show(r.start, r.end))}`);
+    if (m) console.log(`  mine: [${m.start},${m.end}) ${m.kind} ${JSON.stringify(show(m.start, m.end))}`);
     const pos = r?.start ?? m.start;
-    console.log(`  上下文: ${JSON.stringify(context(text, pos))}`);
+    console.log(`  上下文: ${JSON.stringify(context(text, maps.byteToCU[pos]))}`);
   } else {
     console.log(`✓ ${file}${variantLabel}: 切分与 tsc 完全一致（${mine.length} tokens）`);
   }
@@ -268,4 +294,3 @@ for (const file of files) {
   for (const s of hardSamples) console.log(s);
 }
 process.exit(failed ? 1 : 0);
-

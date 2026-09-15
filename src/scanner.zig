@@ -17,6 +17,11 @@ pub const TokenKind = token_mod.TokenKind;
 pub const Options = struct {
     /// 输出注释 token（默认把注释当 trivia 跳过）
     keep_comments: bool = false,
+    /// 旁路收集全部正则字面量的起点 offset（bench 驱动 yuku 用：
+    /// 模板 `${}` 内的正则不出现在主 token 流，只有这里能拿到）。
+    /// 容量由 scan/scanInto 按源中 `/` 数（正则数的上界）预留，
+    /// 收集过程中不再分配。
+    regex_starts: ?*std.ArrayList(u32) = null,
 };
 
 pub const Result = struct {
@@ -195,6 +200,7 @@ pub fn scan(allocator: std.mem.Allocator, src: []const u8, options: Options) !Re
     defer cls.starts.deinit(allocator);
     errdefer allocator.free(cls.line_breaks);
 
+    if (options.regex_starts) |list| try reserveRegexStarts(allocator, src, list);
     try consume(&tokens, allocator, src, &cls.starts, options);
 
     const prefix = try allocator.alloc(u32, cls.line_breaks.len);
@@ -224,8 +230,19 @@ pub fn scanInto(
     var cls = try simd.classifyTokenStarts(allocator, src);
     defer cls.starts.deinit(allocator);
     defer allocator.free(cls.line_breaks);
+    if (options.regex_starts) |list| try reserveRegexStarts(allocator, src, list);
     try consume(tokens, allocator, src, &cls.starts, options);
     return cls.newlines + 1;
+}
+
+/// 正则收集容量预留：正则字面量数以源中 `/` 数为上界。
+fn reserveRegexStarts(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    list: *std.ArrayList(u32),
+) !void {
+    list.clearRetainingCapacity();
+    try list.ensureTotalCapacity(allocator, std.mem.count(u8, src, "/"));
 }
 
 /// 阶段 2：块内迭代候选位，贪心消费。token 区间内的假起点用
@@ -260,7 +277,7 @@ fn consume(
             const start = bi * simd.block_size + @as(usize, @ctz(m));
             m &= m - 1;
             if (start < pos) continue; // 上一个 token 已越过该假候选
-            const tok = tokenAt(src, start, prev);
+            const tok = tokenAt(src, start, prev, options.regex_starts);
             pos = tok.end;
             if (tok.kind == .comment or tok.kind == .whitespace) {
                 if (options.keep_comments) tokens.appendAssumeCapacity(tok);
@@ -307,7 +324,12 @@ pub const dispatch_table: [256]u8 = blk: {
     break :blk t;
 };
 
-pub inline fn tokenAt(src: []const u8, start: usize, prev: ?Token) Token {
+pub inline fn tokenAt(
+    src: []const u8,
+    start: usize,
+    prev: ?Token,
+    regex_starts: ?*std.ArrayList(u32),
+) Token {
     const c = src[start];
     const code = dispatch_table[c];
 
@@ -318,12 +340,16 @@ pub inline fn tokenAt(src: []const u8, start: usize, prev: ?Token) Token {
     if (code & Dispatch.ident_start != 0) return scanIdentifier(src, start);
     if (code & Dispatch.digit != 0) return scanNumber(src, start);
     if (code & Dispatch.quote != 0) {
-        return if (c == '`') scanTemplate(src, start) else scanString(src, start, c);
+        return if (c == '`') scanTemplate(src, start, regex_starts) else scanString(src, start, c);
     }
     if (code & Dispatch.slash != 0) {
         // 注释、除号、正则三解
         if (tryComment(src, start)) |comment| return comment;
-        if (regexAllowedAfter(prev, src)) return scanRegex(src, start);
+        if (regexAllowedAfter(prev, src)) {
+            // 容量由 scan/scanInto 预留（`/` 数上界），此处不再分配
+            if (regex_starts) |list| list.appendAssumeCapacity(@intCast(start));
+            return scanRegex(src, start);
+        }
         return scanPunct(src, start);
     }
     if (code & Dispatch.hash != 0) return scanPrivateName(src, start);
@@ -394,9 +420,8 @@ fn scanString(src: []const u8, start: usize, quote: u8) Token {
 }
 
 /// 模板字面量：允许跨行。SIMD 定位 `` ` ``、`\`、`$`。
-/// `${}` 子表达式用花括号平衡扫描（已感知嵌套模板、行/块注释与字符串；
-/// 已知限制：正则字面量里的 `}` 会骗过计数，根治靠递归调用 scanner 本体）。
-fn scanTemplate(src: []const u8, start: usize) Token {
+/// `${}` 子表达式递归调 scanner 本体定边界（见 scanTemplateSubstitution）。
+fn scanTemplate(src: []const u8, start: usize, regex_starts: ?*std.ArrayList(u32)) Token {
     var i = start + 1;
     while (i < src.len) {
         const chunk = simd.load(src, i);
@@ -411,7 +436,7 @@ fn scanTemplate(src: []const u8, start: usize) Token {
             '\\' => i = idx + 2,
             '$' => {
                 if (idx + 1 < src.len and src[idx + 1] == '{') {
-                    i = scanTemplateSubstitution(src, idx + 2);
+                    i = scanTemplateSubstitution(src, idx + 2, regex_starts);
                 } else {
                     i = idx + 1;
                 }
@@ -422,70 +447,40 @@ fn scanTemplate(src: []const u8, start: usize) Token {
     return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(src.len) }; // EOF 未闭合
 }
 
-/// `${...}` 平衡扫描：返回配对 `}` 之后的位置。跳过子表达式里的
-/// 普通字符串、行/块注释与嵌套模板，防止其中的花括号/反引号干扰计数。
-/// 嵌套模板直接递归 scanTemplate（其内部再进 `${` 时回到这里）。
-/// 已知限制：正则字面量里的 `}`（如 `/}/`）仍可能骗过计数——判别
-/// `/` 需要完整正则/除号语义，极罕见，留待递归调用 scanner 本体时解决。
-fn scanTemplateSubstitution(src: []const u8, from: usize) usize {
+/// `${...}` 边界扫描：递归调 scanner 本体（tokenAt + regexAllowedAfter，
+/// 与主循环同口径），返回配对 `}` 之后的位置。产出的 token 只用于找
+/// 边界，全部丢弃。字符串、注释、嵌套模板、正则（含 pattern 里的
+/// `}` / `//` / `/*`）都按主循环同样的语义跳过，无法骗过花括号配对。
+/// 子表达式通常很小，逐个 token 扫描成本可忽略（bench 裁决）。
+fn scanTemplateSubstitution(src: []const u8, from: usize, regex_starts: ?*std.ArrayList(u32)) usize {
     var depth: usize = 1;
     var i = from;
+    var prev: ?Token = null; // 与主循环同口径：上一个非注释/非空白 token
     while (i < src.len) {
-        if (src.len - i >= simd.block_size) {
-            const base = i;
-            var m = simd.substitutionStopMask(simd.load(src, i));
-            while (m != 0) {
-                const off = @as(usize, @ctz(m));
-                m &= m - 1;
-                const hit = base + off;
-                if (hit < i) continue; // 已被跳过的区间覆盖
-                switch (src[hit]) {
-                    '{' => depth += 1,
-                    '}' => {
-                        depth -= 1;
-                        if (depth == 0) return hit + 1;
-                    },
-                    '\'', '"' => i = skipQuoted(src, hit),
-                    '`' => i = scanTemplate(src, hit).end,
-                    '/' => {
-                        if (hit + 1 < src.len and src[hit + 1] == '/') {
-                            i = lineEnd(src, hit);
-                        } else if (hit + 1 < src.len and src[hit + 1] == '*') {
-                            i = simd.findBlockCommentEnd(src, hit + 2) orelse src.len;
-                        } else {
-                            continue; // 单独的 / 不是注释
-                        }
-                    },
-                    else => unreachable,
-                }
-                // skip 类推进了 i；越过本块则重起 SIMD 扫描
-                if (i >= base + simd.block_size) break;
-            }
-            if (i < base + simd.block_size) i = base + simd.block_size;
+        const c = src[i];
+        if (c == ' ' or (c >= 9 and c <= 13)) {
+            i += 1; // ASCII trivia 逐字节（子表达式通常很小）
             continue;
         }
-        // 标量尾部（不足一块）
-        const c = src[i];
-        if (c == '{') {
-            depth += 1;
-            i += 1;
-        } else if (c == '}') {
-            depth -= 1;
-            i += 1;
-            if (depth == 0) return i;
-        } else if (c == '\'' or c == '"') {
-            i = skipQuoted(src, i);
-        } else if (c == '`') {
-            i = scanTemplate(src, i).end;
-        } else if (c == '/' and i + 1 < src.len and src[i + 1] == '/') {
-            i = lineEnd(src, i);
-        } else if (c == '/' and i + 1 < src.len and src[i + 1] == '*') {
-            i = simd.findBlockCommentEnd(src, i + 2) orelse src.len;
-        } else {
-            i += 1;
+        const t = tokenAt(src, i, prev, regex_starts);
+        if (t.end <= i) return src.len; // 防御：token 不前进按未闭合处理
+        i = t.end;
+        switch (t.kind) {
+            .comment, .whitespace => continue, // trivia 不进 prev（同主循环）
+            .punct => {
+                const text = t.slice(src);
+                if (text[0] == '{') {
+                    depth += 1;
+                } else if (text[0] == '}') {
+                    depth -= 1;
+                    if (depth == 0) return i;
+                }
+                prev = t;
+            },
+            else => prev = t,
         }
     }
-    return i;
+    return i; // EOF 未闭合
 }
 
 /// 解码 i 处（指向 `\`）的标识符转义 `\uXXXX`，返回码点与总长 6。
@@ -918,6 +913,60 @@ test "模板字面量（含子表达式与换行）" {
             .{ .eof, "" },
         },
     );
+}
+
+test "模板子表达式里的正则（回归：pattern 里的 //、/*、} 不再骗过配对）" {
+    // 回归：typescript.min.js 实测抓到的形态——子表达式内正则里的 `//` 被
+    // 当行注释，吞掉模板收尾反引号，整个模板塌成 illegal 直到 EOF
+    try expectTokens("` ${r.replace(/\\*\\//g,\"*_/\")} `", &.{
+        .{ .template, "` ${r.replace(/\\*\\//g,\"*_/\")} `" },
+        .{ .eof, "" },
+    });
+    // 正则 pattern 含 `}`（旧已知限制 tradeoff L1，递归 scanner 后根治）
+    try expectTokens("`a${ /}/.test(x) }b`", &.{
+        .{ .template, "`a${ /}/.test(x) }b`" },
+        .{ .eof, "" },
+    });
+    // URL 正则：pattern 里的 `//` 不再吞行
+    try expectTokens("` ${u.match(/https?:\\/\\//)} `", &.{
+        .{ .template, "` ${u.match(/https?:\\/\\//)} `" },
+        .{ .eof, "" },
+    });
+    // 子表达式里的除法不能反被误判成正则吞掉收尾反引号
+    try expectTokens("` ${x/y}` + /re/g", &.{
+        .{ .template, "` ${x/y}`" },
+        .{ .punct, "+" },
+        .{ .regex, "/re/g" },
+        .{ .eof, "" },
+    });
+    // 嵌套模板 + 内层子表达式的正则（pattern 为 // 本身）
+    try expectTokens("`a${ `b${ /\\/\\// }c` }d`", &.{
+        .{ .template, "`a${ `b${ /\\/\\// }c` }d`" },
+        .{ .eof, "" },
+    });
+    // 子表达式里的对象字面量：花括号配对照常
+    try expectTokens("` ${({a:1}).a} `", &.{
+        .{ .template, "` ${({a:1}).a} `" },
+        .{ .eof, "" },
+    });
+    // 未闭合：容错不变，illegal 到 EOF
+    try expectTokens("` ${x", &.{
+        .{ .illegal, "` ${x" },
+        .{ .eof, "" },
+    });
+}
+
+test "regex_starts 旁路收集：模板与嵌套模板内的正则，除法不收" {
+    // bench 驱动 yuku 用：模板 `${}` 内的正则不在主 token 流，缺了它
+    // yuku 会把正则当除号扫死（typescript.min.js 在 24KB 处报错回归）
+    const src = "a/b; `x${ /c/ }y${ `z${ /d/ }w` }v`; /e/g";
+    var starts: std.ArrayList(u32) = .empty;
+    defer starts.deinit(testing.allocator);
+    var result = try scan(testing.allocator, src, .{ .regex_starts = &starts });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualSlices(u32, &.{ 10, 24, 37 }, starts.items);
+    // 每个收集到的起点都确实指向 `/`
+    for (starts.items) |s| try testing.expectEqual(@as(u8, '/'), src[s]);
 }
 
 test "注释默认跳过" {

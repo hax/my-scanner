@@ -13,7 +13,17 @@
 N 轮取最优。yuku 纯 scanner 与 tsc 同款把正则/模板续扫推迟给 parser，
 bench 里按 yuku parser 的方式调 `reScanAsRegex` /
 `reScanTemplateContinuation` 对齐（正则决策与 my-scanner 完全一致，
-模板用花括号平衡栈跟踪）。
+模板用花括号平衡栈跟踪）。正则起点集合必须含模板 `${}` 内的正则——
+my-scanner 的模板整体算一个 token，主 token 流里没有内部正则，bench
+用 scanner 的 `regex_starts` 选项旁路收集（曾漏收，yuku 在
+typescript.min.js 24KB 处把 `\s` 当标识符转义报 InvalidUnicodeEscape，
+锚点整行失真）。
+
+语料分 **real**（真实代码）与 **synthetic**（构造极端样本，microbench
+专用）两类，唯一权威存储是 corpus 分支（check.sh/ci-bench.sh 自动
+拉取校验）；谱系与 provenance 见 [corpus.md](corpus.md)。报告含
+「变体 × 语料」矩阵与 real/synthetic 分组几何平均——不同架构在不同
+语料上的胜负一眼可见，且构造数据不稀释真实结论。
 
 ## 对 yuku 的对比（本地 M2 快照）
 

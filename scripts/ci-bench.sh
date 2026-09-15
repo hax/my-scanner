@@ -18,6 +18,9 @@ REPEATS="${BENCH_REPEATS:-25}"
 OUT=build/bench
 mkdir -p "$OUT"
 
+# 语料来自 corpus 分支,缺失时自动拉取(幂等)
+scripts/prepare-corpus.sh
+
 echo "==== [1/4] zig build test ===="
 zig build test
 
@@ -30,7 +33,7 @@ echo "==== [3/4] 差分门禁:全部架构变体 vs tsc ===="
 if [ "${SKIP_DIFF:-0}" != "1" ]; then
   for v in two_phase scalar jump_vec; do
     echo "---- variant: $v ----"
-    node tools/compare-tsc.mjs --variant="$v" corpus/*.js corpus/*.ts
+    node tools/compare-tsc.mjs --variant="$v" corpus/real/*.js corpus/real/*.ts corpus/synthetic/*.js corpus/synthetic/*.ts
   done
 else
   echo "(SKIP_DIFF=1,跳过——数字仅作参考)"
@@ -51,8 +54,10 @@ if [ ! -f .bench-deps/yuku/src/parser/lexer.zig ] || [ ! -f .bench-deps/yuku-mai
   }
 fi
 zig build -Doptimize=ReleaseFast bench -- --repeats="$REPEATS" --json="$OUT/zig.json" \
-  corpus/typescript.js corpus/checker.ts corpus/react.js corpus/lib.dom.d.ts \
-  corpus/line-comments.js corpus/strings.js corpus/cn-dense.ts
+  corpus/real/typescript.min.js corpus/real/typescript.js corpus/real/checker.ts \
+  corpus/real/lib.dom.d.ts corpus/real/react.js \
+  corpus/real/hanzi-chai.ts corpus/real/mon-entreprise.ts \
+  corpus/synthetic/line-comments.js corpus/synthetic/strings.js corpus/synthetic/cn-dense.ts
 
 echo
 echo "==== 汇总报告 ===="

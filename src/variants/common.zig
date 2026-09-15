@@ -163,7 +163,7 @@ test "skipWhitespace 与 countLogicalNewlines 组合覆盖全文件" {
         pos = ws.pos;
         if (pos >= src.len) break;
         // 到下一个非空白 token 的粗略终点：这里直接借两阶段 tokenAt
-        const tok = scanner.tokenAt(src, pos, null);
+        const tok = scanner.tokenAt(src, pos, null, null);
         if (countsNewlines(tok.kind)) total += countLogicalNewlines(src[tok.start..tok.end]);
         pos = tok.end;
     }

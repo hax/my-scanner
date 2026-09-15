@@ -6,6 +6,9 @@
 // 输出:
 //   <dir>/report.md   — 人读报告(CI step summary / bench-reports 分支归档)
 //   <dir>/data.json   — 单 run 结构化数据(趋势页 index 累积用)
+//
+// 语料的分组(real/synthetic)与谱系标签读 tools/corpus-manifest.json
+// (单一来源);报告含语料谱系表、变体 × 语料矩阵、分组几何平均。
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -22,6 +25,7 @@ const IMPL_META = {
   oxc: { family: "第三方(口径待校准)", peer: "—" },
 };
 const IMPL_ORDER = ["scalar", "jump_vec", "two_phase", "yuku_old", "yuku_main", "swc", "oxc"];
+const OWN = ["scalar", "jump_vec", "two_phase"]; // 自有架构(矩阵列)
 const ANCHOR = "yuku_main"; // 相对值锚点
 
 const argv = process.argv.slice(2);
@@ -48,6 +52,11 @@ const runner = {
   cpu: env("sh", ["-c", "grep -m1 'model name' /proc/cpuinfo 2>/dev/null || sysctl -n machdep.cpu.brand_string 2>/dev/null || true"]),
   zig: env("zig", ["version"]),
 };
+
+// 语料清单:分组/谱系标签的单一来源(数组顺序即报告展示顺序)
+let manifest = { files: [] };
+try { manifest = JSON.parse(readFileSync(new URL("../tools/corpus-manifest.json", import.meta.url), "utf8")); } catch { /* 缺清单也能出报告 */ }
+const metaByPath = new Map(manifest.files.map((f, i) => [f.path, { ...f, order: i }]));
 
 // 合并 zig + rust 的 runs(按 file 对齐;rust 缺失的文件不补)
 const files = new Map(); // file -> {bytes, results: Map}
@@ -76,17 +85,20 @@ const fileRuns = [...files.entries()].map(([file, f]) => {
   }
   const anchor = results[ANCHOR];
   if (anchor) for (const r of Object.values(results)) r.vs_anchor = anchor.best_ns / r.best_ns;
-  return { file, bytes: f.bytes, results };
+  const m = metaByPath.get(file);
+  return { file, bytes: f.bytes, results, group: m?.group ?? "—", tag: m?.tag ?? "—", order: m?.order ?? 999 };
 });
+fileRuns.sort((a, b) => a.order - b.order);
 
 // ---- data.json ----
 const dataJson = {
   sha, date: new Date().toISOString(), subject, repeats: Number(repeats) || null, runner,
-  files: fileRuns,
+  files: fileRuns.map(({ order, ...rest }) => rest),
 };
 writeFileSync(join(outDir, "data.json"), JSON.stringify(dataJson, null, 1) + "\n");
 
 // ---- report.md ----
+const short = (p) => p.replace(/^corpus\//, "");
 const lines = [];
 lines.push(`# 架构矩阵基准 — \`${sha.slice(0, 10)}\``);
 lines.push("");
@@ -104,6 +116,18 @@ for (const name of IMPL_ORDER) {
 }
 lines.push("");
 
+// 语料谱系(real 真实语料 / synthetic 构造极端语料,后者供 microbench 压力用)
+lines.push("## 语料谱系");
+lines.push("");
+lines.push("| 文件 | 分组 | 谱系 | 大小 | tok/KB |");
+lines.push("| --- | --- | --- | ---: | ---: |");
+for (const fr of fileRuns) {
+  const tk = fr.results.two_phase?.tokens ?? Object.values(fr.results)[0]?.tokens;
+  const tokb = tk != null && fr.bytes > 0 ? (tk / (fr.bytes / 1024)).toFixed(0) : "—";
+  lines.push(`| \`${short(fr.file)}\` | ${fr.group} | ${fr.tag} | ${(fr.bytes / 1e6).toFixed(2)} MB | ${tokb} |`);
+}
+lines.push("");
+
 for (const fr of fileRuns) {
   lines.push(`## ${fr.file} (${(fr.bytes / 1e6).toFixed(2)} MB)`);
   lines.push("");
@@ -117,22 +141,44 @@ for (const fr of fileRuns) {
   lines.push("");
 }
 
-// 几何平均(vs 锚点,跨文件)——架构演化趋势的单值指标
-const geo = {};
-for (const fr of fileRuns) {
-  for (const [name, r] of Object.entries(fr.results)) {
-    if (r.vs_anchor == null) continue;
-    geo[name] = (geo[name] ?? 1) * r.vs_anchor;
-  }
-}
-const n = fileRuns.length;
-lines.push(`## 几何平均(vs yuku-main,${n} 个语料)`);
+// 变体 × 语料矩阵:一眼看清哪个架构在哪类语料上赢(混合策略的证据底座)
+lines.push("## 变体 × 语料(vs yuku-main;每行最快加粗)");
 lines.push("");
-lines.push("| 实现 | 几何平均 |");
-lines.push("| --- | ---: |");
-const names = IMPL_ORDER.filter((x) => geo[x]);
-names.sort((a, b) => geo[b] - geo[a]);
-for (const name of names) lines.push(`| \`${name}\` | ${fmt(Math.pow(geo[name], 1 / n))}x |`);
+lines.push(`| 语料 | 谱系 | ${OWN.map((x) => `\`${x}\``).join(" | ")} |`);
+lines.push("| --- | --- | ---: | ---: | ---: |");
+for (const fr of fileRuns) {
+  let best = -1;
+  for (const n of OWN) best = Math.max(best, fr.results[n]?.vs_anchor ?? -1);
+  const cells = OWN.map((n) => {
+    const v = fr.results[n]?.vs_anchor;
+    if (v == null) return "—";
+    const s = fmt(v) + "x";
+    return v === best && best > 0 ? `**${s}**` : s;
+  });
+  lines.push(`| \`${short(fr.file)}\` | ${fr.tag} | ${cells.join(" | ")} |`);
+}
+lines.push("");
+
+// 分组几何平均(vs 锚点)——真实/构造分开,防止构造语料稀释真实结论;
+// 全体一行保持与旧报告口径连续
+lines.push("## 几何平均(vs yuku-main)");
+lines.push("");
+const geoImpls = IMPL_ORDER.filter((name) => fileRuns.some((fr) => fr.results[name]?.vs_anchor != null));
+lines.push(`| 范围 | ${geoImpls.map((x) => `\`${x}\``).join(" | ")} |`);
+lines.push(`| --- |${" ---: |".repeat(geoImpls.length)}`);
+for (const [g, label] of [[null, "全体"], ["real", "真实语料"], ["synthetic", "构造语料"]]) {
+  const subset = g ? fileRuns.filter((fr) => fr.group === g) : fileRuns;
+  if (subset.length === 0) continue;
+  const cells = geoImpls.map((name) => {
+    let prod = 1, n = 0;
+    for (const fr of subset) {
+      const v = fr.results[name]?.vs_anchor;
+      if (v != null) { prod *= v; n++; }
+    }
+    return n ? fmt(Math.pow(prod, 1 / n)) + "x" : "—";
+  });
+  lines.push(`| ${label}(${subset.length} 个) | ${cells.join(" | ")} |`);
+}
 lines.push("");
 
 writeFileSync(join(outDir, "report.md"), lines.join("\n") + "\n");

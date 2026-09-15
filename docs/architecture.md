@@ -155,10 +155,17 @@ cn-dense 上 jump_vec ≈ two_phase——中文密集语料两阶段无优势，
 
 1. `zig build test` 单测；
 2. **差分门禁**：3 变体 × 全 corpus 对拍 tsc，任一失败即红；
-3. 架构矩阵基准（同进程 7 语料 × {scalar, jump_vec, two_phase,
+3. 架构矩阵基准（同进程 10 语料 × {scalar, jump_vec, two_phase,
    yuku-old, yuku-main}，N 轮取最优，正则/模板歧义点按同一决策集
    注入——yuku 走 `reScanAsRegex`/`reScanTemplateContinuation` 对拍）；
-4. `scripts/make-report.mjs` 汇总成 `report.md` + `data.json`。
+4. `scripts/make-report.mjs` 汇总成 `report.md` + `data.json`
+   （语料谱系表 + 变体 × 语料矩阵 + real/synthetic 分组几何平均）。
+
+语料由 **corpus 孤儿分支**提供（只含语料不含源码）：CI 用第二个
+checkout step 显式拉取，本地由 `scripts/prepare-corpus.sh` 幂等拉取 +
+sha256 校验；谱系、provenance 与更新流程（publish-corpus）见
+[corpus.md](corpus.md)。语料分 real（真实代码）与 synthetic（构造极端
+样本，microbench 专用），分组汇总防止构造数据稀释真实结论。
 
 `.github/workflows/bench.yml`：push 到 main 触发，报告贴进 run
 summary + artifact，并归档到 **bench-reports 分支**

@@ -148,14 +148,16 @@ fn benchFile(
     // yuku 纯 scanner 与 tsc 同款设计：`/` 保守判除号，正则由 parser 在表达式
     // 位置调 reScanAsRegex 重扫。为保证两个 lexer 做出完全相同的正则/除号
     // 决策，用 my-scanner 的结果确定正则起点集合，命中时按其 parser 方式重扫。
+    // 模板 `${}` 内的正则不在主 token 流（我的模板整体算一个 token），
+    // 靠 scan 的 regex_starts 选项旁路收集，缺了它 yuku 会把正则当除号
+    // 扫死（typescript.min.js 曾因此在 24KB 处报 InvalidUnicodeEscape）。
     var regex_starts = std.AutoHashMap(u32, void).init(arena);
     defer regex_starts.deinit();
     {
-        const result = try my_scanner.scan(arena, src, .{});
+        var regex_list: std.ArrayList(u32) = .empty;
+        const result = try my_scanner.scan(arena, src, .{ .regex_starts = &regex_list });
         defer arena.free(result.tokens);
-        for (result.tokens) |t| {
-            if (t.kind == .regex) try regex_starts.put(t.start, {});
-        }
+        for (regex_list.items) |s| try regex_starts.put(s, {});
     }
 
     const find = struct {

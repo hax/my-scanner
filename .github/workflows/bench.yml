@@ -17,6 +17,13 @@ jobs:
         with:
           fetch-depth: 1
 
+      # 语料在 corpus 分支(只含语料不含源码),检出到 corpus/ 目录
+      - uses: actions/checkout@v4
+        with:
+          ref: corpus
+          path: corpus
+          fetch-depth: 1
+
       - uses: mlugg/setup-zig@v1
         with:
           zig-version: 0.16.0

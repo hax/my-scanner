@@ -95,33 +95,39 @@ fn scanTemplateScalar(src: []const u8, start: usize) Token {
     return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(src.len) };
 }
 
-/// `${...}` 平衡扫描（scanTemplateSubstitution 的纯标量版）：
-/// 跳过子表达式里的字符串、行/块注释与嵌套模板。
+/// `${...}` 边界扫描（scanTemplateSubstitution 的纯标量版，同一设计）：
+/// 逐 token 扫描（tokenAtScalar + regexAllowedAfter，与主循环同口径），
+/// 返回配对 `}` 之后的位置；token 只用于定边界，全部丢弃。字符串、注释、
+/// 嵌套模板、正则（含 pattern 里的 `}` / `//` / `/*`）都无法骗过配对。
 fn scanTemplateSubstitutionScalar(src: []const u8, from: usize) usize {
     var depth: usize = 1;
     var i = from;
+    var prev: ?Token = null; // 与主循环同口径：上一个非注释/非空白 token
     while (i < src.len) {
         const c = src[i];
-        if (c == '{') {
-            depth += 1;
-            i += 1;
-        } else if (c == '}') {
-            depth -= 1;
-            i += 1;
-            if (depth == 0) return i;
-        } else if (c == '\'' or c == '"') {
-            i = scanner.skipQuoted(src, i);
-        } else if (c == '`') {
-            i = scanTemplateScalar(src, i).end;
-        } else if (c == '/' and i + 1 < src.len and src[i + 1] == '/') {
-            i = lineEndScalar(src, i);
-        } else if (c == '/' and i + 1 < src.len and src[i + 1] == '*') {
-            i = findBlockCommentEndScalar(src, i + 2) orelse src.len;
-        } else {
-            i += 1;
+        if (c == ' ' or (c >= 9 and c <= 13)) {
+            i += 1; // ASCII trivia 逐字节（子表达式通常很小）
+            continue;
+        }
+        const t = tokenAtScalar(src, i, prev);
+        if (t.end <= i) return src.len; // 防御：token 不前进按未闭合处理
+        i = t.end;
+        switch (t.kind) {
+            .comment, .whitespace => continue, // trivia 不进 prev（同主循环）
+            .punct => {
+                const text = t.slice(src);
+                if (text[0] == '{') {
+                    depth += 1;
+                } else if (text[0] == '}') {
+                    depth -= 1;
+                    if (depth == 0) return i;
+                }
+                prev = t;
+            },
+            else => prev = t,
         }
     }
-    return i;
+    return i; // EOF 未闭合
 }
 
 /// 标识符：纯标量贪心（两阶段版长标识符走 SIMD 续扫，这里刻意不用）。
