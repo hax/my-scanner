@@ -382,7 +382,8 @@ fn scanString(src: []const u8, start: usize, quote: u8) Token {
             return .{ .kind = .string, .start = @intCast(start), .end = @intCast(idx + 1) };
         }
         if (c == '\\') {
-            // TODO: 行继续 `\<newline>` 的换行数目前漏计（编辑器物理行视角）
+            // TODO: `\`+CRLF 时这里只跳 2 字节（\ 与 \r），随后的 \n 命中
+            // stop mask 被当裸换行，合法行继续被截断为 illegal（LF 行尾正常）
             i = idx + 2;
             continue;
         }
@@ -393,8 +394,8 @@ fn scanString(src: []const u8, start: usize, quote: u8) Token {
 }
 
 /// 模板字面量：允许跨行。SIMD 定位 `` ` ``、`\`、`$`。
-/// `${}` 子表达式用简易花括号平衡扫描（TODO: 子表达式里的嵌套模板、
-/// 注释等还会骗过计数，后续改为递归调用 scanner 本体）。
+/// `${}` 子表达式用花括号平衡扫描（已感知嵌套模板、行/块注释与字符串；
+/// 已知限制：正则字面量里的 `}` 会骗过计数，根治靠递归调用 scanner 本体）。
 fn scanTemplate(src: []const u8, start: usize) Token {
     var i = start + 1;
     while (i < src.len) {
@@ -587,7 +588,8 @@ pub fn scanPrivateName(src: []const u8, start: usize) Token {
 
 /// 数字字面量：0x/0o/0b、十进制、小数、指数、`_` 分隔符、BigInt `n` 后缀。
 /// 标量实现：数字 token 平均只有几字节，SIMD 收益存疑，先求正确。
-/// TODO: legacy 八进制、`1.e3`、紧跟标识符字符的非法恢复。
+/// TODO: legacy 八进制、空十六进制 `0x`、指数无数字 `1.e`、`3in` 等
+/// 非法形态按容错策略产出 token（边界近似 tsc），不产语义错误标记（goals.md L3）。
 pub fn scanNumber(src: []const u8, start: usize) Token {
     var i = start;
     if (src[i] == '0' and i + 1 < src.len) {

@@ -36,7 +36,7 @@ inline fn splat(c: u8) Chunk {
 }
 
 /// JS 空白 + 行终止符集合：' ' \t \n \r \v \f。
-/// 多字节空白（U+00A0 等）由 scanner 层处理（见 TODO）。
+/// 多字节空白（U+00A0 等）由 scanner 层的 Unicode whitespace 修正处理。
 pub inline fn whitespaceMask(chunk: Chunk) Mask {
     const space = chunk == splat(' ');
     const control = (chunk >= splat('\t')) & (chunk <= splat('\r'));
@@ -47,7 +47,8 @@ pub inline fn newlineMask(chunk: Chunk) Mask {
     return @bitCast(chunk == splat('\n'));
 }
 
-/// 标识符后续字符 [A-Za-z0-9_$]（ASCII 阶段；unicode 见 scanner TODO）。
+/// 标识符后续字符 [A-Za-z0-9_$]（ASCII 平面；非 ASCII 由 scanner 层
+/// 解码并查 ID_Continue 范围表续扫）。
 pub inline fn identPartMask(chunk: Chunk) Mask {
     const lower = (chunk >= splat('a')) & (chunk <= splat('z'));
     const upper = (chunk >= splat('A')) & (chunk <= splat('Z'));

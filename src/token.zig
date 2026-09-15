@@ -18,7 +18,7 @@ pub const TokenKind = enum {
     number,
     /// 字符串字面量（单/双引号）
     string,
-    /// 模板字面量（反引号；`${}` 子表达式暂整体归入，见 scanner 的 TODO）
+    /// 模板字面量（反引号；`${}` 子表达式整体归入，不拆 Head/Middle/Tail）
     template,
     /// 正则字面量 `/.../flags`
     regex,
