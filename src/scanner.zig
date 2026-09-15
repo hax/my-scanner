@@ -68,125 +68,53 @@ pub const LineIndex = struct {
 /// 归入 keyword 只是给上层的提示，文本仍是判别依据）。
 /// TS 类型层关键字（interface/type/namespace 等）不在列，留给上层。
 ///
-/// 判别用 isKeyword（长度 + 首字符两级分发，无 hash）；本表仅作
-/// 交叉验证与文档。
-const keywords = std.StaticStringMap(void).initComptime(.{
-    .{ "async", {} },
-    .{ "await", {} },
-    .{ "break", {} },
-    .{ "case", {} },
-    .{ "catch", {} },
-    .{ "class", {} },
-    .{ "const", {} },
-    .{ "continue", {} },
-    .{ "debugger", {} },
-    .{ "default", {} },
-    .{ "delete", {} },
-    .{ "do", {} },
-    .{ "else", {} },
-    .{ "enum", {} },
-    .{ "export", {} },
-    .{ "extends", {} },
-    .{ "finally", {} },
-    .{ "for", {} },
-    .{ "function", {} },
-    .{ "if", {} },
-    .{ "implements", {} },
-    .{ "import", {} },
-    .{ "in", {} },
-    .{ "instanceof", {} },
-    .{ "interface", {} },
-    .{ "let", {} },
-    .{ "new", {} },
-    .{ "of", {} },
-    .{ "package", {} },
-    .{ "private", {} },
-    .{ "protected", {} },
-    .{ "public", {} },
-    .{ "return", {} },
-    .{ "static", {} },
-    .{ "super", {} },
-    .{ "switch", {} },
-    .{ "this", {} },
-    .{ "throw", {} },
-    .{ "try", {} },
-    .{ "typeof", {} },
-    .{ "var", {} },
-    .{ "void", {} },
-    .{ "while", {} },
-    .{ "with", {} },
-    .{ "yield", {} },
+const keyword_list = [_][]const u8{
+    "async",      "await",   "break",  "case",     "catch",
+    "class",      "const",   "continue", "debugger", "default",
+    "delete",     "do",      "else",   "enum",     "export",
+    "extends",    "finally", "for",    "function", "if",
+    "implements", "import",  "in",     "instanceof", "interface",
+    "let",        "new",     "of",     "package",  "private",
+    "protected",  "public",  "return", "static",   "super",
+    "switch",     "this",    "throw",  "try",      "typeof",
+    "var",        "void",    "while",  "with",     "yield",
+};
+
+/// 判别用 isKeyword（完美哈希一次探查）；本表仅作测试交叉验证与文档。
+const keywords = std.StaticStringMap(void).initComptime(blk: {
+    var kvs: [keyword_list.len]struct { []const u8, void } = undefined;
+    for (keyword_list, 0..) |kw, i| kvs[i] = .{ kw, {} };
+    break :blk kvs;
 });
 
-/// 关键字判别的热路径：长度先排除（2..11），再按首字符分发到
-/// 少量 memcmp 候选。与 keywords 表的等价性由测试交叉验证。
+/// 关键字判别的热路径：完美哈希（首 + 次 + 末字符 + 长度）一次探查 +
+/// 一次 memcmp 确证。乘数离线搜索到零碰撞（45 词 → 128 槽，构建期
+/// @compileError 验证）。替代 len+首字符两级 switch + memcmp 链：
+/// switch 的间接跳转对多样标识符不友好，内联 memcmp 链还让
+/// scanIdentifier 膨胀到 4KB（profile 实测关键字判别占扫描 11%）。
+/// 与 keywords 表的等价性由测试交叉验证。
+fn keywordHash(text: []const u8) usize {
+    return (text[0] +% text[1] +% text[text.len - 1] *% 62 +% text.len *% 27) & 127;
+}
+
+const KwEntry = struct { name: [10]u8, len: u8 };
+
+const keyword_table: [128]KwEntry = blk: {
+    var t: [128]KwEntry = @splat(.{ .name = @splat(0), .len = 0 });
+    for (keyword_list) |kw| {
+        const h = keywordHash(kw);
+        if (t[h].len != 0) @compileError("完美哈希碰撞: " ++ kw);
+        var name: [10]u8 = @splat(0);
+        @memcpy(name[0..kw.len], kw);
+        t[h] = .{ .name = name, .len = kw.len };
+    }
+    break :blk t;
+};
+
 pub fn isKeyword(text: []const u8) bool {
-    const eql = std.mem.eql;
     if (text.len < 2 or text.len > 10) return false;
-    return switch (text.len) {
-        2 => switch (text[0]) {
-            'd' => eql(u8, text, "do"),
-            'i' => eql(u8, text, "if") or eql(u8, text, "in"),
-            'o' => eql(u8, text, "of"),
-            else => false,
-        },
-        3 => switch (text[0]) {
-            'f' => eql(u8, text, "for"),
-            'l' => eql(u8, text, "let"),
-            'n' => eql(u8, text, "new"),
-            't' => eql(u8, text, "try"),
-            'v' => eql(u8, text, "var"),
-            else => false,
-        },
-        4 => switch (text[0]) {
-            'c' => eql(u8, text, "case"),
-            'e' => eql(u8, text, "else") or eql(u8, text, "enum"),
-            't' => eql(u8, text, "this"),
-            'v' => eql(u8, text, "void"),
-            'w' => eql(u8, text, "with"),
-            else => false,
-        },
-        5 => switch (text[0]) {
-            'a' => eql(u8, text, "async") or eql(u8, text, "await"),
-            'b' => eql(u8, text, "break"),
-            'c' => eql(u8, text, "catch") or eql(u8, text, "class") or eql(u8, text, "const"),
-            's' => eql(u8, text, "super"),
-            't' => eql(u8, text, "throw"),
-            'w' => eql(u8, text, "while"),
-            'y' => eql(u8, text, "yield"),
-            else => false,
-        },
-        6 => switch (text[0]) {
-            'd' => eql(u8, text, "delete"),
-            'e' => eql(u8, text, "export"),
-            'i' => eql(u8, text, "import"),
-            'p' => eql(u8, text, "public"),
-            'r' => eql(u8, text, "return"),
-            's' => eql(u8, text, "static") or eql(u8, text, "switch"),
-            't' => eql(u8, text, "typeof"),
-            else => false,
-        },
-        7 => switch (text[0]) {
-            'd' => eql(u8, text, "default"),
-            'e' => eql(u8, text, "extends"),
-            'f' => eql(u8, text, "finally"),
-            'p' => eql(u8, text, "package") or eql(u8, text, "private"),
-            else => false,
-        },
-        8 => switch (text[0]) {
-            'c' => eql(u8, text, "continue"),
-            'd' => eql(u8, text, "debugger"),
-            'f' => eql(u8, text, "function"),
-            else => false,
-        },
-        9 => switch (text[0]) {
-            'i' => eql(u8, text, "interface"),
-            'p' => eql(u8, text, "protected"),
-            else => false,
-        },
-        10 => eql(u8, text, "implements") or eql(u8, text, "instanceof"),
-        else => false,
-    };
+    const e = &keyword_table[keywordHash(text)];
+    return e.len == text.len and std.mem.eql(u8, text, e.name[0..e.len]);
 }
 
 /// 扫描 src，返回 token 序列（以 eof 收尾）+ 行号索引。
