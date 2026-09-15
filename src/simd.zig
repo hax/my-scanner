@@ -365,6 +365,81 @@ pub fn classifyTokenStarts(
     return .{ .starts = .{ .masks = masks }, .line_breaks = line_breaks, .newlines = newlines };
 }
 
+/// 只算逻辑换行位图的裁剪版分类 pass——单阶段变体（jump_vec）的行号
+/// 地基。与 classifyTokenStarts 的 brk 逻辑逐位一致（\n、孤立 \r、
+/// CRLF 跨块回改、U+2028/U+2029 块内与跨块悬挂），但不做 ident/ws
+/// 平面、Unicode whitespace 修正与候选合成，也不写候选位图
+/// （省 masks 数组的分配与写读流量）。等价性由与
+/// classifyTokenStartsScalar 的交叉验证保证。
+pub fn classifyLineBreaks(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+) !struct { line_breaks: []u32, newlines: usize } {
+    const nblocks = (src.len + block_size - 1) / block_size;
+    const line_breaks = try allocator.alloc(u32, nblocks);
+    errdefer allocator.free(line_breaks);
+
+    var newlines: usize = 0;
+    var carry_lf: u32 = 0;
+    // 前块末字节是否 \r：若是且本块首是 \n，前块尾 \r 的乐观换行标记要回改
+    var prev_was_cr = false;
+
+    for (line_breaks, 0..) |*out, bi| {
+        const i = bi * block_size;
+        const chunk = load(src, i);
+        const rem = src.len - i;
+        const valid: u32 = if (rem >= block_size)
+            std.math.maxInt(u32)
+        else
+            (@as(u32, 1) << @intCast(rem)) - 1;
+
+        var brk_marked: u32 = 0;
+        // 纯 ASCII 块（且前块末尾无悬挂）整体跳过 Unicode 探测
+        const high = highByteMask(chunk);
+        if (high != 0 or (i >= 1 and src[i - 1] >= 0x80) or (i >= 2 and src[i - 2] >= 0x80)) {
+            // 跨块悬挂：U+2028/29 的首字节在前块、末字节在本块开头，
+            // break 位标在末字节位置（A8/A9 精确对应）
+            const dangle = danglingUnicodeWs(src, i);
+            if (dangle != 0 and (src[i + dangle - 1] == 0xA8 or src[i + dangle - 1] == 0xA9)) {
+                brk_marked = @as(u32, 1) << @intCast(dangle - 1);
+            }
+            // 块内完整的 U+2028/29（E2 80 A8/A9），位标记在末字节
+            if ((eqMask(chunk, 0xE2) & valid) != 0) {
+                const e2 = eqMask(chunk, 0xE2);
+                const m80 = eqMask(chunk, 0x80);
+                const a8a9 = eqMask(chunk, 0xA8) | eqMask(chunk, 0xA9);
+                brk_marked |= ((e2 << 2) & (m80 << 1) & a8a9) & valid;
+            }
+            // 跨块 U+2028/29 收尾（E2 80 在前块尾、A8/A9 在本块首）
+            if (i >= 2 and src[i - 2] == 0xE2 and src[i - 1] == 0x80 and rem >= 1 and
+                (src[i] == 0xA8 or src[i] == 0xA9))
+            {
+                brk_marked |= 1;
+            }
+        }
+
+        // 逻辑换行位图（位标记在行终止字节）：\n、孤立 \r（下一字节非
+        // \n，CRLF 只在 \n 计一次）
+        const lf = eqMask(chunk, '\n');
+        const cr = eqMask(chunk, '\r');
+        const lf_next = (lf >> 1) | carry_lf; // i+1 是 \n：右移对齐到 \r 的位
+        var brk = (lf | (cr & ~lf_next)) & valid;
+        // 跨块 CRLF：前块尾 \r 被乐观标记为换行，本块首是 \n 则回改
+        if (bi > 0 and prev_was_cr and rem >= 1 and src[i] == '\n') {
+            line_breaks[bi - 1] &= ~(@as(u32, 1) << (block_size - 1));
+            newlines -= 1;
+        }
+        carry_lf = lf >> (block_size - 1);
+        prev_was_cr = (cr & valid & (@as(u32, 1) << (block_size - 1))) != 0;
+
+        brk |= brk_marked;
+        out.* = brk;
+        newlines += @as(usize, @popCount(brk));
+    }
+
+    return .{ .line_breaks = line_breaks, .newlines = newlines };
+}
+
 /// classifyTokenStarts 的标量对照实现：逐码点状态机，语义与 SIMD 版完全
 /// 一致（ID-like 连接、Unicode whitespace 修正、逻辑换行）。
 /// 用途：交叉验证 SIMD 版正确性 + bench 量化 SIMD 的贡献（A/B）。
@@ -736,6 +811,39 @@ test "classifyTokenStarts 与标量版交叉验证" {
             return e;
         };
         try testing.expectEqual(scalar_r.newlines, simd_r.newlines);
+    }
+}
+
+test "classifyLineBreaks 与 classifyTokenStarts 换行位图逐块一致" {
+    const cases = [_][]const u8{
+        "",
+        "a",
+        "let x = 42;",
+        "  \t\n  \r\n  \r  ",
+        "a\u{2028}b\u{2029}c",
+        "\u{00a0}a\u{3000}b\u{feff}",
+        "末尾孤立\r",
+        // 跨块 CRLF（\r 在块尾、\n 在下块首）：前块乐观标记要回改
+        "d" ** 31 ++ "\r\ne",
+        // 跨块 U+2028/U+2029（E2 80 恰在块尾、末字节在块首）
+        "b" ** 31 ++ "\u{2028}y",
+        "c" ** 30 ++ "\u{2029}\u{2000}z",
+        "// comment\n/* block\ncomment */ `模板\n串` 'a\\nb'",
+    };
+    for (cases) |src| {
+        const full = try classifyTokenStarts(testing.allocator, src);
+        defer {
+            var s0 = full;
+            s0.starts.deinit(testing.allocator);
+        }
+        defer testing.allocator.free(full.line_breaks);
+        const lb = try classifyLineBreaks(testing.allocator, src);
+        defer testing.allocator.free(lb.line_breaks);
+        testing.expectEqualSlices(u32, full.line_breaks, lb.line_breaks) catch |e| {
+            std.debug.print("line_breaks 不一致: {s}\n", .{src});
+            return e;
+        };
+        try testing.expectEqual(full.newlines, lb.newlines);
     }
 }
 

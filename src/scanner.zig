@@ -233,6 +233,9 @@ pub const Dispatch = struct {
     pub const punct_multi: u8 = 1 << 4;
     pub const slash: u8 = 1 << 5; // / 注释/正则/除号三义
     pub const hash: u8 = 1 << 6; // #
+    /// ASCII 空白（' ' \t \n \r \v \f）：单阶段变体主循环用它一次表查
+    /// 合并「是否空白」与「按什么分发」两个判断（tokenAt 本身不消费此位）
+    pub const whitespace: u8 = 1 << 7;
     // 其余（非 ASCII 等）为 0，走容错路径
 };
 
@@ -249,6 +252,8 @@ pub const dispatch_table: [256]u8 = blk: {
     t['.'] |= Dispatch.punct_multi;
     t['/'] |= Dispatch.slash;
     t['#'] |= Dispatch.hash;
+    t[' '] |= Dispatch.whitespace;
+    for (0x09..0x0E) |ch| t[ch] |= Dispatch.whitespace; // \t \n \v \f \r
     break :blk t;
 };
 
