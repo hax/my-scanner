@@ -15,6 +15,7 @@
 //! 因此各实现的 token 数不同，吞吐按各自 token 数计，互不影响对比。
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const my_scanner = @import("my_scanner");
 const yuku_old = @import("yuku_lexer");
@@ -24,7 +25,11 @@ const usage_text =
     \\bench — my-scanner 架构矩阵 vs yuku lexer 对比基准
     \\
     \\用法:
-    \\  bench [--repeats=N] [--json=<path>] [--prim] <file>...
+    \\  bench [--repeats=N] [--json=<path>] [--prim] [--refresh-baselines] <file>...
+    \\
+    \\yuku 第三方基线结果默认走本地缓存(.bench-deps/bench-cache.json;基线
+    \\版本、语料、轮数、zig 版本任一变动自动失效,仅加速本地迭代;CI 用
+    \\--refresh-baselines 强制同 run 实测)。
     \\
 ;
 
@@ -39,6 +44,21 @@ const FileRun = struct {
     results: []NamedResult,
 };
 
+/// yuku 基线结果缓存（仅第三方；自家变体永不缓存）。键含基线版本 sha、
+/// 语料 sha256、轮数与 zig 版本，任一变动自然失效。CI 不用缓存：
+/// runner 代际性能漂移，第三方必须与自家实现同 run 实测。
+const CacheEntry = struct { best_ns: i96, tokens: usize, err: ?[]const u8 };
+
+const BaselineCache = struct {
+    map: std.StringHashMap(CacheEntry),
+    refresh: bool,
+    dirty: bool = false,
+    old_sha: ?[]const u8,
+    main_sha: ?[]const u8,
+};
+
+const cache_path = ".bench-deps/bench-cache.json";
+
 pub fn main(init: std.process.Init) !void {
     const arena: std.mem.Allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
@@ -50,6 +70,12 @@ pub fn main(init: std.process.Init) !void {
     var repeats: usize = 10;
     var prim = false;
     var json_path: ?[]const u8 = null;
+    var bc: BaselineCache = .{
+        .map = loadCache(arena, init.io),
+        .refresh = false,
+        .old_sha = readBaselineSha(arena, init.io, ".bench-deps/yuku.sha"),
+        .main_sha = readBaselineSha(arena, init.io, ".bench-deps/yuku-main.sha"),
+    };
     var files: std.ArrayList([]const u8) = .empty;
     for (args[1..]) |arg| {
         if (std.mem.startsWith(u8, arg, "--repeats=")) {
@@ -58,6 +84,8 @@ pub fn main(init: std.process.Init) !void {
             json_path = arg["--json=".len..];
         } else if (std.mem.eql(u8, arg, "--prim")) {
             prim = true;
+        } else if (std.mem.eql(u8, arg, "--refresh-baselines")) {
+            bc.refresh = true;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try out.writeAll(usage_text);
             try out.flush();
@@ -74,11 +102,12 @@ pub fn main(init: std.process.Init) !void {
 
     var runs: std.ArrayList(FileRun) = .empty;
     for (files.items) |path| {
-        const run = try benchFile(arena, init.io, out, path, repeats, prim);
+        const run = try benchFile(arena, init.io, out, path, repeats, prim, &bc);
         try runs.append(arena, run);
     }
     try out.flush();
 
+    if (bc.dirty) try saveCache(arena, init.io, &bc.map);
     if (json_path) |p| try writeJson(arena, init.io, p, runs.items);
 }
 
@@ -89,6 +118,7 @@ fn benchFile(
     path: []const u8,
     repeats: usize,
     prim: bool,
+    bc: *BaselineCache,
 ) !FileRun {
     const src = std.Io.Dir.readFileAlloc(.cwd(), io, path, arena, .limited(1 << 32)) catch |err| {
         try out.print("{s}: 读取失败: {s}\n", .{ path, @errorName(err) });
@@ -186,18 +216,8 @@ fn benchFile(
         try out.print("  {s: <10} best {d:>8.2} ms   {d:>6.2} GB/s   （标量对照，SIMD {d:.1}x）\n", .{ "cls-s", sms, sgbps, speedup });
     }
 
-    {
-        const r = try runYuku(yuku_old, "yuku-old", arena, io, out, src, regex_starts, repeats);
-        try printRow(out, "yuku-old", r.best, src.len, r.count);
-        if (r.err) |e| try out.print("  （yuku-old 中途报 {s}，计扫到出错为止）\n", .{e});
-        try results.append(arena, .{ .name = "yuku_old", .result = .{ .best_ns = r.best, .tokens = r.count } });
-    }
-    {
-        const r = try runYuku(yuku_main, "yuku-main", arena, io, out, src, regex_starts, repeats);
-        try printRow(out, "yuku-main", r.best, src.len, r.count);
-        if (r.err) |e| try out.print("  （yuku-main 中途报 {s}，计扫到出错为止）\n", .{e});
-        try results.append(arena, .{ .name = "yuku_main", .result = .{ .best_ns = r.best, .tokens = r.count } });
-    }
+    try runYukuCached(yuku_old, "yuku-old", "yuku_old", bc.old_sha, arena, io, out, path, src, regex_starts, repeats, bc, &results);
+    try runYukuCached(yuku_main, "yuku-main", "yuku_main", bc.main_sha, arena, io, out, path, src, regex_starts, repeats, bc, &results);
 
     // 相对值一览（锚点：yuku-main）
     {
@@ -244,6 +264,120 @@ fn writeJson(arena: std.mem.Allocator, io: Io, path: []const u8, runs: []const F
     defer arena.free(tmp);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = buf.items });
     try std.Io.Dir.cwd().rename(tmp, std.Io.Dir.cwd(), path, io);
+}
+
+/// 读取基线版本标记（prepare-baselines.sh 在 clone 时写入 <dir>.sha）；
+/// 缺失视为版本未知 → 该基线不走缓存（安全回退为每次都跑）。
+fn readBaselineSha(arena: std.mem.Allocator, io: Io, path: []const u8) ?[]const u8 {
+    const s = std.Io.Dir.readFileAlloc(.cwd(), io, path, arena, .limited(64)) catch return null;
+    const t = std.mem.trim(u8, s, " \n\r\t");
+    return if (t.len == 0) null else t;
+}
+
+fn hexSha256(arena: std.mem.Allocator, src: []const u8) ![]const u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(src, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    return try arena.dupe(u8, &hex);
+}
+
+fn loadCache(arena: std.mem.Allocator, io: Io) std.StringHashMap(CacheEntry) {
+    var map: std.StringHashMap(CacheEntry) = .init(arena);
+    const bytes = std.Io.Dir.readFileAlloc(.cwd(), io, cache_path, arena, .limited(1 << 28)) catch return map;
+    const parsed = std.json.parseFromSlice(std.json.Value, arena, bytes, .{}) catch return map;
+    if (parsed.value != .object) return map;
+    const entries = parsed.value.object.get("entries") orelse return map;
+    if (entries != .object) return map;
+    var it = entries.object.iterator();
+    while (it.next()) |kv| {
+        const v = kv.value_ptr.*;
+        if (v != .object) continue;
+        const best = v.object.get("best_ns") orelse continue;
+        const tokens = v.object.get("tokens") orelse continue;
+        if (best != .integer or tokens != .integer) continue;
+        var err: ?[]const u8 = null;
+        if (v.object.get("err")) |e| {
+            if (e == .string) err = e.string;
+        }
+        map.put(kv.key_ptr.*, .{ .best_ns = @intCast(best.integer), .tokens = @intCast(tokens.integer), .err = err }) catch continue;
+    }
+    return map;
+}
+
+/// 写缓存（tmp + rename 原子写）。键成分为 sha hex/语料路径/数字，err 是
+/// @errorName 标识符，均无需 JSON 转义。
+fn saveCache(arena: std.mem.Allocator, io: Io, map: *std.StringHashMap(CacheEntry)) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(arena);
+    const ap = std.fmt.allocPrint;
+
+    try buf.appendSlice(arena, "{\"entries\":{");
+    var first = true;
+    var it = map.iterator();
+    while (it.next()) |kv| {
+        if (!first) try buf.append(arena, ',');
+        first = false;
+        try buf.appendSlice(arena, try ap(arena, "\"{s}\":{{\"best_ns\":{d},\"tokens\":{d},\"err\":", .{ kv.key_ptr.*, kv.value_ptr.best_ns, kv.value_ptr.tokens }));
+        if (kv.value_ptr.err) |e| {
+            try buf.appendSlice(arena, try ap(arena, "\"{s}\"", .{e}));
+        } else {
+            try buf.appendSlice(arena, "null");
+        }
+        try buf.append(arena, '}');
+    }
+    try buf.appendSlice(arena, "}}\n");
+
+    const tmp = try ap(arena, "{s}.tmp", .{cache_path});
+    defer arena.free(tmp);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = buf.items });
+    try std.Io.Dir.cwd().rename(tmp, std.Io.Dir.cwd(), cache_path, io);
+}
+
+/// 跑一个 yuku 基线：默认先查缓存（命中则跳过计时并注明），未命中或
+/// --refresh-baselines 时实跑并回写。版本标记缺失时不缓存、每次实跑。
+fn runYukuCached(
+    comptime mod: type,
+    comptime label: []const u8,
+    comptime name: []const u8,
+    baseline_sha: ?[]const u8,
+    arena: std.mem.Allocator,
+    io: Io,
+    out: *Io.Writer,
+    path: []const u8,
+    src: []const u8,
+    regex_starts: std.AutoHashMap(u32, void),
+    repeats: usize,
+    bc: *BaselineCache,
+    results: *std.ArrayList(NamedResult),
+) !void {
+    const key: ?[]const u8 = if (baseline_sha) |s|
+        try std.fmt.allocPrint(arena, "{s}|{s}|{s}|{s}|{d}|{s}", .{
+            name, s, path, try hexSha256(arena, src), repeats, builtin.zig_version_string,
+        })
+    else
+        null;
+
+    if (!bc.refresh) {
+        if (key) |k| {
+            if (bc.map.get(k)) |e| {
+                try printRow(out, label, e.best_ns, src.len, e.tokens);
+                const sha10 = baseline_sha.?[0..@min(10, baseline_sha.?.len)];
+                try out.print("  （{s} 来自缓存,基线 {s};--refresh-baselines 强制重跑）\n", .{ label, sha10 });
+                if (e.err) |er| try out.print("  （{s} 中途报 {s}，计扫到出错为止）\n", .{ label, er });
+                try results.append(arena, .{ .name = name, .result = .{ .best_ns = e.best_ns, .tokens = e.tokens } });
+                return;
+            }
+        }
+    }
+
+    const r = try runYuku(mod, label, arena, io, out, src, regex_starts, repeats);
+    try printRow(out, label, r.best, src.len, r.count);
+    if (r.err) |e| try out.print("  （{s} 中途报 {s}，计扫到出错为止）\n", .{ label, e });
+    try results.append(arena, .{ .name = name, .result = .{ .best_ns = r.best, .tokens = r.count } });
+    if (key) |k| {
+        try bc.map.put(k, .{ .best_ns = r.best, .tokens = r.count, .err = r.err });
+        bc.dirty = true;
+    }
 }
 
 /// SIMD 原语 A/B：同一数据上 SIMD mask 版 vs 严格标量逐字节合成版，

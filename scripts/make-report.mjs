@@ -1,7 +1,8 @@
 // 汇总 bench JSON(zig 必需 + rust 可选)→ report.md(人读) + data.json(趋势累积)。
 //
 //   node scripts/make-report.mjs <zig.json> [--rs <rs.json>] --out <dir>
-//         [--sha <sha>] [--subject <msg>] [--repeats N] [--diff-ok]
+//         [--sha <sha>] [--subject <msg>] [--repeats N]
+//         [--channel ci|local] [--label <机器名>](默认按 GITHUB_ACTIONS/hostname 判定)
 //
 // 输出:
 //   <dir>/report.md   — 人读报告(CI step summary / bench-reports 分支归档)
@@ -13,6 +14,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import os from "node:os";
 
 // 架构族谱:实现 → {族, 说明}。表中展示,提醒对比的意义(同族内比实现、跨族比架构)
 const IMPL_META = {
@@ -46,6 +48,10 @@ if (!zigJsonPath || !outDir) {
 const sha = opt("--sha") ?? execFileSync("git", ["rev-parse", "HEAD"], { cwd: new URL("..", import.meta.url), encoding: "utf8" }).trim();
 const subject = opt("--subject") ?? execFileSync("git", ["log", "-1", "--pretty=%s"], { cwd: new URL("..", import.meta.url), encoding: "utf8" }).trim();
 const repeats = opt("--repeats", "?");
+// 通道与机器标识:CI 自动判定(无需改 workflow),本地 run 带机器名,
+// 趋势页按 channel 分层,避免不同机器的本地结果与 CI 主线混淆
+const channel = opt("--channel") ?? (process.env.GITHUB_ACTIONS === "true" ? "ci" : "local");
+const runLabel = opt("--label") ?? os.hostname();
 
 function env(cmd, args) {
   try { return execFileSync(cmd, args, { encoding: "utf8" }).trim(); } catch { return ""; }
@@ -100,6 +106,7 @@ fileRuns.sort((a, b) => a.order - b.order);
 // ---- data.json ----
 const dataJson = {
   sha, date: new Date().toISOString(), subject, repeats: Number(repeats) || null, runner,
+  channel, label: runLabel,
   files: fileRuns.map(({ order, ...rest }) => rest),
 };
 writeFileSync(join(outDir, "data.json"), JSON.stringify(dataJson, null, 1) + "\n");
@@ -113,6 +120,7 @@ lines.push(`- 提交: ${subject}`);
 lines.push(`- 日期: ${dataJson.date}`);
 lines.push(`- 轮数: 每实现 ${repeats} 轮取最优;同进程、同文件、token 产出后丢弃`);
 lines.push(`- 环境: ${runner.os}${runner.cpu ? ` / ${runner.cpu}` : ""}${runner.zig ? ` / zig ${runner.zig}` : ""}`);
+lines.push(`- 通道: ${channel}${channel === "local" ? `(本机: ${runLabel};第三方基线可能来自本地缓存,与 CI 主线分机型分层)` : ""}`);
 lines.push(`- 相对值锚点: ${ANCHOR}(各实现/锚点,>1 即更快)`);
 lines.push(`- 同族参照: scalar vs yuku_old、jump_vec vs yuku_main(自有实现/同族第三方,>1 即我方更快;two_phase 无第三方参照)`);
 if (opt("--rs")) lines.push(`- swc/oxc: lexbench-rs 决策注入驱动(同一 my-scanner 正则决策集 + 模板花括号栈重扫,与 yuku 对拍同口径),独立进程`);

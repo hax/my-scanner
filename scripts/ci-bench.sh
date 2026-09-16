@@ -20,13 +20,17 @@ REPEATS="${BENCH_REPEATS:-25}"
 OUT=build/bench
 mkdir -p "$OUT"
 
-# 语料清单:门禁外的基准与 swc/oxc 对照共用(顺序即报告展示顺序)
-CORPUS_FILES=(
-  corpus/real/typescript.min.js corpus/real/typescript.js corpus/real/checker.ts
-  corpus/real/lib.dom.d.ts corpus/real/react.js
-  corpus/real/hanzi-chai.ts corpus/real/mon-entreprise.ts
-  corpus/synthetic/line-comments.js corpus/synthetic/strings.js corpus/synthetic/cn-dense.ts
-)
+# 语料清单:门禁外的基准与 swc/oxc 对照共用(单一来源 scripts/corpus-files.sh)
+source scripts/corpus-files.sh
+
+# CI 机器性能漂移,第三方基线(yuku/swc/oxc)必须同 run 实测;
+# 缓存只为本地迭代设计,CI 上显式禁用(缓存位于 .bench-deps,CI 本也不会命中)
+REFRESH_ZIG=""
+REFRESH_RS=""
+if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+  REFRESH_ZIG="--refresh-baselines"
+  REFRESH_RS="--refresh"
+fi
 
 # 本地 cargo 可能不在 PATH( ~/.cargo/bin 标准位置则补上;CI 由 toolchain step 提供)
 if ! command -v cargo >/dev/null 2>&1 && [ -x "$HOME/.cargo/bin/cargo" ]; then
@@ -56,19 +60,9 @@ fi
 
 echo
 echo "==== [4/5] 架构矩阵基准(x${REPEATS} 取最优)==="
-# yuku 源码由 bench.sh 的同款逻辑准备(.bench-deps/,已 gitignore)
-if [ ! -f .bench-deps/yuku/src/parser/lexer.zig ] || [ ! -f .bench-deps/yuku-main/src/parser/lexer.zig ]; then
-  mkdir -p .bench-deps
-  [ -f .bench-deps/yuku/src/parser/lexer.zig ] || {
-    git clone --depth 1 https://github.com/yuku-toolchain/yuku .bench-deps/yuku
-    rm -rf .bench-deps/yuku/.git
-  }
-  [ -f .bench-deps/yuku-main/src/parser/lexer.zig ] || {
-    git clone --depth 5 https://github.com/yuku-toolchain/yuku .bench-deps/yuku-main
-    rm -rf .bench-deps/yuku-main/.git
-  }
-fi
-zig build -Doptimize=ReleaseFast bench -- --repeats="$REPEATS" --json="$OUT/zig.json" "${CORPUS_FILES[@]}"
+# yuku 基线:yuku_old 钉 v0.10.1,yuku-main 跟踪上游(scripts/prepare-baselines.sh)
+scripts/prepare-baselines.sh
+zig build -Doptimize=ReleaseFast bench -- --repeats="$REPEATS" $REFRESH_ZIG --json="$OUT/zig.json" "${CORPUS_FILES[@]}"
 
 echo
 echo "==== [5/5] swc/oxc 对照(lexbench-rs 决策注入驱动,x${REPEATS} 取最优)==="
@@ -82,7 +76,7 @@ for f in "${CORPUS_FILES[@]}"; do
   zig-out/bin/my-scanner --emit-regex-starts "$f" > "$DEC/$(basename "$f").regex"
 done
 ( cd tools/lexbench-rs && cargo build --release )
-tools/lexbench-rs/target/release/drive --repeats="$REPEATS" --regex-dir="$DEC" --json="$OUT/rs.json" "${CORPUS_FILES[@]}"
+node scripts/run-rs-bench.mjs --repeats="$REPEATS" --regex-dir="$DEC" --json="$OUT/rs.json" $REFRESH_RS "${CORPUS_FILES[@]}"
 
 echo
 echo "==== 汇总报告 ===="

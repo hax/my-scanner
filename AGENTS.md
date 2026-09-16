@@ -10,12 +10,17 @@
 ```sh
 scripts/check.sh     # 正确性门禁：单测 + 全部架构变体 × corpus 与 tsc 差分
 scripts/bench.sh     # 本地吞吐对比（口径已内置，直接用，勿自建口径）
+scripts/bench.sh --submit  # 完整矩阵 + 汇总发布本地 run 到 bench-reports（带机器标识）
 scripts/ci-bench.sh  # CI 同款全链路（门禁 + 矩阵基准 + 报告），本地可跑
 zig build test       # 仅单元测试，不等价于门禁
 ```
 
 `check.sh` 首次运行需要 `cd tools && npm i`（tsc 差分依赖）；`bench.sh`
-首次运行会 clone 对比基线到 `.bench-deps/`（已 gitignore）。
+首次运行由 `scripts/prepare-baselines.sh` 备第三方基线到 `.bench-deps/`
+（已 gitignore）：yuku-old 钉 v0.10.1、yuku-main 跟踪上游（移动才重
+clone）。第三方计时结果缓存在 `.bench-deps/`（版本/语料/轮数/编译器
+变动自动失效），强制重跑用 `--refresh-baselines`；**CI 总是实跑**
+（GITHUB_ACTIONS 下显式 refresh，勿把本地缓存数字当跨机结论）。
 
 语料来自 **corpus 分支**（只含语料的孤儿分支）：`check.sh`/`ci-bench.sh`
 会先调 `scripts/prepare-corpus.sh` 幂等拉取 + sha256 校验，无需手动准备。

@@ -47,14 +47,15 @@ jump_vec 0.72x → two_phase 0.82x，梯度分离了各层净贡献（跳跃
 
 ## CI：每次 push 自动对比 + 趋势
 
-`scripts/ci-bench.sh`（本地同样可跑）四步：
+`scripts/ci-bench.sh`（本地同样可跑）五步：
 
 1. `zig build test` 单测；
 2. **差分门禁**：3 变体 × 全 corpus 对拍 tsc，任一失败即红；
 3. 架构矩阵基准（同进程 10 语料 × {scalar, jump_vec, two_phase,
    yuku-old, yuku-main}，N 轮取最优，正则/模板歧义点按同一决策集
    注入——yuku 走 `reScanAsRegex`/`reScanTemplateContinuation` 对拍）；
-4. `scripts/make-report.mjs` 汇总成 `report.md` + `data.json`
+4. swc/oxc 对照（lexbench-rs 决策注入驱动，机制见下「swc/oxc 决策注入」）；
+5. `scripts/make-report.mjs` 汇总成 `report.md` + `data.json`
    （语料谱系表 + 变体 × 语料矩阵 + real/synthetic 分组几何平均）。
 
 语料由 **corpus 孤儿分支**提供（只含语料不含源码）：CI 用第二个
@@ -73,6 +74,32 @@ GitHub Pages 源，趋势页在线看： <https://johnhax.net/my-scanner/>
 一条独立曲线，随提交演化。另有"vs 同族参照"口径衡量各族自身成熟度：
 scalar 对 yuku-old、jump_vec 对 yuku-main（>1 即我方更快，two_phase
 无第三方参照），report.md 含同口径的分组几何平均表。
+
+第三方基线的版本管理与本地缓存（`scripts/prepare-baselines.sh` +
+`src/bench.zig` / `scripts/run-rs-bench.mjs` 的缓存层）：
+
+- **yuku-old 钉 v0.10.1 tag**（引入向量化前的快照，固定不更新）。此前
+  CI 每 run 对两个 yuku 目录都 fresh clone 上游 HEAD，yuku_old 实为
+  yuku-main 副本，scalar 同族参照名存实亡；钉版恢复名义语义，趋势
+  断档说明见 [benchmarks.md](benchmarks.md)。
+- yuku-main 跟踪上游 HEAD：clone 时记 `<dir>.sha` 版本标记，每跑
+  ls-remote 探测，上游移动才重 clone（离线沿用现有副本）。
+- swc/oxc 由 Cargo.lock + vendored oxc 钉版（升级走 prepare-lexbench.sh
+  的 VER/SHA256）。
+- **本地缓存**：第三方计时结果缓存在 `.bench-deps/`，键含基线版本
+  标记、语料 sha256、轮数与编译器版本，任一变动自动失效——本地迭代
+  不为第三方重复付费；`--refresh-baselines`（zig bench）/`--refresh`
+  （rs）强制重跑。**CI 总是实跑**（`GITHUB_ACTIONS` 下 ci-bench.sh
+  显式加 refresh：runner 代际性能漂移，第三方必须与自家实现同 run
+  实测，缓存的绝对值不能跨 run 复用）。
+
+本地 run 可提交趋势页：`scripts/bench.sh --submit` 一键跑完整矩阵
+（默认全 10 语料）+ swc/oxc 对照 → 汇总 → 发布到 bench-reports 分支
+（凭据缺省回退 `gh auth token` 与 origin remote）。本地 run 的
+data.json 记 `channel=local` 与机器标识（默认 hostname），文件名
+`<sha>.local-<机器名>.*` 不与 CI 同 sha 互撞；趋势页默认只画 CI
+主线，勾选「叠加本地 run」后本地点以空心圆叠加（不连线，tooltip
+带机器名）——不同机器的本地结果与 CI 趋势分层，互不混淆。
 
 ## two_phase：两阶段
 

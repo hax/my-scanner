@@ -35,7 +35,7 @@ const index = {
   anchor: "yuku_main",
   peers: PEERS,
   impls: ["scalar", "jump_vec", "two_phase", "yuku_old", "yuku_main", "swc", "oxc"],
-  runs: runs.map((r) => ({ sha: r.sha, date: r.date, subject: r.subject, runner: r.runner })),
+  runs: runs.map((r) => ({ sha: r.sha, date: r.date, subject: r.subject, runner: r.runner, channel: r.channel ?? "ci", label: r.label ?? null })),
   series: {},
 };
 const fileNames = new Set();
@@ -92,14 +92,17 @@ const html = `<!doctype html>
 该口径只画有对照的 scalar / jump_vec。绝对吞吐跨 runner 代际不可比,
 同 run 内相对值始终有效。每次 push 一个点;架构变体语义由差分门禁保证。</p>
 <p class="mode">口径: <button id="mode-ratio" class="on">vs yuku-main</button><button id="mode-peer">vs 同族参照</button><button id="mode-gbps">GB/s</button>
+<label class="meta" style="cursor:pointer;margin-left:.6rem"><input type="checkbox" id="show-local"> 叠加本地 run(空心点,不连线,带机器标识)</label>
 <span class="meta" id="runinfo"></span></p>
 <div id="files"></div>
 <script>
 const COLORS = { scalar:"#e67e22", jump_vec:"#2ecc71", two_phase:"#e74c3c", yuku_old:"#95a5a6", yuku_main:"#3498db", swc:"#9b59b6", oxc:"#1abc9c" };
 const NAMES  = { scalar:"scalar(全标量)", jump_vec:"jump_vec(单阶段+SIMD跳跃)", two_phase:"two_phase(两阶段)", yuku_old:"yuku-old", yuku_main:"yuku-main", swc:"swc(决策注入)", oxc:"oxc(决策注入)" };
 let mode = "ratio";
+let showLocal = false;
 fetch("reports/index.json").then(r => r.json()).then(idx => {
-  document.getElementById("runinfo").textContent = " — " + idx.runs.length + " runs,最近: " + (idx.runs.at(-1)?.date ?? "");
+  const nCi = idx.runs.filter(r => r.channel !== "local").length;
+  document.getElementById("runinfo").textContent = " — " + nCi + " CI runs + " + (idx.runs.length - nCi) + " local runs,最近: " + (idx.runs.at(-1)?.date ?? "");
   const root = document.getElementById("files");
   for (const [file, series] of Object.entries(idx.series)) {
     const sec = document.createElement("section");
@@ -150,6 +153,19 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
         if (!shown(impl)) continue;
         let d = "", pen = false;
         series[impl].forEach((p, i) => {
+          // 本地 run:不连线(避免与 CI 主线混淆),勾选后以空心点叠加
+          if (idx.runs[i].channel === "local") {
+            if (showLocal && p && pval(p) != null) {
+              const px = x(i), py = y(pval(p));
+              const c = document.createElementNS(svgNS, "circle");
+              c.setAttribute("cx", px); c.setAttribute("cy", py); c.setAttribute("r", 3);
+              c.setAttribute("fill", "none"); c.setAttribute("stroke", COLORS[impl]); c.setAttribute("stroke-width", 2);
+              const tip = document.createElementNS(svgNS, "title");
+              tip.textContent = "[本地 " + (idx.runs[i].label ?? "?") + "] " + NAMES[impl] + " " + pval(p) + (mode === "gbps" ? " GB/s" : "x") + " @ " + p.sha + " " + p.date.slice(0, 10);
+              c.appendChild(tip); svg.appendChild(c);
+            }
+            return;
+          }
           if (!p || pval(p) == null) { pen = false; return; }
           const px = x(i), py = y(pval(p));
           d += (pen ? "L" : "M") + px.toFixed(1) + " " + py.toFixed(1) + " ";
@@ -197,6 +213,7 @@ const setMode = m => {
 document.getElementById("mode-ratio").onclick = () => setMode("ratio");
 document.getElementById("mode-peer").onclick = () => setMode("peer");
 document.getElementById("mode-gbps").onclick = () => setMode("gbps");
+document.getElementById("show-local").onchange = e => { showLocal = e.target.checked; redrawFns.forEach(f => f()); };
 </script>
 </body>
 </html>
@@ -215,8 +232,8 @@ const readme = `# my-scanner 架构矩阵基准报告
 
 在线趋势页(GitHub Pages,源 = 本分支): <https://johnhax.net/my-scanner/>
 
-- [index.html](index.html) — 趋势页(vs yuku-main / vs 同族参照 / GB/s 三种口径,相对值跨 runner 代际可比)
-- [reports/](reports/) — 每次 run 的 \`<sha>.md\`(人读报告)与 \`<sha>.json\`(原始数据)
+- [index.html](index.html) — 趋势页(vs yuku-main / vs 同族参照 / GB/s 三种口径,相对值跨 runner 代际可比;本地 run 默认不画,可勾选叠加)
+- [reports/](reports/) — 每次 run 的 \`<sha>.md\`(人读报告)与 \`<sha>.json\`(原始数据);本地提交(bench.sh --submit)为 \`<sha>.local-<机器名>.*\`,带机器标识与 CI 主线分层
 
 对比口径与架构族谱见仓库 docs/architecture.md。
 `;

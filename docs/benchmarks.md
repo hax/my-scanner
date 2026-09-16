@@ -7,9 +7,12 @@
 
 ## 对比口径
 
-[bench.sh](../scripts/bench.sh) 首次运行会把
-[yuku](https://github.com/yuku-toolchain/yuku) 的源码 clone 到
-`.bench-deps/`（gitignore），然后同进程、同文件、同计时器跑各实现：
+[bench.sh](../scripts/bench.sh) 通过
+[prepare-baselines.sh](../scripts/prepare-baselines.sh) 把
+[yuku](https://github.com/yuku-toolchain/yuku) 两版源码备到
+`.bench-deps/`（gitignore）：**yuku-old 钉 v0.10.1 tag**（引入向量化
+前，固定不更新）、**yuku-main 跟踪上游 HEAD**（clone 记 sha 标记，
+ls-remote 探测到移动才重 clone）。然后同进程、同文件、同计时器跑各实现：
 口径对称——产出的 token 都 append 到复用缓冲、读文件与初始化不计入，
 N 轮取最优。yuku 纯 scanner 与 tsc 同款把正则/模板续扫推迟给 parser，
 bench 里按 yuku parser 的方式调 `reScanAsRegex` /
@@ -19,6 +22,17 @@ my-scanner 的模板整体算一个 token，主 token 流里没有内部正则�
 用 scanner 的 `regex_starts` 选项旁路收集（曾漏收，yuku 在
 typescript.min.js 24KB 处把 `\s` 当标识符转义报 InvalidUnicodeEscape，
 锚点整行失真）。
+
+**第三方结果本地缓存**（仅本地迭代用）：yuku/swc/oxc 的计时结果缓存在
+`.bench-deps/`，键含基线版本标记、语料 sha256、轮数与编译器版本，任一
+变动自动失效；`--refresh-baselines`（zig bench）/`--refresh`（rs 链）
+强制重跑。**CI 总是实跑**——runner 代际性能漂移，第三方必须与自家实现
+同 run 实测，缓存的绝对值不能跨 run 复用。
+
+已知系统偏差：各实现按固定顺序测量（自家 → yuku-old → yuku-main →
+swc → oxc），runner 频率漂移给后测者 ~3% 量级的系统性劣势（CI 上
+yuku_old/yuku_main 恒 ≈0.96-0.98 即由此）；解读第三方相互差时留意，
+同族参照口径（位置相邻）受影响最小。
 
 语料分 **real**（真实代码）与 **synthetic**（构造极端样本，microbench
 专用）两类，唯一权威存储是 corpus 分支（check.sh/ci-bench.sh 自动
@@ -91,3 +105,15 @@ bench 的常设输出（`--prim`、`cls-s` 行）用于把 SIMD 收益拆到原�
 Mtok/s 几乎恒定而 GB/s 随 token 密度反向变化——瓶颈是每 token 的固定
 开销（分发 + emit + append），不是 SIMD 扫描本身。所以 roadmap 的下一
 优先级长期是 token 批量产出（SoA 输出、token 簇融合）。
+
+## 附：趋势页断档说明（yuku_old 钉版）
+
+2026-09-16 之前，CI 上的 yuku_old 并非名义的「0.10.1 快照」：CI 每 run
+从空 `.bench-deps` 出发，两个 yuku 目录都 fresh clone 上游 HEAD，
+yuku_old 实为 yuku-main 的内容副本（差异仅 ~3% 的测量顺序偏差）。
+自该日起 yuku_old 钉到 **v0.10.1 tag**（`3846715a`，向量化前，
+`prepare-baselines.sh` 固定 clone 该 tag，不再漂移）——趋势页 yuku_old
+线与 scalar 的「vs 同族参照」序列在此**断档跳变一次**：此前的值是
+scalar 对 main 副本，此后才是真·对 v0.10.1。yuku-main 锚点口径定义
+未变（仍跟踪上游 HEAD），不受影响。本地各快照（M2 表等）的 yuku-old
+内容经 md5 核对本就是 v0.10.1，本地历史数字同样不受影响。
