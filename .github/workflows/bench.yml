@@ -3,6 +3,11 @@ name: bench
 on:
   push:
     branches: [main]
+    # 纯文档改动不跑差分+基准（workflow_dispatch 手动触发不受限）
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'LICENSE'
   workflow_dispatch:
 
 permissions:
