@@ -42,6 +42,7 @@ two_phase→oxc_bitmap，&gt;1 即我方更快），衡量各族自身成熟度�
 <table id="machines"></table>
 <p class="meta" id="runinfo"></p>
 <h2>语料</h2>
+<p class="meta">大小与 tokens 取自最近一次 run；tokens 以 baseline（yuku v0.10.1 固定快照）计数。</p>
 <table id="corpus"></table>
 <h2>当前对比 · vs baseline</h2>
 <p class="meta" id="bars-meta"></p>
@@ -123,12 +124,13 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
     "<tr><td><b>" + m[0] + "</b></td><td>" + m[1] + "</td></tr>"
   ).join("");
 
-  // ---- 语料说明(图标题只留文件名,分组/出处/来源版本与链接集中在此) ----
+  // ---- 语料说明(图标题只留文件名,分组/大小/tokens/出处/来源版本与链接集中在此) ----
   document.getElementById("corpus").innerHTML = Object.keys(idx.series).map(file => {
     const c = idx.corpus?.[file];
+    const s = idx.corpusStats?.[file];
     const src = c?.src;
     const srcHtml = src ? (src.url ? '<a href="' + src.url + '">' + src.text + "</a>" : src.text) : "";
-    return "<tr><td><code>" + (c?.name ?? file) + "</code></td><td>" + (c?.group ?? "") + "</td><td>" + (c?.note ?? "") + "</td><td>" + srcHtml + "</td></tr>";
+    return "<tr><td><code>" + (c?.name ?? file) + "</code></td><td>" + (c?.group ?? "") + "</td><td>" + (s?.bytes != null ? (s.bytes / 1e6).toFixed(2) + " MB" : "") + "</td><td>" + (s?.tokens != null ? s.tokens.toLocaleString("en-US") : "") + "</td><td>" + (c?.note ?? "") + "</td><td>" + srcHtml + "</td></tr>";
   }).join("");
 
   const pvalOf = p => mode === "peer" ? p.pratio : p.ratio;
