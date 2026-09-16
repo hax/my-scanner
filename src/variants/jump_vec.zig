@@ -9,9 +9,9 @@
 //! 主循环。
 //!
 //! 跳跃手段：dispatch_table 空白位一次表查合并「是否空白」与分发判断；
-//! ASCII 空白 run 短者逐字节展开、长者 SIMD 块扫；注释 trivia 有快跳路径
-//! （找终点直接落盘 comment lexeme，不过 tokenAt）；字符串/模板/块注释/
-//! 正则的终点查找复用共享语义层已有的 SIMD 原语。
+//! ASCII 空白 run 短者逐字节展开、长者 SIMD 块扫；注释 trivia 快跳
+//! （不构造 lexeme 直接跳，对齐 yuku 的 skipWsAndComments）；字符串/
+//! 模板/块注释/正则的终点查找复用共享语义层已有的 SIMD 原语。
 //!
 //! 行号是惰性交付：扫描期零行跟踪成本（对齐 yuku 的交付物——它扫描期
 //! 只带 1-bit line_terminator_before flag，行号由下游按需重算），首次
@@ -57,77 +57,89 @@ pub fn scanInto(
 }
 
 /// 单阶段驱动：无候选位图，主循环逐 lexeme 顺序分发。
-/// trivia 与两阶段同模型：ASCII 空白 run 原地累积，unicode ws 经
-/// scanNonAscii 产 whitespace kind 并入，遇显著 lexeme（含注释）
-/// 由 emitTriviaRun 切成 whitespace/newline 落盘。
+/// trivia 与两阶段同模型：不落盘——ASCII 空白 run 原地跳过、unicode
+/// ws 走 tokenAt 的 ws 标记、注释快跳，三者只顺路累积 newline_before，
+/// 挂到下一个显著 lexeme 的 flags 上。
 fn consumeDirect(
     tokens: *std.ArrayList(Lexeme),
     allocator: std.mem.Allocator,
     src: []const u8,
 ) !void {
     var pos: usize = 0;
-    var prev_kind: ?LexemeKind = null; // 上一个非 trivia lexeme，供 `/` 判别
+    var prev_kind: ?LexemeKind = null; // 上一个显著 lexeme，供 `/` 判别
     var prev_text: []const u8 = "";
+    var prev2_text: []const u8 = ""; // prev 之前那个显著 lexeme 的文本（名字位置判别）
     var tpl: TemplateStack = .{};
+    var nl_before = false; // 上一个显著 lexeme 之后的 trivia 是否含行终止符
 
     if (src.len >= 2 and src[0] == '#' and src[1] == '!') {
         const s = scanner.scanShebang(src);
         pos = s.end;
         prev_kind = s.kind;
         prev_text = src[0..s.end];
-        try tokens.append(allocator, .{ .kind = .shebang, .start = 0 });
+        try tokens.append(allocator, .{ .kind = .shebang, .start = 0, .end = @intCast(s.end) });
     }
-    var trivia_from = pos; // pending 空白 run 起点（== pos 表示无待发射）
-    // lexeme 密度启发式：真实代码 ≈ 1 lexeme / 4-6 字节（trivia 常驻后的
-    // 语料实测口径待 bench 复测），按 src.len/6 一次性预留，之后每轮
-    // 迭代只留一条内联容量检查
-    try tokens.ensureUnusedCapacity(allocator, src.len / 6 + 2);
+    // lexeme 密度启发式：真实代码 ≈ 1 lexeme / 6-9 字节（语料实测），按
+    // src.len/8 一次性预留，之后每 lexeme 只留一条内联容量检查——
+    // ensureUnusedCapacity 是独立函数，逐 lexeme 调用的开销实测占 12%
+    try tokens.ensureUnusedCapacity(allocator, src.len / 8 + 1);
     while (pos < src.len) {
         const code = scanner.dispatch_table[src[pos]];
         if (code & scanner.Dispatch.whitespace != 0) {
-            pos = skipWhitespace(src, pos + 1); // ASCII run 累积进 pending
+            const to = skipWhitespace(src, pos + 1);
+            if (!nl_before) nl_before = scanner.hasLineTerminator(src, pos, to);
+            pos = to;
             continue;
         }
-        // 注释快跳：终点本来就要找，构造 comment lexeme 直接落盘，
-        // 不过 tokenAt（未闭合块注释落到正常路径产 illegal，错误可见）
+        // 注释快跳（不构造 lexeme 直接跳，对齐 yuku 的
+        // skipWsAndComments——行注释语料上省掉每注释一次的构造与分发）。
+        // 块注释体检测行终止符置 flag；未闭合块注释落到统一落盘路径产
+        // illegal（错误可见）
         if (code & scanner.Dispatch.slash != 0 and pos + 1 < src.len) {
             const n = src[pos + 1];
-            if (n == '/' or n == '*') {
-                const kind: LexemeKind = if (n == '/') .line_comment else .block_comment;
-                const end = if (n == '/') scanner.lineEnd(src, pos) else simd.findBlockCommentEnd(src, pos + 2) orelse 0;
-                if (end != 0) {
-                    if (tokens.items.len + 3 > tokens.capacity) {
-                        try tokens.ensureUnusedCapacity(allocator, 3);
-                    }
-                    scanner.emitTriviaRun(tokens, src, trivia_from, pos);
-                    tokens.appendAssumeCapacity(.{ .kind = kind, .start = @intCast(pos) });
+            if (n == '/') {
+                pos = scanner.lineEnd(src, pos);
+                continue;
+            }
+            if (n == '*') {
+                if (simd.findBlockCommentEnd(src, pos + 2)) |end| {
+                    if (!nl_before) nl_before = scanner.hasLineTerminator(src, pos, end);
                     pos = end;
-                    trivia_from = pos;
                     continue;
                 }
             }
         }
-        // 内联容量检查（冷路径才进增长函数）；一轮最多落盘 3 个
-        if (tokens.items.len + 3 > tokens.capacity) {
-            try tokens.ensureUnusedCapacity(allocator, 3);
+        // 内联容量检查（冷路径才进增长函数）；一轮最多产一个 lexeme
+        if (tokens.items.len == tokens.capacity) {
+            try tokens.ensureUnusedCapacity(allocator, 1);
         }
         const start = pos;
-        const s = scanner.scanAt(src, start, prev_kind, prev_text, &tpl);
-        pos = s.end;
-        if (s.kind == .whitespace) continue; // unicode ws：并入 pending run
-        scanner.emitTriviaRun(tokens, src, trivia_from, start);
-        tokens.appendAssumeCapacity(.{ .kind = s.kind, .start = @intCast(start) });
-        trivia_from = pos;
-        if (s.kind != .line_comment and s.kind != .block_comment) {
-            tpl.track(s.kind, src[start]);
-            prev_kind = s.kind;
-            prev_text = src[start..s.end];
+        const s = scanner.scanAt(src, start, prev_kind, prev_text, prev2_text, &tpl);
+        if (s.ws) { // unicode whitespace：跳过，顺带置 flag
+            if (!nl_before) nl_before = scanner.hasLineTerminator(src, start, s.end);
+            pos = s.end;
+            continue;
         }
+        pos = s.end;
+        tokens.appendAssumeCapacity(.{
+            .kind = s.kind,
+            .flags = if (nl_before) lexeme_mod.flag_newline_before else 0,
+            .start = @intCast(start),
+            .end = @intCast(s.end),
+        });
+        nl_before = false;
+        tpl.track(s.kind, src[start]);
+        prev2_text = prev_text;
+        prev_text = src[start..s.end];
+        prev_kind = s.kind;
     }
-    // 尾部空白已在循环内累积，pos == src.len；落盘后 eof 收尾
-    try tokens.ensureUnusedCapacity(allocator, 2);
-    scanner.emitTriviaRun(tokens, src, trivia_from, src.len);
-    try tokens.append(allocator, .{ .kind = .eof, .start = @intCast(src.len) });
+    // 尾部空白已在循环内跳过，pos == src.len；eof 固定 start == end == src.len
+    try tokens.append(allocator, .{
+        .kind = .eof,
+        .flags = if (nl_before) lexeme_mod.flag_newline_before else 0,
+        .start = @intCast(src.len),
+        .end = @intCast(src.len),
+    });
 }
 
 inline fn isAsciiWs(c: u8) bool {
@@ -137,8 +149,8 @@ inline fn isAsciiWs(c: u8) bool {
 /// ASCII 空白 run 的结尾（from 处可以是任意字节，按实际跳过）。
 /// 短 run 逐字节展开（格式化代码的空白多为 0-2 字节：紧跟 lexeme、
 /// 单空格或换行+缩进），长 run 转 SIMD 块扫。Unicode whitespace 不在
-/// 此处理：它在主循环经 scanAt → scanNonAscii 走 whitespace kind
-/// 路径并入 pending run，语义与两阶段一致。
+/// 此处理：它在主循环经 scanAt → scanNonAscii 的 ws 标记跳过，
+/// 语义与两阶段一致。
 fn skipWhitespace(src: []const u8, from: usize) usize {
     var i = from;
     inline for (0..4) |_| {
@@ -201,6 +213,7 @@ test "jump_vec 变体与两阶段交叉验证" {
         "`a${({b:1}).b}c${ /}/ }d`",
         "tag`a${x}b${ fn`y` }c` / re/g",
         "{ t = `a${x}b${y}c`; } f(`a '${x}'`) }",
+        "x.return / v; x?.if / w; this.#return /2/ u",
     };
     for (cases) |src| try crossCheck(src);
 }

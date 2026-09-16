@@ -5,9 +5,9 @@
 //! 关键字的具体文本直接从源码字节区间恢复，等上层需要 O(1) 区分时再
 //! 展开成细分枚举。
 //!
-//! 连续性不变量：lexeme 流连续覆盖全文，trivia（whitespace / newline /
-//! comment）常驻不跳过，因此不存 end——第 i 个 lexeme 的终点就是第
-//! i+1 个的 start；eof.start == src.len 为最后一个真实 lexeme 兜底。
+//! 交付口径对齐 yuku 等引擎：trivia（空白/换行/注释）不进流，扫描期
+//! 顺路把「前面有换行」压成 1 bit 挂在下一个显著 lexeme 的 flags 上
+//! （ASI / `-->` 行首注释判别够用，行号由 LineIndex 惰性物化）。
 
 /// Lexeme 的大类。
 pub const LexemeKind = enum {
@@ -35,23 +35,33 @@ pub const LexemeKind = enum {
     template_middle,
     /// 模板尾片（`}...` ``）
     template_tail,
-    /// 行注释（`//...`，不含行尾换行）
-    line_comment,
-    /// 块注释（`/*...*/`）
-    block_comment,
-    /// 不含行终止符的连续空白
-    whitespace,
-    /// 含行终止符的连续空白 run：从首个 \n/\r/U+2028/U+2029 起到 run 末尾
-    newline,
 };
+
+/// `flags` 位：本 lexeme 之前的 trivia 中含行终止符
+/// （\n、孤立 \r、U+2028、U+2029，与 LineIndex 口径一致）。
+pub const flag_newline_before: u8 = 1 << 0;
 
 pub const Lexeme = struct {
     kind: LexemeKind,
-    /// 字节起点；终点 = 下一个 lexeme 的 start（连续性不变量）
+    /// per-lexeme 标志位（见 flag_* 常量；预留 ASI/高亮所需的 per-token 状态）
+    flags: u8 = 0,
+    _pad: [2]u8 = .{ 0, 0 },
+    /// 字节区间 [start, end)
     start: u32,
+    end: u32,
 
-    /// 字节区间文本。next_start 取下一个 lexeme 的 start（流末取 src.len）。
-    pub fn slice(self: Lexeme, src: []const u8, next_start: u32) []const u8 {
-        return src[self.start..next_start];
+    /// 本 lexeme 之前的 trivia 中是否有行终止符（含注释内部）
+    pub fn newlineBefore(self: Lexeme) bool {
+        return self.flags & flag_newline_before != 0;
+    }
+
+    /// 字节区间文本
+    pub fn slice(self: Lexeme, src: []const u8) []const u8 {
+        return src[self.start..self.end];
     }
 };
+
+comptime {
+    // 12B：比 yuku 的 16B（tag+flags+span）瘦一档
+    if (@sizeOf(Lexeme) != 12) @compileError("Lexeme 应为 12 字节");
+}

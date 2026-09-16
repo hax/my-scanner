@@ -142,10 +142,10 @@ masks[] ──► 阶段 2 consume（标量循环 + SIMD 贪心）──► toke
 
 关键数据结构：
 
-- `Lexeme { kind, start: u32 }`（8B，无 end——trivia 常驻后流连续覆盖
-  全文，end 隐含为下一 lexeme 的 start；无行号——行号按需查 LineIndex，
-  避免写带宽翻倍）。细流 `Token`/`TokenTag` 另备 yuku 定义
-  （src/token.zig），parser 接口预备
+- `Lexeme { kind, flags, start: u32, end: u32 }`（12B——trivia 不进流
+  （对齐 yuku 交付口径），「前面有换行」压成 1-bit `newline_before`
+  flag；行号按需查 LineIndex，避免写带宽翻倍）。细流 `Token`/`TokenTag`
+  另备 yuku 定义（src/token.zig），parser 接口预备
 - `LineIndex { breaks: []u32, prefix: []u32 }`：O(1) `lineAt(offset)`，
   由换行位图 + 块前缀和构成
 - 阶段 2 的全部状态（pos/prev/tpl 模板栈）是循环局部变量——扫描函数

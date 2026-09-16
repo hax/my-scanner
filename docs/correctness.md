@@ -76,12 +76,14 @@
 - 字符串（单双引号、转义、行继续）、模板字面量拆片
   （no_substitution/head/middle/tail 四片，`${}` 子表达式内 lexeme
   全在主流，模板栈跟踪花括号平衡，嵌套模板逐层弹帧）
-- 正则字面量（基于前一显著 lexeme 的近似判别，处理 `/` 的除号/正则
-  二义性；关键字概念在 `/` 路径按文本现查）
+- 正则字面量（基于前两个显著 lexeme 的近似判别，处理 `/` 的除号/正则
+  二义性；关键字概念在 `/` 路径按文本现查，名字位置
+  （`.`/`?.`/`#` + 关键字文本）判除号）
 - 全部 punctuator（含 `>>>=` `??=` `?.` `...` 等最长匹配与 `?...`
   歧义排除；`#` 恒为单字节 punct）
-- trivia 常驻流：line_comment / block_comment 两个类别，whitespace /
-  newline 两个类别（空白 run 以首个行终止符切分）；shebang
+- trivia 不进流（对齐 yuku 等引擎交付口径）；「前面有换行」压成
+  1-bit `newline_before` flag 挂在下一个显著 lexeme 上（含注释内部
+  换行；`\n`、孤立 `\r`、U+2028/U+2029 与 LineIndex 同口径）；shebang
 - lexeme 行号：`Result.lines`（LineIndex，逻辑换行位图 + 前缀和，O(1)
   `lineAt(offset)`；列号可由消费方从行首 offset 推导）
 - 容错：非法字节/未闭合字面量/坏 UTF-8 产出 `illegal` lexeme 而不是

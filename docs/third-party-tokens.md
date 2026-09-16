@@ -243,22 +243,24 @@ kind 字节在流水线内部全程以裸 u8 参与算数/blend/区间比较—�
 进出靠零成本 transmute（token.rs:361-375）。空白/换行 trivia 彻底不
 记录；hashbang 例外留在显著流。
 
-### my-scanner：8 字节 AoS，最简形态
+### my-scanner：12 字节 AoS，最简形态
 
 ```zig
 pub const Lexeme = struct {   // src/lexeme.zig
-    kind: LexemeKind,   // 16 大类（eof/identifier/number/string/regex/punct/shebang/illegal/
-                        // no_substitution_template/template_head/template_middle/template_tail/
-                        // line_comment/block_comment/whitespace/newline）
-    start: u32,   // UTF-8 字节偏移；end 隐含 = 下一个 lexeme 的 start
-};   // 8B；流连续覆盖全文（trivia 常驻），eof.start == src.len 兜底
+    kind: LexemeKind,   // 12 大类（eof/identifier/number/string/regex/punct/shebang/illegal/
+                        // no_substitution_template/template_head/template_middle/template_tail）
+    flags: u8,          // newline_before（1 bit，预留 ASI/高亮所需 per-token 状态）
+    start: u32, end: u32,   // UTF-8 字节偏移
+};   // 12B，比 yuku 的 16B 瘦一档
 ```
 
-无 end、无 flags、无值、无行列。punct/关键字的具体文本靠 span 切片
-表达；行号靠 `LineIndex` 惰性物化——扫描期零成本，首次 `lineAt`
-查询时才建换行位图 + 块前缀和，之后 O(1)。模板拆 Head/Middle/Tail
-四片（`${}` 子表达式 lexeme 全在主流，模板栈跟踪花括号平衡）；
-正则/除号按单 lexeme 回看启发式内部自决（tradeoff T1）。
+无值、无行列。punct/关键字的具体文本靠 span 切片表达；行号靠
+`LineIndex` 惰性物化——扫描期零成本，首次 `lineAt` 查询时才建换行
+位图 + 块前缀和，之后 O(1)。模板拆 Head/Middle/Tail 四片（`${}`
+子表达式 lexeme 全在主流，模板栈跟踪花括号平衡）；正则/除号按双
+lexeme 回看启发式内部自决（prev2 识别名字位置关键字，tradeoff T1）。
+trivia 不进流，「前面有换行」顺路压成 newline_before flag（含注释
+内部换行检测），与五家的 newline-before 同口径。
 
 另备细流定义 `Token`/`TokenTag`（src/token.zig，直接采用 yuku 的
 定义：160 值枚举 + 分类掩码 + 优先级 + 4 flags，16B extern 结构），
@@ -279,8 +281,8 @@ pub const Lexeme = struct {   // src/lexeme.zig
 | 字符串 | `StringLiteral` | `string_literal` | `Str` | `Str` | `String` | `string` | oxc_lexer 另声明 `StringCooked`，同样未发射 |
 | 模板 | `NoSubstitutionTemplateLiteral`、`TemplateHead`、`TemplateMiddle`、`TemplateTail` | `no_substitution_template`、`template_head`、`template_middle`、`template_tail` | `NoSubstitutionTemplateLiteral`、`TemplateHead`、`TemplateMiddle`、`TemplateTail`，另有辅助 `Template`、`BackQuote`、`DollarLBrace` | `NoSubstitutionTemplate`、`TemplateHead`、`TemplateMiddle`、`TemplateTail` | `TemplateNoSub`、`TemplateHead`、`TemplateMiddle`、`TemplateTail` | `no_substitution_template`、`template_head`、`template_middle`、`template_tail` | 六家都是 NoSub/Head/Middle/Tail 四件套打平交错。oxc_lexer 另声明 4 个 `*Cooked` 变体未发射 |
 | 正则 | `RegularExpressionLiteral` | `regex_literal` | `Regex` | `RegExp` | `RegExp` | `regex` | 种类上唯一无分歧的类别；差异全在附带数据（pattern/flags 拆不拆、值算不算），见第三节 |
-| 注释 | `SingleLineCommentTrivia`、`MultiLineCommentTrivia`（仅 `skipTrivia=false` 时进流） | **无 kind**（旁路 `Comment{type: line\|block}`） | **无 kind**（旁路 `Comment{kind: Line\|Block}`） | **无 kind**（旁路 `ArenaVec<Comment>`） | `LineComment`、`BlockComment`（仅流水线内部存在，compress 时丢弃改走旁路 lane） | `line_comment`、`block_comment`（常驻进流） | 五家里四家根本不设注释 kind；tsc 和 oxc_lexer 有 kind 但都不是默认交付；my-scanner 为连续流（end 隐含）反向把注释常驻 |
-| 空白/换行 | `WhitespaceTrivia`、`NewLineTrivia`（同上进流条件） | 无 | 无 | `Skip`（伪 kind，主循环内部消化，对外不可见） | `Whitespace`、`LineTerminator`（compress 时丢弃） | `whitespace`、`newline`（常驻进流，空白 run 以首个行终止符切分） | 其余各家都不把空白当正式交付物；my-scanner 为连续流反向常驻 |
+| 注释 | `SingleLineCommentTrivia`、`MultiLineCommentTrivia`（仅 `skipTrivia=false` 时进流） | **无 kind**（旁路 `Comment{type: line\|block}`） | **无 kind**（旁路 `Comment{kind: Line\|Block}`） | **无 kind**（旁路 `ArenaVec<Comment>`） | `LineComment`、`BlockComment`（仅流水线内部存在，compress 时丢弃改走旁路 lane） | **无 kind**（不进流） | 五家里四家根本不设注释 kind；tsc 和 oxc_lexer 有 kind 但都不是默认交付 |
+| 空白/换行 | `WhitespaceTrivia`、`NewLineTrivia`（同上进流条件） | 无 | 无 | `Skip`（伪 kind，主循环内部消化，对外不可见） | `Whitespace`、`LineTerminator`（compress 时丢弃） | 无（换行事实压成 `newline_before` flag） | 没有任何一家把空白当正式交付物；换行信息全部收敛成 1 bit newline-before |
 | shebang | `ShebangTrivia` | **无 kind**（Lexer 上的独立字段 `{start, len}`） | `Shebang` | `HashbangComment`（产出即 Discard） | `Hashbang`（**保留在显著流**） | `shebang`（进流） | 处置最分散的一类：trivia / 独立字段 / token / 丢弃 / 显著流，五家五样 |
 | JSX | `JsxText`、`JsxTextAllWhiteSpaces` | `jsx_identifier`、`jsx_text` | `JSXName`、`JSXText`，另有辅助 `JSXTagStart`、`JSXTagEnd`、`LessSlash`、`DollarLBrace` | `JSXText` | `JsxText`、`JsxTagEnd`、`JsxLt` | **无** | swc 的 4 个辅助 kind 是 JSX 模式的结构性碎片（`</`、`${`、标签首尾）；my-scanner 恒非 JSX，没有任何 JSX kind |
 | EOF / 非法 | `EndOfFileToken`（未闭合等走 `tokenFlags` 的 `Unterminated` 位，无非法 kind） | `eof`、`invalid`（仅 lookahead 失败的哨兵，正常扫描不产） | `Eof`、`Error`（词法错误做成 `Token::Error` + `TokenValue::Error`，错误即 token） | `Eof`，另有内部伪 kind `Undetermined`、`Skip`（不对外） | `Eof`（流尾附 8 个哨兵防越界）、`Invalid`（诊断细节进 diags lane） | `eof`、`illegal`（逐字节消费，容错不中断） | 错误处理的三个代表方向：flags 位（tsc）、错误即值（swc）、旁路诊断（oxc_lexer） |
@@ -462,13 +464,12 @@ Vec<Comment>>` leading/trailing 两张表，注释文本也 intern；oxc fused
 的 TriviaBuilder 在扫描期顺手做完 leading/trailing 归属和
 `@__PURE__`/legal/coverage 内容分类；oxc_lexer 是 comment_meta +
 comments 双 lane；tsc 最省——主流里什么都没有，要用时从原文重扫。
-my-scanner 反向把注释（line_comment/block_comment）与空白/换行
-（whitespace/newline）**常驻进流**：这是连续流选型（end 隐含为下一
-lexeme 的 start，lexeme 本体 8B）的必然结果——流必须覆盖全文，
-trivia 无处可躲。谱系里的异类，换来结构最简与 trivia 零重扫。
+my-scanner 与五家同侧：注释不进流、无旁路（高亮/lint 需要时可按
+span 重扫），扫描期只顺路做一件事——检测注释体内有没有换行，
+压成下一个显著 lexeme 的 newline_before flag。
 
-空白/换行除 tsc 非默认模式外原本无人记录；my-scanner 的常驻模型下，
-newline lexeme 本身就是 newline-before 的超集（位置与长度都在）。
+空白/换行除 tsc 非默认模式外无人记录；newline-before 是 trivia 留给
+token 的唯一主流遗产，my-scanner 同口径。
 
 ## 八、横向规律
 
@@ -483,9 +484,8 @@ newline lexeme 本身就是 newline-before 的超集（位置与长度都在）�
 5. **on-demand 重入是 re-lex 的基座**：四家 reScan 系 lexer 全是
    重入状态机；整批物化的两家（oxc_lexer、my-scanner）都无 reScan——
    一个靠完备 oracle，一个靠启发式。
-6. **注释旁路、空白抹除**曾是共识；shebang/JSX/错误这类边缘类别的
-   处置才是各家的自由发挥区。my-scanner 的连续流选型（2026-09 起）
-   是反例：trivia 全部常驻进流。
+6. **注释旁路、空白抹除**是共识；shebang/JSX/错误这类边缘类别的
+   处置才是各家的自由发挥区。
 
 ## 九、my-scanner 现状与候选改动
 
@@ -493,11 +493,11 @@ newline lexeme 本身就是 newline-before 的超集（位置与长度都在）�
 
 | 候选 | 谱系证据 | 状态 |
 | --- | --- | --- |
-| * per-token flags 字节，line_terminator_before 先行 | 五家全有（1 bit 起步）；细流 Token 的 flags 布局已随 yuku 定义就位 | 粗流保持 LineIndex 查询式；细流映射层落地时用其 flags |
+| * per-token flags 字节，line_terminator_before 先行 | 五家全有（1 bit 起步） | **已落地**（2026-09）：粗流 Lexeme 带 flags 字节 + newline_before（含注释体内换行检测） |
 | * reScan / 决策注入协议 | 四家 on-demand 系标配；我们的 lexeme 已满足"数据可从 span 重推导"前提 | jump_vec 单阶段天然可重入；two_phase 整批 classify 需专门设计 |
 | 模板分片 | 六家全部分片 | **已落地**（2026-09）：四片 + 内建模板栈，`${}` 内 lexeme 全在主流，regex_starts 旁路随之删除 |
 | escaped / unterminated / has_separator 等 flags | tsc/yuku/oxc 交集；unterminated 对 LSP 半成品场景特别有用 | 随细流映射层一并评估 |
-| 注释改旁路收集 | 五家全部旁路 | **否决**（2026-09）：连续流选型下 trivia 常驻是结构必然，反向落地 |
-| kind 细分（punct/关键字展开成枚举） | 五家全部细分 | **定义已就位**（2026-09）：细流 Token/TokenTag 直接采用 yuku 定义（src/token.zig）；粗流维持 16 大类，映射层留待 parser 需要 O(1) 判别时 |
+| 注释改旁路收集 | 五家全部旁路 | **已落地**（2026-09）：注释不进流、无旁路（体换行检测仍顺路做）；曾短暂试过的连续流常驻选型同日否决（交付口径与对比方不公平） |
+| kind 细分（punct/关键字展开成枚举） | 五家全部细分 | **定义已就位**（2026-09）：细流 Token/TokenTag 直接采用 yuku 定义（src/token.zig）；粗流维持 12 大类，映射层留待 parser 需要 O(1) 判别时 |
 | * SoA 输出 | oxc_lexer 同族实践 | 性能实验，bench 裁决 |
 | UTF-16 坐标边界层（LSP 场景） | tsc 原生 UTF-16；yuku 在 JS decoder 层换算 | 非 token 改动，边界层职责 |

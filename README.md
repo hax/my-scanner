@@ -30,12 +30,13 @@ scripts/check.sh                      # 正确性门禁（全变体 tsc 差分�
 
 ```
 $ zig build run -- src/scanner.zig
-src/scanner.zig: 67626 bytes, 19463 lexemes, 1796 lines (eof=1, identifier=3751, number=334, string=877, punct=7775, line_comment=257, whitespace=4783, newline=1685)
+src/scanner.zig: 69633 bytes, 13019 lexemes, 1822 lines (eof=1, identifier=3827, number=364, string=880, punct=7947)
 ```
 
 产出是两套 token 定义中的粗流（`Lexeme`，见 [src/lexeme.zig](src/lexeme.zig)）：
-连续覆盖全文（trivia 常驻），`end` 隐含为下一个 lexeme 的 `start`；
-细流（`Token`/`TokenTag`，[src/token.zig](src/token.zig)）直接采用
+12B（kind + flags + start + end），trivia 不进流（对齐 yuku 等引擎的
+交付口径），「前面有换行」压成 1-bit `newline_before` flag；细流
+（`Token`/`TokenTag`，[src/token.zig](src/token.zig)）直接采用
 yuku 定义，留作 parser 接口预备。
 
 作为库使用（`build.zig.zon` 依赖 + `@import("my_scanner")`）：

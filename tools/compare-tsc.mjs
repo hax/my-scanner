@@ -12,11 +12,11 @@
 //    合并（泛型 `A<B<C>>` 的需要）；`/` 的正则/除号也保守判除号。
 //    因此对比采用"双向吞噬同步"：完美对齐优先；否则一侧的一个 token
 //    必须恰好是另一侧一串 token 的拼接（边界咬合），只验证切分正确。
-// 3. my-scanner 的粗流（Lexeme）：trivia（whitespace/newline/comment）
-//    常驻但不参与对比（tsc skipTrivia=true），关键字不细分（tsc 的
-//    keyword token 一律按 identifier 比对），私有名 `#foo` 拆成 `#` +
-//    identifier 两个 lexeme（tsc 是单个 PrivateIdentifier，走吞噬同步），
-//    模板拆 Head/Middle/Tail 片（与 tsc 同构，1:1 对齐）。
+// 3. my-scanner 的粗流（Lexeme）：trivia 不进流（与 tsc skipTrivia=true
+//    同口径），关键字不细分（tsc 的 keyword token 一律按 identifier
+//    比对），私有名 `#foo` 拆成 `#` + identifier 两个 lexeme（tsc 是
+//    单个 PrivateIdentifier，走吞噬同步），模板拆 Head/Middle/Tail 片
+//    （与 tsc 同构，1:1 对齐）。
 //
 // kind 映射到 my-scanner 的粗分类，kind 不一致记 hard diff 并失败。
 
@@ -104,9 +104,6 @@ function classify(kind, tokenText) {
   return `other(${kind})`;
 }
 
-// my-scanner 的 trivia 类别：常驻流但不参与对比（tsc skipTrivia=true）
-const TRIVIA = new Set(["whitespace", "newline", "line_comment", "block_comment"]);
-
 function myTokens(file, variant) {
   const args = ["--dump"];
   if (variant) args.push(`--variant=${variant}`);
@@ -118,8 +115,7 @@ function myTokens(file, variant) {
     .map((line) => {
       const [start, end, kind] = line.split("\t");
       return { start: Number(start), end: Number(end), kind };
-    })
-    .filter((t) => !TRIVIA.has(t.kind));
+    });
 }
 
 function context(text, pos, span = 60) {

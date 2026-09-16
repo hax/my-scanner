@@ -122,11 +122,9 @@ fn scanFile(
 
     if (dump) {
         // TSV：start \t end \t kind \t 转义后的文本（\n 等控制字符转成 \x 序列）\t 行号
-        // lexeme 不存 end：取下一个 lexeme 的 start（连续性不变量；eof 取 src.len）
-        for (result.tokens, 0..) |t, i| {
-            const end: u32 = if (i + 1 < result.tokens.len) result.tokens[i + 1].start else @intCast(src.len);
-            try out.print("{d}\t{d}\t{s}\t", .{ t.start, end, @tagName(t.kind) });
-            try writeEscaped(out, t.slice(src, end));
+        for (result.tokens) |t| {
+            try out.print("{d}\t{d}\t{s}\t", .{ t.start, t.end, @tagName(t.kind) });
+            try writeEscaped(out, t.slice(src));
             try out.print("\t{d}\n", .{try result.lines.lineAt(t.start)});
         }
     }

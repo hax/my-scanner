@@ -43,21 +43,6 @@ fn findBlockCommentEndScalar(src: []const u8, from: usize) ?usize {
     return null;
 }
 
-/// start 处若是注释则返回 Scan；否则 null。
-fn tryCommentScalar(src: []const u8, start: usize) ?Scan {
-    if (start + 1 >= src.len or src[start] != '/') return null;
-    if (src[start + 1] == '/') {
-        return .{ .kind = .line_comment, .end = lineEndScalar(src, start) };
-    }
-    if (src[start + 1] == '*') {
-        if (findBlockCommentEndScalar(src, start + 2)) |end| {
-            return .{ .kind = .block_comment, .end = end };
-        }
-        return .{ .kind = .illegal, .end = src.len };
-    }
-    return null;
-}
-
 /// 单/双引号字符串：逐字节找 `引号|反斜杠|换行`，转义对跳 2。
 fn scanStringScalar(src: []const u8, start: usize, quote: u8) Scan {
     var i = start + 1;
@@ -130,11 +115,11 @@ fn scanIdentifierScalar(src: []const u8, start: usize) Scan {
     return .{ .kind = .identifier, .end = i };
 }
 
-/// 非 ASCII：Unicode whitespace → whitespace kind（驱动循环并入空白 run）；
+/// 非 ASCII：Unicode whitespace → ws 标记（驱动循环跳过，不落盘）；
 /// ID_Start → 标识符；其余 illegal。
 fn scanNonAsciiScalar(src: []const u8, start: usize) Scan {
     if (simd.unicodeWhitespaceLen(src, start)) |len| {
-        return .{ .kind = .whitespace, .end = start + len };
+        return .{ .kind = .illegal, .end = start + len, .ws = true };
     }
     if (unicode.decode(src, start)) |r| {
         if (unicode.isIdStart(r.cp)) return scanUnicodeIdentifierScalar(src, start, r);
@@ -177,7 +162,7 @@ fn utf8LenScalar(first: u8) usize {
 
 // -- 首字节分发（共享 dispatch 表，跳跃函数换标量版）------------------------
 
-inline fn tokenAtScalar(src: []const u8, start: usize, prev_kind: ?LexemeKind, prev_text: []const u8) Scan {
+inline fn tokenAtScalar(src: []const u8, start: usize, prev_kind: ?LexemeKind, prev_text: []const u8, prev2_text: []const u8) Scan {
     const c = src[start];
     const code = scanner.dispatch_table[c];
 
@@ -190,8 +175,8 @@ inline fn tokenAtScalar(src: []const u8, start: usize, prev_kind: ?LexemeKind, p
         return if (c == '`') scanTemplatePartScalar(src, start) else scanStringScalar(src, start, c);
     }
     if (code & scanner.Dispatch.slash != 0) {
-        if (tryCommentScalar(src, start)) |comment| return comment;
-        if (scanner.regexAllowedAfter(prev_kind, prev_text)) return scanner.scanRegex(src, start);
+        // 除号、正则两解（注释由驱动循环前置判别，不到这里）
+        if (scanner.regexAllowedAfter(prev_kind, prev_text, prev2_text)) return scanner.scanRegex(src, start);
         return scanner.scanPunct(src, start);
     }
     if (c == '\\') {
@@ -216,9 +201,10 @@ inline fn scanAtScalar(
     start: usize,
     prev_kind: ?LexemeKind,
     prev_text: []const u8,
+    prev2_text: []const u8,
     tpl: *TemplateStack,
 ) Scan {
-    const s = tokenAtScalar(src, start, prev_kind, prev_text);
+    const s = tokenAtScalar(src, start, prev_kind, prev_text, prev2_text);
     if (s.kind == .punct and src[start] == '}' and tpl.closesTemplate()) {
         return scanTemplatePartScalar(src, start);
     }
@@ -241,48 +227,78 @@ pub fn scan(allocator: std.mem.Allocator, src: []const u8) !Result {
 
 /// scan 的复用缓冲版本（与两阶段 scanInto 同签名，bench 同口径驱动）。
 /// 不产出任何行号信息（行索引惰性，纯词法化路径零行跟踪成本）。
+/// trivia 与两阶段同模型：不落盘——空白 run 原地跳过、注释快跳，
+/// 只顺路累积 newline_before 挂到下一个显著 lexeme 的 flags 上。
 pub fn scanInto(
     tokens: *std.ArrayList(Lexeme),
     allocator: std.mem.Allocator,
     src: []const u8,
 ) !void {
     var pos: usize = 0;
-    var prev_kind: ?LexemeKind = null; // 上一个非 trivia lexeme，供 `/` 判别
+    var prev_kind: ?LexemeKind = null; // 上一个显著 lexeme，供 `/` 判别
     var prev_text: []const u8 = "";
+    var prev2_text: []const u8 = ""; // prev 之前那个显著 lexeme 的文本（名字位置判别）
     var tpl: TemplateStack = .{};
+    var nl_before = false; // 上一个显著 lexeme 之后的 trivia 是否含行终止符
 
     if (src.len >= 2 and src[0] == '#' and src[1] == '!') {
         const s = scanner.scanShebang(src);
         pos = s.end;
         prev_kind = s.kind;
         prev_text = src[0..s.end];
-        try tokens.append(allocator, .{ .kind = .shebang, .start = 0 });
+        try tokens.append(allocator, .{ .kind = .shebang, .start = 0, .end = @intCast(s.end) });
     }
-    var trivia_from = pos; // pending 空白 run 起点（== pos 表示无待发射）
     while (pos < src.len) {
-        // 整段空白 run（ASCII + Unicode ws）一次吞掉，累积进 pending run
-        pos = common.skipWhitespace(src, pos);
-        if (pos >= src.len) break;
-        // 落盘最多 3 个：whitespace + newline + 本体
-        if (tokens.items.len + 3 > tokens.capacity) {
-            try tokens.ensureUnusedCapacity(allocator, 3);
+        // 空白 run（ASCII + Unicode ws）整段跳过，顺带置 flag
+        const ws_to = common.skipWhitespace(src, pos);
+        if (ws_to > pos) {
+            if (!nl_before) nl_before = scanner.hasLineTerminator(src, pos, ws_to);
+            pos = ws_to;
+            if (pos >= src.len) break;
+        }
+        // 注释（标量快跳；块注释体检测行终止符置 flag；未闭合块注释
+        // 落到统一落盘路径产 illegal，错误可见）
+        const c0 = src[pos];
+        if (c0 == '/' and pos + 1 < src.len) {
+            const n = src[pos + 1];
+            if (n == '/') {
+                pos = lineEndScalar(src, pos);
+                continue;
+            }
+            if (n == '*') {
+                if (findBlockCommentEndScalar(src, pos + 2)) |end| {
+                    if (!nl_before) nl_before = scanner.hasLineTerminator(src, pos, end);
+                    pos = end;
+                    continue;
+                }
+            }
+        }
+        // 内联容量检查（冷路径才进增长函数）；一轮最多产一个 lexeme
+        if (tokens.items.len == tokens.capacity) {
+            try tokens.ensureUnusedCapacity(allocator, 1);
         }
         const start = pos;
-        const s = scanAtScalar(src, start, prev_kind, prev_text, &tpl);
+        const s = scanAtScalar(src, start, prev_kind, prev_text, prev2_text, &tpl);
         pos = s.end;
-        scanner.emitTriviaRun(tokens, src, trivia_from, start);
-        tokens.appendAssumeCapacity(.{ .kind = s.kind, .start = @intCast(start) });
-        trivia_from = pos;
-        if (s.kind != .line_comment and s.kind != .block_comment) {
-            tpl.track(s.kind, src[start]);
-            prev_kind = s.kind;
-            prev_text = src[start..s.end];
-        }
+        tokens.appendAssumeCapacity(.{
+            .kind = s.kind,
+            .flags = if (nl_before) lexeme_mod.flag_newline_before else 0,
+            .start = @intCast(start),
+            .end = @intCast(s.end),
+        });
+        nl_before = false;
+        tpl.track(s.kind, src[start]);
+        prev2_text = prev_text;
+        prev_text = src[start..s.end];
+        prev_kind = s.kind;
     }
-    // 尾部空白 run 落盘；eof 固定 start == src.len
-    try tokens.ensureUnusedCapacity(allocator, 2);
-    scanner.emitTriviaRun(tokens, src, trivia_from, src.len);
-    try tokens.append(allocator, .{ .kind = .eof, .start = @intCast(src.len) });
+    // 尾部空白 run 已跳过；eof 固定 start == end == src.len
+    try tokens.append(allocator, .{
+        .kind = .eof,
+        .flags = if (nl_before) lexeme_mod.flag_newline_before else 0,
+        .start = @intCast(src.len),
+        .end = @intCast(src.len),
+    });
 }
 
 // -- 测试：与两阶段交叉验证 ---------------------------------------------------
@@ -321,6 +337,7 @@ test "scalar 变体与两阶段交叉验证" {
         "`a${({b:1}).b}c${ /}/ }d`",
         "tag`a${x}b${ fn`y` }c` / re/g",
         "{ t = `a${x}b${y}c`; } f(`a '${x}'`) }",
+        "x.return / v; x?.if / w; this.#return /2/ u",
     };
     for (cases) |src| try crossCheck(src);
 }

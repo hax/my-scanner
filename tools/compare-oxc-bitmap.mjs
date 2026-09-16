@@ -5,8 +5,8 @@
 //   node tools/compare-oxc-bitmap.mjs <file>...
 //
 // 对齐规则（与 compare-tsc.mjs 同款思路，但双方都是字节偏移、无需坐标换算）：
-// - 双方均为显著流：my-scanner 的 trivia（whitespace/newline/comment）常驻
-//   但在此滤除（oxc 侧 emit_comments=false；hashbang 语料没有）；
+// - 双方均为 trivia-free 显著流（my-scanner 的 trivia 不进流；oxc 侧
+//   emit_comments=false；hashbang 语料没有）；
 // - 模板双方都拆 Head/Middle/Tail 片，1:1 对齐；
 // - TS 泛型嵌套的 `>` 家族：oxc 的 type-context oracle 把闭合类型实参的 `>` run
 //   拆成单 `>`（tsc 同款哲学，JS 表达式里的 `>>` 仍融合），my-scanner 恒融合——
@@ -24,9 +24,6 @@ const ROOT = new URL("..", import.meta.url).pathname;
 const MY_SCANNER = `${ROOT}/zig-out/bin/my-scanner`;
 const BITMAP_DUMP = `${ROOT}/tools/lexbench-rs/target/release/bitmap_dump`;
 
-// my-scanner 的 trivia 类别：常驻流但在此滤除（oxc 侧是 trivia-free 显著流）
-const TRIVIA = new Set(["whitespace", "newline", "line_comment", "block_comment"]);
-
 function myTokens(file) {
   const dump = execFileSync(MY_SCANNER, ["--dump", file], { maxBuffer: 1 << 28 });
   return dump
@@ -36,8 +33,7 @@ function myTokens(file) {
     .map((line) => {
       const [start, end, kind] = line.split("\t");
       return { start: Number(start), end: Number(end), kind };
-    })
-    .filter((t) => !TRIVIA.has(t.kind));
+    });
 }
 
 function oxcTokens(file) {
