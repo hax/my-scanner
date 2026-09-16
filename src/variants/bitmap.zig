@@ -727,6 +727,37 @@ pub fn keywords(bm: *Bitmaps, src: []const u8) void {
 // 驱动
 // ---------------------------------------------------------------------------
 
+/// 位图缓冲的跨轮复用：bench 计时循环里 scanInto 反复调用，每轮重新
+/// alloc/memset 约 1.9×n 字节在小文件上占比极高。oxc 的 bench 口径本就
+/// 是 arena 跨轮复用（零分配稳态设计意图，见 architecture.md
+/// 「oxc_bitmap」节）——这里对齐同一口径。单线程假设与 bench/CLI 一致；
+/// classify 全量重写位图 word，复用只需清兜底 word。
+var reuse: ?Bitmaps = null;
+
+fn acquireBitmaps(allocator: std.mem.Allocator, n: usize) !*Bitmaps {
+    const nb = (n + 63) / 64 + 1;
+    if (reuse) |*bm| {
+        if (bm.st.len >= nb) {
+            bm.n = n;
+            bm.word[nb - 1] = 0;
+            bm.st[nb - 1] = 0;
+            bm.opch[nb - 1] = 0;
+            bm.numch[nb - 1] = 0;
+            bm.misc[nb - 1] = 0;
+            return bm;
+        }
+        bm.deinit(allocator);
+    }
+    reuse = try Bitmaps.alloc(allocator, n);
+    return &reuse.?;
+}
+
+/// 释放复用缓冲（测试的泄漏检测需显式归还；bench/CLI 退出无需调用）
+pub fn releaseReuse(allocator: std.mem.Allocator) void {
+    if (reuse) |*bm| bm.deinit(allocator);
+    reuse = null;
+}
+
 pub fn scanInto(
     tokens: *std.ArrayList(Token),
     allocator: std.mem.Allocator,
@@ -737,11 +768,10 @@ pub fn scanInto(
         try scanner.reserveRegexStarts(allocator, src, list);
     }
 
-    var bm = try Bitmaps.alloc(allocator, src.len);
-    defer bm.deinit(allocator);
+    const bm = try acquireBitmaps(allocator, src.len);
 
-    classify(&bm, src);
-    miscPass(&bm, src);
+    classify(bm, src);
+    miscPass(bm, src);
 
     // shebang 特判（对齐 jump_vec/主循环：文件头 `#!` 是独立 token）
     if (src.len >= 2 and src[0] == '#' and src[1] == '!') {
@@ -751,10 +781,10 @@ pub fn scanInto(
         bm.kind[0] = @intFromEnum(TokenKind.whitespace); // compress 按 trivia 跳过
     }
 
-    try carve(&bm, src, options);
-    coalesce(&bm, src);
-    keywords(&bm, src);
-    try compress(&bm, tokens, allocator, options);
+    try carve(bm, src, options);
+    coalesce(bm, src);
+    keywords(bm, src);
+    try compress(bm, tokens, allocator, options);
 }
 
 pub fn scan(allocator: std.mem.Allocator, src: []const u8, options: Options) !scanner.Result {
@@ -768,20 +798,23 @@ pub fn scan(allocator: std.mem.Allocator, src: []const u8, options: Options) !sc
 /// trivia（whitespace/comment）按 Options 过滤。
 pub fn compress(bm: *Bitmaps, tokens: *std.ArrayList(Token), allocator: std.mem.Allocator, options: Options) !void {
     const n = bm.n;
-    // sentinel：位 n 恒置位，保证每个 token 都有「下一 st 位」可配对
+    // sentinel：位 n 恒置位，保证每个 token 都有「下一 st 位」可配对。
+    // 位 n 所在 word 的高位段可能是复用缓冲的上一轮残留，先清掉。
+    bm.st[n >> 6] &= lowBits(n & 63);
     bmSet(bm.st, n);
     bm.kind[n] = @intFromEnum(TokenKind.whitespace); // sentinel 自身按 trivia 跳过
 
     // st 位总数是产出 token 数的上界（含 trivia entry），一次预留到位，
     // 热循环全部 appendAssumeCapacity（免每 token 的容量分支）
+    // 循环界 = 位 n 所在 word（含 sentinel）：classify 覆盖 [0, ceil(n/64))，
+    // 复用缓冲中更高 word 是上一轮残留，不可读
+    const nb_total = (n >> 6) + 1;
     var total: usize = 0;
-    for (bm.st) |wd| total += @popCount(wd);
+    for (bm.st[0..nb_total]) |wd| total += @popCount(wd);
     try tokens.ensureTotalCapacity(allocator, tokens.items.len + total + 1);
 
     var pending: Token = undefined;
     var has_pending = false;
-    var last_pos: usize = 0; // 上一个 st 位（配对用）；sentinel 保证终值 n
-    const nb_total = bm.st.len;
     var w: usize = 0;
     outer: while (w < nb_total) : (w += 1) {
         var bits = bm.st[w];
@@ -796,17 +829,10 @@ pub fn compress(bm: *Bitmaps, tokens: *std.ArrayList(Token), allocator: std.mem.
                 has_pending = false;
             }
             const k: TokenKind = @enumFromInt(bm.kind[pos]);
-            if (k == .whitespace) {
-                last_pos = pos;
-                continue;
-            }
-            if (k == .comment and !options.keep_comments) {
-                last_pos = pos;
-                continue;
-            }
+            if (k == .whitespace) continue;
+            if (k == .comment and !options.keep_comments) continue;
             pending = .{ .kind = k, .start = @intCast(pos), .end = 0 };
             has_pending = true;
-            last_pos = pos;
         }
     }
     if (has_pending) {
@@ -859,4 +885,5 @@ test "bitmap 与两阶段 scanner 交叉验证" {
     try expectSame("#x\\u{41}; // private 内转义");
     try expectSame("x\u{2028}y; // LS 逻辑换行");
     try expectSame("\u{00A0}x; // NBSP 空白");
+    releaseReuse(std.testing.allocator);
 }

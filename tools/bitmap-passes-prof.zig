@@ -41,11 +41,6 @@ pub fn main(init: std.process.Init) !void {
         bm.deinit(arena);
     }
     acc.report(args[1], src.len, repeats);
-    std.debug.print("  events: multi={d} num={d} kw={d} (kw hit {d})\n", .{ bitmap.dbg_multi, bitmap.dbg_num, bitmap.dbg_kw, bitmap.dbg_kw_ok });
-    bitmap.dbg_multi = 0;
-    bitmap.dbg_num = 0;
-    bitmap.dbg_kw = 0;
-    bitmap.dbg_kw_ok = 0;
 }
 
 const Passes = struct {
