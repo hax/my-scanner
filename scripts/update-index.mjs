@@ -100,7 +100,7 @@ const html = `<!doctype html>
 <script src="vendor/echarts.min.js"></script>
 <style>
   :root { color-scheme: light dark; }
-  body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 0 auto; max-width: 1080px; padding: 1rem 1.5rem 4rem; line-height: 1.6; }
+  body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 0 auto; max-width: 1400px; padding: 1rem 1.5rem 4rem; line-height: 1.6; }
   h1 { font-size: 1.4rem; margin-bottom: .4rem; } h2 { font-size: 1.1rem; margin-top: 2rem; }
   h3 { font-size: .95rem; margin: 1rem 0 .1rem; font-weight: 600; }
   h3 .note { font-weight: 400; font-size: .82rem; color: gray; }
@@ -113,7 +113,10 @@ const html = `<!doctype html>
   .mode button { cursor: pointer; padding: .2rem .7rem; margin-right: .3rem; border-radius: 6px; border: 1px solid currentColor; background: transparent; color: inherit; }
   .mode button.on { background: #4b7bec; border-color: #4b7bec; color: #fff; }
   .chart { width: 100%; height: 300px; }
-  .bar { width: 100%; max-width: 680px; height: 230px; }
+  #bars { display: flex; flex-wrap: wrap; gap: .2rem 1.2rem; }
+  .bar-item { flex: 1 1 340px; max-width: 460px; min-width: 280px; }
+  .bar-item h3 { margin: .5rem 0 0; }
+  .bar { width: 100%; height: 190px; }
   code { background: color-mix(in srgb, currentColor 8%, transparent); padding: 0 .3rem; border-radius: 4px; }
   a { color: #4b7bec; }
 </style>
@@ -150,10 +153,13 @@ const DESCR  = {
   oxc_bitmap: "第三方 · oxc_lexer 多位图流水线(孵化实验,歧义自决+spans 门禁;计时含 value lanes;仅 x86_64 SIMD)"
 };
 // 柱状图按架构族分组:swc/oxc 与 jump_vec 同族(单阶段+SIMD 长跳跃/字节搜索),
-// 故并入 jump_vec 组;直接参照同色系浅色,同族其他实现(swc/oxc)保留异色身份。组间空一档
+// 故并入 jump_vec 组;直接参照同色系浅色,同族其他实现(swc/oxc)保留异色身份。
+// 细柱紧凑布局:间距统一为半柱宽(barCategoryGap 50%),组身份由 markArea
+// 浅底带承担(不再占空档槽位)
 const BAR_GROUPS = [["scalar", "yuku_old"], ["jump_vec", "yuku_main", "swc", "oxc"], ["two_phase", "oxc_bitmap"]];
-const SLOTS = [];
-BAR_GROUPS.forEach((g, gi) => { if (gi > 0) SLOTS.push(null); for (const i of g) SLOTS.push(i); });
+const BAR_IMPLS = BAR_GROUPS.flat();
+const BANDS = []; // 组带范围(隔组填浅底):category 轴带宽坐标,组边界在 x.5
+{ let s = 0; BAR_GROUPS.forEach((g, gi) => { if (gi % 2 === 1) BANDS.push([{ xAxis: s - 0.5 }, { xAxis: s + g.length - 0.5 }]); s += g.length; }); }
 const theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : null;
 let mode = "ratio";
 let showLocal = false;
@@ -204,20 +210,27 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
   // ---- 柱状图:每语料一组,最近一次 CI run 的各实现吞吐 ----
   const barRoot = document.getElementById("bars");
   for (const [file, series] of Object.entries(idx.series)) {
-    addH3(barRoot, file);
-    const div = document.createElement("div"); div.className = "bar"; barRoot.appendChild(div);
+    const item = document.createElement("div"); item.className = "bar-item";
+    addH3(item, file);
+    const div = document.createElement("div"); div.className = "bar"; item.appendChild(div);
+    barRoot.appendChild(item);
     const chart = echarts.init(div, theme);
     allCharts.push(chart);
     const anchorGbps = series[idx.anchor]?.[lastCi]?.gbps ?? null;
     chart.setOption({
       backgroundColor: "transparent",
-      grid: { left: 46, right: 10, top: 22, bottom: 24 },
-      xAxis: { type: "category", data: SLOTS.map(s => s ? SHORT[s] : ""), axisLabel: { interval: 0 }, axisTick: { alignWithLabel: true } },
-      yAxis: { type: "value", name: "GB/s" },
+      grid: { left: 40, right: 6, top: 20, bottom: 46 },
+      xAxis: {
+        type: "category",
+        data: BAR_IMPLS.map(i => SHORT[i]),
+        axisLabel: { interval: 0, rotate: 45, fontSize: 10 },
+        axisTick: { alignWithLabel: true },
+        axisLine: { show: false }
+      },
+      yAxis: { type: "value", name: "GB/s", nameTextStyle: { fontSize: 10 } },
       tooltip: {
         formatter: pr => {
-          const impl = SLOTS[pr.dataIndex];
-          if (!impl) return "";
+          const impl = BAR_IMPLS[pr.dataIndex];
           const p = (series[impl] || [])[lastCi];
           if (!p) return NAMES[impl] + ": 无数据";
           let s = NAMES[impl] + "<br/>" + p.gbps.toFixed(2) + " GB/s<br/>vs yuku-0.10.1: " + p.ratio.toFixed(2) + "x";
@@ -227,12 +240,13 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
       },
       series: [{
         type: "bar",
-        barWidth: "80%",
-        data: SLOTS.map(impl => {
-          if (!impl) return null;
+        barWidth: "27%",
+        barCategoryGap: "50%",
+        data: BAR_IMPLS.map(impl => {
           const p = (series[impl] || [])[lastCi];
           return p ? { value: p.gbps, itemStyle: { color: COLORS[impl] } } : null;
         }),
+        markArea: { silent: true, itemStyle: { color: "rgba(127,127,127,0.07)" }, data: BANDS },
         markLine: anchorGbps == null ? undefined : {
           silent: true, symbol: "none",
           data: [{ yAxis: anchorGbps }],
@@ -347,7 +361,7 @@ const readme = `# my-scanner 架构矩阵基准报告
 
 在线图表页(GitHub Pages,源 = 本分支): <https://johnhax.net/my-scanner/>
 
-- [index.html](index.html) — ECharts 图表页:顶部为比对者说明(yuku 基线版本溯源)与最近一次 CI run 的吞吐柱状对比(每语料一组,实现紧邻其同族参照,比照组同色系),下方为趋势折线(vs yuku-0.10.1 锚点 / vs 同族参照 / GB/s 三种口径;锚点钉版,相对值跨 run 可比;本地 run 默认不画,可勾选叠加空心点)。图表依赖 [vendor/echarts.min.js](vendor/echarts.min.js)(tools/package.json 钉版)
+- [index.html](index.html) — ECharts 图表页:顶部为比对者说明(yuku 基线版本溯源)与最近一次 CI run 的吞吐柱状对比(每语料一卡片、随页宽并排;细柱紧凑布局,间距半柱宽,架构族由浅底组带区分),下方为趋势折线(vs yuku-0.10.1 锚点 / vs 同族参照 / GB/s 三种口径;锚点钉版,相对值跨 run 可比;本地 run 默认不画,可勾选叠加空心点)。图表依赖 [vendor/echarts.min.js](vendor/echarts.min.js)(tools/package.json 钉版)
 - [reports/](reports/) — 每次 run 的 \`<sha>.md\`(人读报告)与 \`<sha>.json\`(原始数据);本地提交(bench.sh --submit)为 \`<sha>.local-<机器名>.*\`,带机器标识与 CI 主线分层
 
 对比口径与架构族谱见仓库 docs/architecture.md。

@@ -75,8 +75,10 @@ GitHub Pages 源，图表页在线看： <https://johnhax.net/my-scanner/>
 tools/node_modules 拷入）。页面顶部为比对者说明（yuku 基线版本溯源：
 sha 与上游 commit 日期由 `prepare-baselines.sh` 的 `.date` 标记经
 bench.zig → data.json 带入）与最近一次 CI run 的吞吐**柱状对比**
-（每语料一组，实现与其同族参照相邻、比照组同色系——同机同轮的绝对
-值可直接比较）；下方**趋势折线**以"vs yuku-0.10.1 倍数"为主口径——
+（每语料一张卡片、flex 随页宽并排；细柱紧凑布局，间距统一半柱宽，
+架构族身份由浅底组带承担——scalar|yuku-old、jump_vec 族四柱
+（swc/oxc 同族，保留异色身份）、two_phase|oxc-bitmap；同机同轮的
+绝对值可直接比较）；下方**趋势折线**以"vs yuku-0.10.1 倍数"为主口径——
 锚点是钉版快照、固定不漂，相对倍数跨 run、跨 runner 代际均可比
 （2026-09-16 自 yuku-main 切换，历史点由 data.json 的 best_ns 全量
 重算，序列无断档）；绝对吞吐（GB/s）仍仅同 run 内可比。另有
