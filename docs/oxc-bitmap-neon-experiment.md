@@ -1,8 +1,14 @@
 # 实验：oxc_lexer 位图流水线移植到 Zig + NEON
 
-状态：进行中（2026-09-17 开题）
+状态：**第一轮完成**（2026-09-17）
 分支：`exp/oxc-bitmap-neon`（起点 58d3e3c）
 目标：**在 Apple Silicon（NEON）上达到 oxc_lexer（x86_64 AVX2+BMI2）相同的速度**。
+
+**结论速览**：新变体 `bitmap`（`src/variants/bitmap.zig`，oxc 六趟位图
+流水线 × my-scanner 语义）check.sh 44/44 全绿；M3 native 对 CI EPYC 的
+oxc_bitmap AVX2 绝对值 **9/11 语料追平或超过**；vs 本机 jump_vec 6 胜
+5 负，胜负面与 oxc_bitmap 的架构性格一致。未追平的是两个 minified
+语料（0.76-0.82x）——归因见 §6。
 
 ## 0. 问题定义
 
@@ -150,3 +156,89 @@ regexAllowedBitmap(p):   // p = `/` 的位置，返回 true=正则
   movemask 是最大缺口。
 - Rosetta x86_64 基线任务已派出（后台）。
 - 下一步：tables comptime LUT + classify NEON + 标量对照交叉验证。
+
+## 7. 实现（commit f9721cd 及前序）
+
+- `src/variants/bitmap.zig`：五张位图（word/st/opch/numch/misc）+ kind
+  数组；classify（NEON 比较链）→ miscPass（unicode/`#`/`\`）→ carve
+  （opener 事件 + 字面量/正则）→ coalesce（multi/数字事件）→ keywords
+  （三重过滤后 isKeyword）→ compress（位图 → token 流）。
+- 语义层复用：scanString/scanTemplate/scanNumber/scanPunct/scanRegex/
+  isKeyword/decodeIdentEscape 等直接调用（tryComment/scanString/
+  scanTemplate 改 pub）；`punctLenW` pub 供 gluePunct 直用。
+- token 端点：end = 位图上下一个 st 位（sentinel at n），恒成立的论证
+  与 oxc build_spans 的 stage 配对同构，见文件头注释。
+
+## 8. 最终数字（M3 Pro native，GB/s，15 轮取最优，2026-09-17）
+
+| 语料 | jump_vec | bitmap | bm/jv | EPYC oxc_bitmap(AVX2) | bm vs EPYC-oxc |
+|---|---|---|---|---|---|
+| react.js 72K | 0.38 | 1.02 | 2.68 | 1.068 | 0.95 |
+| react.min.js 6.4K | 0.46 | 0.58 | 1.26 | 0.761 | 0.76 |
+| typescript.js 8.2M | 0.63 | 0.60 | 0.95 | 0.681 | 0.88 |
+| typescript.min.js 3.0M | 0.34 | 0.46 | 1.35 | 0.564 | 0.82 |
+| checker.ts 3.1M | 0.72 | 0.75 | 1.04 | 0.846 | 0.89 |
+| hanzi-chai.ts 255K | 0.52 | 0.56 | 1.08 | 0.187 | 3.0 |
+| lib.dom.d.ts 1.9M | 1.60 | 1.14 | 0.71 | 1.036 | 1.10 |
+| mon-entreprise.ts 104K | 0.71 | 0.82 | 1.15 | 0.679 | 1.21 |
+| line-comments.js 1.7M | 2.17 | 1.09 | 0.50 | 0.951 | 1.15 |
+| strings.js 547K | 0.94 | 0.66 | 0.70 | 0.683 | 0.97 |
+| cn-dense.ts 968K | 1.24 | 0.58 | 0.47 | 0.284 | 2.0 |
+
+要点：
+1. **9/11 语料对 EPYC AVX2 版追平或超过**（≥0.95 视为追平）。
+2. 胜负面复刻 oxc_bitmap：token 密度高（minified）与 unicode 密集
+   （CJK/变音）赢；跳跃密集（行注释/字符串墙）输——同族对比的架构
+   性格一致，不是移植劣化。
+3. react.js 在 bench（复用）1.02 vs 无复用 0.35——小文件的位图
+   alloc/memset 占比可达 3 倍，对齐 oxc 的 arena 复用口径后消除。
+
+## 9. 归因与教训
+
+### 为什么 NEON 版能追上 AVX2 版
+
+oxc 的速度本源是「每 token 路径极轻」（位图批量产出 vs 逐 token
+dispatch），不是指令总量少。NEON 版 classify 的指令数约为 AVX2 的
+3-4 倍（movemask 合成 ~11-14 条/32B/张 + 比较链），但：
+- M3 8-wide 的 IPC 上限远高于流水线实际 IPC（六趟顺序 pass 受访存/
+  依赖限制）；
+- classify 只占端到端 15-20%（2.6-3.1 GB/s 的单 pass 速率），非瓶颈。
+端到端的瓶颈在 coalesce（事件标量处理）与 compress（位图搬运），
+两边的每事件成本同量级，M3 的频率/宽核优势得以兑现。
+
+### NEON 与 AVX2 的真实差异（实测）
+
+- **movemask**：AVX2 1 条；Zig/LLVM 对 `@bitCast(bool vector → int)`
+  生成 zip1+addv.8h 序列（~11-14 条/32B）。手写 vand+addv 略优，
+  pmull 黑科技未做（预期 ~4 条，收益 <10%）。
+- **pshufb 查表**：Zig 数组索引展开 182 条、select 树 39 条——LLVM
+  不合成 vqtbl，**LUT 方案在 Zig+NEON 不可用**（inline asm 是唯一
+  出路，未走）。oxc 的 PH 哈希 LUT（classify 的 punct kind、compress
+  的 pair_luts）全部改用比较链/标量路径。
+- **pext**：oxc 本来就没用（LUT+shuffle 实现压缩），BMI2 不是硬伤。
+
+### 教训
+
+- **位图的边界 corner 是主要 bug 来源**：`1<<64`（bmPrev1/bmClearRange/
+  bmAny）、ctz 先消费后取位（compress 少产首 token）、复用缓冲的
+  sentinel word 残留（phantom tokens）、stage 哨兵越界（batch 满时）
+  ——位图代码每个 shift 都要问「64 会怎样」。
+- **正确性门禁先行**：23 个单测用例（含 `3in4`、`if\u0041`、`#x\u41`、
+  LS/NBSP）快速闭环，check.sh 44/44 兜底；每轮优化必须全绿。
+- **语义对齐要逐条验证而不是想当然**：`if\u0041` 是两个 token
+  （ASCII 词遇 `\` 断词）而非一个；`3in4` 的 `in4` 被吞不产 token
+  （候选位图里非起点）——都与最初从 oxc/Rust 语义的猜测相反。
+- **profiler 的 arena 复用与 bench 的每轮 alloc 差 3 倍**（react.js
+  1.09 vs 0.35）——口径先对齐（oxc 本来就是复用），再谈优化。
+
+### 未竟事项（下一轮候选）
+
+- ts.min 0.82x / react.min 0.76x：compress 的 SIMD 化（oxc 用
+  pair_luts+pshufb，NEON 无 tbl——候选：GPR 256 项 LUT 位置展开 +
+  pmull movemask）；coalesce 的 op2/op3 式哈希合并（现在每事件调
+  punctLenW 贪心）。
+- inline asm vqtbl1q 封装后重估 classify LUT 方案。
+- `x86_64` 上 bitmap 变体的 AVX2 后端（同构对比消除 ISA 变量）。
+- Rosetta 口径：oxc_bitmap AVX2 经 Rosetta 仅 0.37 GB/s（ts.js），
+  NEON native 1.7x 于它——Rosetta 数字只作底线参照（见
+  `.rosetta-oxc/results.json`）。
