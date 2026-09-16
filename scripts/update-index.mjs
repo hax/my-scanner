@@ -113,7 +113,7 @@ const html = `<!doctype html>
   .mode button { cursor: pointer; padding: .2rem .7rem; margin-right: .3rem; border-radius: 6px; border: 1px solid currentColor; background: transparent; color: inherit; }
   .mode button.on { background: #4b7bec; border-color: #4b7bec; color: #fff; }
   .chart { width: 100%; height: 300px; }
-  .bar { width: 100%; max-width: 820px; height: 230px; }
+  .bar { width: 100%; max-width: 680px; height: 230px; }
   code { background: color-mix(in srgb, currentColor 8%, transparent); padding: 0 .3rem; border-radius: 4px; }
   a { color: #4b7bec; }
 </style>
@@ -135,7 +135,7 @@ const html = `<!doctype html>
 <label class="meta" style="cursor:pointer;margin-left:.6rem"><input type="checkbox" id="show-local"> 叠加本地 run(空心点,不连线,带机器标识)</label></p>
 <div id="files"></div>
 <script>
-// 比照组同色系:自有实现饱和色,其同族第三方参照同色系浅色
+// 直接参照同色系:自有实现饱和色,其同族直接参照同色系浅色;swc/oxc 保留异色身份
 const COLORS = { scalar:"#e67e22", jump_vec:"#27ae60", two_phase:"#e74c3c", yuku_old:"#f0b27a", yuku_main:"#82e0aa", swc:"#9b59b6", oxc:"#1abc9c", oxc_bitmap:"#f1948a" };
 const NAMES  = { scalar:"scalar(全标量)", jump_vec:"jump_vec(单阶段+SIMD跳跃)", two_phase:"two_phase(两阶段)", yuku_old:"yuku-old", yuku_main:"yuku-main", swc:"swc(决策注入)", oxc:"oxc(决策注入)", oxc_bitmap:"oxc-bitmap(位图流水线)" };
 const SHORT  = { scalar:"scalar", jump_vec:"jump_vec", two_phase:"two_phase", yuku_old:"yuku-old", yuku_main:"yuku-main", swc:"swc", oxc:"oxc", oxc_bitmap:"oxc-bitmap" };
@@ -149,8 +149,9 @@ const DESCR  = {
   oxc: "第三方 · oxc lexer,决策注入驱动(同上)",
   oxc_bitmap: "第三方 · oxc_lexer 多位图流水线(孵化实验,歧义自决+spans 门禁;计时含 value lanes;仅 x86_64 SIMD)"
 };
-// 柱状图比照组:实现紧邻其同族参照,组间空一档
-const BAR_GROUPS = [["scalar", "yuku_old"], ["jump_vec", "yuku_main"], ["two_phase", "oxc_bitmap"], ["swc", "oxc"]];
+// 柱状图按架构族分组:swc/oxc 与 jump_vec 同族(单阶段+SIMD 长跳跃/字节搜索),
+// 故并入 jump_vec 组;直接参照同色系浅色,同族其他实现(swc/oxc)保留异色身份。组间空一档
+const BAR_GROUPS = [["scalar", "yuku_old"], ["jump_vec", "yuku_main", "swc", "oxc"], ["two_phase", "oxc_bitmap"]];
 const SLOTS = [];
 BAR_GROUPS.forEach((g, gi) => { if (gi > 0) SLOTS.push(null); for (const i of g) SLOTS.push(i); });
 const theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : null;
@@ -210,7 +211,7 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
     const anchorGbps = series[idx.anchor]?.[lastCi]?.gbps ?? null;
     chart.setOption({
       backgroundColor: "transparent",
-      grid: { left: 50, right: 12, top: 22, bottom: 24 },
+      grid: { left: 46, right: 10, top: 22, bottom: 24 },
       xAxis: { type: "category", data: SLOTS.map(s => s ? SHORT[s] : ""), axisLabel: { interval: 0 }, axisTick: { alignWithLabel: true } },
       yAxis: { type: "value", name: "GB/s" },
       tooltip: {
@@ -226,7 +227,7 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
       },
       series: [{
         type: "bar",
-        barWidth: "62%",
+        barWidth: "80%",
         data: SLOTS.map(impl => {
           if (!impl) return null;
           const p = (series[impl] || [])[lastCi];
