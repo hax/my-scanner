@@ -67,9 +67,13 @@ sha256 校验；谱系、provenance 与更新流程（publish-corpus）见
 `.github/workflows/bench.yml`：push 到 main 触发，报告贴进 run
 summary + artifact，并归档到 **bench-reports 分支**
 （`scripts/publish-report.mjs` → `reports/<sha>.{md,json}`，
-`scripts/update-index.mjs` 重建 `index.html` 趋势页）。该分支即
-GitHub Pages 源，趋势页在线看： <https://johnhax.net/my-scanner/>
-（`.nojekyll` 静态直出）。趋势页以"vs yuku-main 倍数"为主口径——
+`scripts/update-index.mjs` 重建 `index.html` 图表页）。该分支即
+GitHub Pages 源，图表页在线看： <https://johnhax.net/my-scanner/>
+（`.nojekyll` 静态直出；图表用 **ECharts** 渲染，
+`vendor/echarts.min.js` 由 tools/package.json 钉版、发布时从
+tools/node_modules 拷入）。页面顶部为最近一次 CI run 的吞吐
+**柱状对比**（每语料一组，实现与其同族参照相邻——同机同轮的绝对
+值可直接比较）；下方**趋势折线**以"vs yuku-main 倍数"为主口径——
 绝对吞吐跨 runner 代际不可比，同 run 内相对值始终有效，每条架构线
 一条独立曲线，随提交演化。另有"vs 同族参照"口径衡量各族自身成熟度：
 scalar 对 yuku-old、jump_vec 对 yuku-main（>1 即我方更快，two_phase
