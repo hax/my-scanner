@@ -10,9 +10,13 @@ simdjson 证明「结构性跳过」式的向量化能让解析的 I/O 密集阶
 
 ## 架构
 
-项目以**架构矩阵**方式并行演化：`src/variants/` 下多个架构（全标量、单阶段长跳跃、两阶段主线等）共享语义层、各自优化，每次 push 到 main 由 CI 自动跑全变体差分门禁 + 矩阵基准，趋势归档 bench-reports 分支。详见 [docs/architecture](docs/architecture.md)。
+项目以**架构矩阵**方式并行演化：`src/variants/` 下多个架构共享语义层、各自优化，每次 push 到 main 由 CI 自动跑全变体差分门禁 + 矩阵基准，趋势归档 bench-reports 分支。详见 [docs/architecture](docs/architecture.md)。当前三个并行变体：
 
-当前主线为**两阶段架构**：阶段 1 纯 SIMD 无分支地为每个字节建立分类位平面，推导 token 候选起点位图（换行统计同趟完成）；阶段 2 `@ctz` 迭代候选起点，按首字节类别码分发贪心消费。所有向量化集中在 [src/simd.zig](src/simd.zig)，用 Zig `@Vector` 表达、编译器自动降到 AVX2 / NEON，不写 intrinsics。
+- `scalar`：全标量单阶段，逐字节决策，作为基线参照（对应 yuku-old 形态）。
+- `jump_vec`：单阶段 + SIMD 长跳跃（空白块扫、注释 trivia 快跳），当前 9/10 语料为矩阵最快、真实语料几何平均追平 yuku-main。
+- `two_phase`：阶段 1 纯 SIMD 无分支地为每个字节建立分类位平面，推导 token 候选起点位图（换行统计同趟完成）；阶段 2 `@ctz` 迭代候选起点，按首字节类别码分发贪心消费。
+
+所有向量化集中在 [src/simd.zig](src/simd.zig)，用 Zig `@Vector` 表达、编译器自动降到 AVX2 / NEON，不写 intrinsics。
 
 ## 用法
 

@@ -83,7 +83,7 @@ const html = `<!doctype html>
 <div id="files"></div>
 <script>
 const COLORS = { scalar:"#e67e22", jump_vec:"#2ecc71", two_phase:"#e74c3c", yuku_old:"#95a5a6", yuku_main:"#3498db" };
-const NAMES  = { scalar:"scalar(全标量)", jump_vec:"jump_vec(单阶段+SIMD跳跃)", two_phase:"two_phase(两阶段,主线)", yuku_old:"yuku-old", yuku_main:"yuku-main" };
+const NAMES  = { scalar:"scalar(全标量)", jump_vec:"jump_vec(单阶段+SIMD跳跃)", two_phase:"two_phase(两阶段)", yuku_old:"yuku-old", yuku_main:"yuku-main" };
 let mode = "ratio";
 fetch("reports/index.json").then(r => r.json()).then(idx => {
   document.getElementById("runinfo").textContent = " — " + idx.runs.length + " runs,最近: " + (idx.runs.at(-1)?.date ?? "");

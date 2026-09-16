@@ -18,7 +18,7 @@ import { join } from "node:path";
 const IMPL_META = {
   scalar: { family: "全标量单阶段", peer: "yuku-old(0.10.1 快照)" },
   jump_vec: { family: "单阶段 + SIMD 长跳跃", peer: "yuku-main / swc / oxc" },
-  two_phase: { family: "两阶段 SIMD(主线)", peer: "—" },
+  two_phase: { family: "两阶段 SIMD", peer: "—" },
   yuku_old: { family: "全标量单阶段(第三方)", peer: "scalar 的参照" },
   yuku_main: { family: "单阶段 + SIMD 长跳跃(第三方)", peer: "jump_vec 的参照" },
   swc: { family: "第三方(口径待校准)", peer: "—" },

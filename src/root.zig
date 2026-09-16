@@ -6,7 +6,7 @@ pub const token = @import("token.zig");
 pub const simd = @import("simd.zig");
 pub const scanner = @import("scanner.zig");
 
-/// 架构变体：与主线（两阶段）共享语义层、独立演化驱动与跳跃策略。
+/// 架构变体：与 two_phase 共享语义层，各自独立演化驱动与跳跃策略。
 /// 每个 scan/scanInto 与 scanner 同签名，可互换驱动（bench/差分/CLI）。
 pub const variants = struct {
     pub const scalar = @import("variants/scalar.zig");

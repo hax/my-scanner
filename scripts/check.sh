@@ -18,7 +18,7 @@ zig build
 
 echo
 echo "==== 差分对比 vs tsc scanner（全部架构变体）===="
-# two_phase 是主线，scalar / jump_vec 是并行演化中的架构变体；
+# scalar / jump_vec / two_phase 三个架构变体并行演化；
 # 每条线都必须差分全绿，语义漂移在此拦截。
 VARIANTS=(two_phase scalar jump_vec)
 if [ $# -gt 0 ]; then

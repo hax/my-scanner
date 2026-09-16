@@ -7,7 +7,7 @@
 //! 矩阵（架构族 → 自有实现 + 第三方参照）：
 //!   全标量单阶段        → scalar     vs yuku-old（0.10.1 快照）
 //!   单阶段 + SIMD 长跳跃 → jump_vec   vs yuku-main（perf(lexer) 之后）
-//!   两阶段 SIMD         → two_phase  （主线）
+//!   两阶段 SIMD         → two_phase
 //! swc / oxc 由 tools/lexbench-rs 独立计时，报告在 scripts/make-report.mjs
 //! 汇总（跨语言进程无法同进程对拍）。
 //!
