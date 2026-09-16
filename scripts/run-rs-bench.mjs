@@ -60,7 +60,7 @@ function dirFingerprint(dir) {
   return h.digest("hex");
 }
 
-// 工具指纹:依赖钉版(Cargo.lock)+ 编译器 + vendored oxc 内容 + RUSTFLAGS
+// 工具指纹:依赖固定版本(Cargo.lock)+ 编译器 + vendored oxc 内容 + RUSTFLAGS
 // (x86_64 的 avx2/bmi2 开关改变产物,见 ci-bench.sh)
 function toolFingerprint() {
   let rustc = "unknown";

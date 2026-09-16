@@ -18,19 +18,21 @@ import os from "node:os";
 
 // 架构族谱:实现 → {族, 说明}。表中展示,提醒对比的意义(同族内比实现、跨族比架构)
 const IMPL_META = {
-  scalar: { family: "全标量单阶段", peer: "yuku-old(0.10.1 快照)" },
+  scalar: { family: "全标量单阶段", peer: "baseline（yuku 0.10.1 快照）" },
   jump_vec: { family: "单阶段 + SIMD 长跳跃", peer: "yuku-main / swc / oxc" },
-  two_phase: { family: "两阶段 SIMD", peer: "oxc_bitmap(孵化实验 crate)" },
-  yuku_old: { family: "全标量单阶段(第三方)", peer: "scalar 的参照" },
-  yuku_main: { family: "单阶段 + SIMD 长跳跃(第三方)", peer: "jump_vec 的参照" },
-  swc: { family: "单阶段+字节搜索(第三方,决策注入驱动)", peer: "—" },
-  oxc: { family: "单阶段+字节搜索(第三方,决策注入驱动)", peer: "—" },
-  oxc_bitmap: { family: "多位图流水线(第三方,孵化实验)", peer: "two_phase 的参照" },
+  two_phase: { family: "两阶段 SIMD", peer: "oxc_bitmap（孵化实验 crate）" },
+  yuku_old: { family: "全标量单阶段（第三方）", peer: "scalar 的参照" },
+  yuku_main: { family: "单阶段 + SIMD 长跳跃（第三方）", peer: "jump_vec 的参照" },
+  swc: { family: "单阶段 + 字节搜索（第三方，决策注入驱动）", peer: "—" },
+  oxc: { family: "单阶段 + 字节搜索（第三方，决策注入驱动）", peer: "—" },
+  oxc_bitmap: { family: "多位图流水线（第三方，孵化实验）", peer: "two_phase 的参照" },
 };
-const IMPL_ORDER = ["scalar", "jump_vec", "two_phase", "yuku_old", "yuku_main", "swc", "oxc", "oxc_bitmap"];
+const IMPL_ORDER = ["scalar", "jump_vec", "two_phase", "yuku_old", "yuku_main", "oxc", "swc", "oxc_bitmap"];
 const OWN = ["scalar", "jump_vec", "two_phase"]; // 自有架构(矩阵列)
-const ANCHOR = "yuku_old"; // 相对值锚点:钉版固定快照,跨 run 可比(yuku-main 跟踪上游会漂,不做锚)
-const ANCHOR_LABEL = "yuku-0.10.1";
+const ANCHOR = "yuku_old"; // 基线的数据键:固定快照,跨 run 可比(yuku-main 跟踪上游会漂,不做基线)
+const ANCHOR_LABEL = "baseline";
+const DISP = { yuku_old: "baseline", yuku_main: "yuku-main", oxc_bitmap: "oxc-bitmap" }; // 展示名(与图表页一致,数据键不变)
+const disp = (n) => DISP[n] ?? n;
 // 同族参照:自有实现 → 同架构族第三方对照(>1 即我方更快),衡量各族自身成熟度
 const PEER = { scalar: "yuku_old", jump_vec: "yuku_main", two_phase: "oxc_bitmap" };
 
@@ -119,27 +121,27 @@ const short = (p) => p.replace(/^corpus\//, "");
 const lines = [];
 lines.push(`# 架构矩阵基准 — \`${sha.slice(0, 10)}\``);
 lines.push("");
-lines.push(`- 提交: ${subject}`);
-lines.push(`- 日期: ${dataJson.date}`);
-lines.push(`- 轮数: 每实现 ${repeats} 轮取最优;同进程、同文件、token 产出后丢弃`);
-lines.push(`- 环境: ${runner.os}${runner.cpu ? ` / ${runner.cpu}` : ""}${runner.zig ? ` / zig ${runner.zig}` : ""}`);
-lines.push(`- 通道: ${channel}${channel === "local" ? `(本机: ${runLabel};第三方基线可能来自本地缓存,与 CI 主线分机型分层)` : ""}`);
-lines.push(`- 相对值锚点: ${ANCHOR}(${ANCHOR_LABEL} 固定快照,跨 run 可比;各实现/锚点,>1 即更快)`);
+lines.push(`- 提交：${subject}`);
+lines.push(`- 日期：${dataJson.date}`);
+lines.push(`- 轮数：每实现 ${repeats} 轮取最优；同进程、同文件、token 产出后丢弃`);
+lines.push(`- 环境：${runner.os}${runner.cpu ? ` / ${runner.cpu}` : ""}${runner.zig ? ` / zig ${runner.zig}` : ""}`);
+lines.push(`- 通道：${channel}${channel === "local" ? `（本机：${runLabel}；第三方对照计时可能来自本地缓存，与 CI 主线分机型呈现）` : ""}`);
+lines.push(`- 基线：baseline（yuku v0.10.1 固定快照，跨 run 可比；各实现 / 基线，>1 即更快）`);
 if (baselines) {
   const fb = (b) => (b ? [b.sha?.slice(0, 10), b.date?.slice(0, 10)].filter(Boolean).join(" ") : null);
-  lines.push(`- 基线版本: yuku_old ${fb(baselines.yuku_old) ?? "?"} / yuku_main ${fb(baselines.yuku_main) ?? "?"}`);
+  lines.push(`- 基线版本：baseline ${fb(baselines.yuku_old) ?? "?"} / yuku-main ${fb(baselines.yuku_main) ?? "?"}`);
 }
-lines.push(`- 同族参照: scalar vs yuku_old、jump_vec vs yuku_main、two_phase vs oxc_bitmap(自有实现/同族第三方,>1 即我方更快)`);
+lines.push(`- 同族参照：scalar vs baseline、jump_vec vs yuku-main、two_phase vs oxc_bitmap（自有实现 / 同族第三方，>1 即我方更快）`);
 if (opt("--rs")) {
-  lines.push(`- swc/oxc: lexbench-rs 决策注入驱动(同一 my-scanner 正则决策集 + 模板花括号栈重扫,与 yuku 对拍同口径),独立进程`);
-  lines.push(`- oxc_bitmap: oxc_lexer 多位图流水线(孵化实验 crate,钉 rev);歧义内部自决、经全语料 spans 门禁验证;计时含 value lanes(字符串 cooked/数字解析/atoms/注释元数据,比别家多做工);TS 泛型侧不融合 \`>\`,token 数略多;仅 x86_64+AVX2/BMI2 为 SIMD 形态,其余平台 generic fallback(仅 smoke)`);
+  lines.push(`- swc/oxc：lexbench-rs 决策注入驱动（同一 my-scanner 正则决策集 + 模板花括号栈重扫，与 yuku 对拍同口径），独立进程`);
+  lines.push(`- oxc_bitmap：oxc_lexer 多位图流水线（孵化实验 crate，rev 固定）；歧义内部自决、经全语料 spans 门禁验证；计时含 value lanes（字符串 cooked、数字解析、atoms、注释元数据，比别家多做工）；TS 泛型侧不融合 \`>\`，token 数略多；仅 x86_64+AVX2/BMI2 为 SIMD 形态，其余平台 generic fallback（仅 smoke）`);
 }
 lines.push("");
 lines.push("| 实现 | 架构族 | 第三方参照 |");
 lines.push("| --- | --- | --- |");
 for (const name of IMPL_ORDER) {
   const m = IMPL_META[name];
-  if (m) lines.push(`| \`${name}\` | ${m.family} | ${m.peer} |`);
+  if (m) lines.push(`| \`${disp(name)}\` | ${m.family} | ${m.peer} |`);
 }
 lines.push("");
 
@@ -163,13 +165,13 @@ for (const fr of fileRuns) {
   for (const name of IMPL_ORDER) {
     const r = fr.results[name];
     if (!r) continue;
-    lines.push(`| \`${name}\` | ${fmt(r.best_ns / 1e6)} | ${fmt(r.gbps)} | ${fmt(r.mtoks, 1)} | ${r.tokens} | ${r.vs_anchor != null ? fmt(r.vs_anchor) + "x" : "—"} | ${r.vs_peer != null ? fmt(r.vs_peer) + "x" : "—"} |`);
+    lines.push(`| \`${disp(name)}\` | ${fmt(r.best_ns / 1e6)} | ${fmt(r.gbps)} | ${fmt(r.mtoks, 1)} | ${r.tokens} | ${r.vs_anchor != null ? fmt(r.vs_anchor) + "x" : "—"} | ${r.vs_peer != null ? fmt(r.vs_peer) + "x" : "—"} |`);
   }
   lines.push("");
 }
 
 // 变体 × 语料矩阵:一眼看清哪个架构在哪类语料上赢(混合策略的证据底座)
-lines.push(`## 变体 × 语料(vs ${ANCHOR_LABEL};每行最快加粗)`);
+lines.push(`## 变体 × 语料（vs ${ANCHOR_LABEL}；每行最快加粗）`);
 lines.push("");
 lines.push(`| 语料 | 谱系 | ${OWN.map((x) => `\`${x}\``).join(" | ")} |`);
 lines.push("| --- | --- | ---: | ---: | ---: |");
@@ -186,12 +188,12 @@ for (const fr of fileRuns) {
 }
 lines.push("");
 
-// 分组几何平均(vs 锚点)——真实/构造分开,防止构造语料稀释真实结论;
+// 分组几何平均(vs 基线)——真实/构造分开,防止构造语料稀释真实结论;
 // 全体一行保持与旧报告口径连续
-lines.push(`## 几何平均(vs ${ANCHOR_LABEL})`);
+lines.push(`## 几何平均（vs ${ANCHOR_LABEL}）`);
 lines.push("");
 const geoImpls = IMPL_ORDER.filter((name) => fileRuns.some((fr) => fr.results[name]?.vs_anchor != null));
-lines.push(`| 范围 | ${geoImpls.map((x) => `\`${x}\``).join(" | ")} |`);
+lines.push(`| 范围 | ${geoImpls.map((x) => `\`${disp(x)}\``).join(" | ")} |`);
 lines.push(`| --- |${" ---: |".repeat(geoImpls.length)}`);
 for (const [g, label] of [[null, "全体"], ["real", "真实语料"], ["synthetic", "构造语料"]]) {
   const subset = g ? fileRuns.filter((fr) => fr.group === g) : fileRuns;
@@ -204,15 +206,15 @@ for (const [g, label] of [[null, "全体"], ["real", "真实语料"], ["syntheti
     }
     return n ? fmt(Math.pow(prod, 1 / n)) + "x" : "—";
   });
-  lines.push(`| ${label}(${subset.length} 个) | ${cells.join(" | ")} |`);
+  lines.push(`| ${label}（${subset.length} 个） | ${cells.join(" | ")} |`);
 }
 lines.push("");
 
 // 同族成熟度的分组几何平均:自有实现 / 同族第三方参照,各族自身口径
-lines.push("## 几何平均(vs 同族参照)");
+lines.push("## 几何平均（vs 同族参照）");
 lines.push("");
 const peerImpls = Object.keys(PEER).filter((name) => fileRuns.some((fr) => fr.results[name]?.vs_peer != null));
-lines.push(`| 范围 | ${peerImpls.map((x) => `\`${x}\` vs \`${PEER[x]}\``).join(" | ")} |`);
+lines.push(`| 范围 | ${peerImpls.map((x) => `\`${x}\` vs \`${disp(PEER[x])}\``).join(" | ")} |`);
 lines.push(`| --- |${" ---: |".repeat(peerImpls.length)}`);
 for (const [g, label] of [[null, "全体"], ["real", "真实语料"], ["synthetic", "构造语料"]]) {
   const subset = g ? fileRuns.filter((fr) => fr.group === g) : fileRuns;
@@ -225,7 +227,7 @@ for (const [g, label] of [[null, "全体"], ["real", "真实语料"], ["syntheti
     }
     return n ? fmt(Math.pow(prod, 1 / n)) + "x" : "—";
   });
-  lines.push(`| ${label}(${subset.length} 个) | ${cells.join(" | ")} |`);
+  lines.push(`| ${label}（${subset.length} 个） | ${cells.join(" | ")} |`);
 }
 lines.push("");
 

@@ -71,22 +71,24 @@ summary + artifact，并归档到 **bench-reports 分支**
 `scripts/update-index.mjs` 重建 `index.html` 图表页）。该分支即
 GitHub Pages 源，图表页在线看： <https://johnhax.net/my-scanner/>
 （`.nojekyll` 静态直出；图表用 **ECharts** 渲染，
-`vendor/echarts.min.js` 由 tools/package.json 钉版、发布时从
-tools/node_modules 拷入）。页面顶部为比对者说明（yuku 基线版本溯源：
-sha 与上游 commit 日期由 `prepare-baselines.sh` 的 `.date` 标记经
-bench.zig → data.json 带入）与**机器配置**表（CI runner 与各本机的
-os/CPU/zig 版本，各取最近一次 run；锚点 yuku-old 钉版，各机基线
-对齐）。**柱状对比**为最近一次 CI 与本机 run 的 "vs yuku-0.10.1"
-倍数（每语料一张 246px 定宽卡片、flex 随页宽并排、竖排 label；
-左 CI 右本机、同色本机半透明，锚点 yuku-old 不进图、由 y=1 虚线
-代表，架构族身份由浅底组带承担——scalar、jump_vec 族四柱
-（swc/oxc 同族）、two_phase|oxc-bitmap）；下方**趋势折线**纵轴统一为
-相对锚点的倍数——锚点钉版不漂，且由同进程同文件实测带入，相对倍数
+`vendor/echarts.min.js` 由 tools/package.json 固定版本、发布时从
+tools/node_modules 拷入）。页面顶部为**比对者一览**（链接到各 git 仓；
+yuku 基线版本溯源：sha 与上游 commit 日期由 `prepare-baselines.sh`
+的 `.date` 标记经 bench.zig → data.json 带入）、**机器配置**表
+（CI runner 与本机的 os/CPU/zig 版本，各取最近一次 run；基线同为
+yuku v0.10.1 固定快照，各机一致）与**语料说明**表（real 出处 /
+synthetic 构造场景；图上标题只留文件名）。**柱状对比**为最近一次 CI 与
+本机 run 的 "vs baseline" 倍数（每语料一张 370px 定宽卡片、flex
+随页宽并排、label 45° 斜排；左 CI 右本机、同色本机半透明，baseline
+两柱恒 1.0、与 y=1 虚线互证基线对齐，架构族间留空槽分组——
+scalar|baseline、jump_vec 族四柱
+（oxc/swc 同族）、two_phase|oxc-bitmap）；下方**趋势折线**纵轴统一为
+相对基线的倍数——基线固定不漂，且由同进程同文件实测带入，相对倍数
 跨 run、跨 runner 代际、跨机器均可比（2026-09-16 自 yuku-main 切换，
 历史点由 data.json 的 best_ns 全量重算，序列无断档）；实线 CI、虚线
 本机（按机器分组、同机相连），绝对吞吐（GB/s）仅同机同 run 内可比，
 只在 tooltip 出现。另有 "vs 同族参照"口径衡量各族自身成熟度：
-scalar 对 yuku-old、jump_vec 对 yuku-main、two_phase 对 oxc_bitmap
+scalar 对 baseline、jump_vec 对 yuku-main、two_phase 对 oxc_bitmap
 （>1 即我方更快；oxc_bitmap 口径注记见其专节与报告头），report.md
 含同口径的分组几何平均表。
 
@@ -95,11 +97,11 @@ scalar 对 yuku-old、jump_vec 对 yuku-main、two_phase 对 oxc_bitmap
 
 - **yuku-old 钉 v0.10.1 tag**（引入向量化前的快照，固定不更新）。此前
   CI 每 run 对两个 yuku 目录都 fresh clone 上游 HEAD，yuku_old 实为
-  yuku-main 副本，scalar 同族参照名存实亡；钉版恢复名义语义，趋势
+  yuku-main 副本，scalar 同族参照名存实亡；固定后恢复名义语义，趋势
   断档说明见 [benchmarks.md](benchmarks.md)。
 - yuku-main 跟踪上游 HEAD：clone 时记 `<dir>.sha` 版本标记，每跑
   ls-remote 探测，上游移动才重 clone（离线沿用现有副本）。
-- swc/oxc 由 Cargo.lock + vendored oxc 钉版（升级走 prepare-lexbench.sh
+- swc/oxc 由 Cargo.lock + vendored oxc 固定版本（升级走 prepare-lexbench.sh
   的 VER/SHA256）；oxc_bitmap 的 oxc 仓源码树由 prepare-lexbench.sh
   钉 rev（`.bench-deps/oxc.sha` 标记，换 rev 才重拉）。
 - **本地缓存**：第三方计时结果缓存在 `.bench-deps/`，键含基线版本
@@ -115,8 +117,8 @@ scalar 对 yuku-old、jump_vec 对 yuku-main、two_phase 对 oxc_bitmap
 data.json 记 `channel=local` 与机器标识（默认 hostname），文件名
 `<sha>.local-<机器名>.*` 不与 CI 同 sha 互撞；图表页上本机与 CI 同图
 并绘——柱状图左 CI 右本机（同色、本机半透明），趋势图实线 CI、虚线
-本机（按机器分组、同机相连）——纵轴统一为 vs yuku-old 锚点倍数，
-基线钉版对齐，跨机可比。
+本机（按机器分组、同机相连）——纵轴统一为 vs baseline 基线倍数，
+基线固定、各机一致，跨机可比。
 
 ## two_phase：两阶段
 

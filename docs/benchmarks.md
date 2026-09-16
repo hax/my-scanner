@@ -68,10 +68,10 @@ checker.ts 持平。**lib.dom.d.ts 上 yuku-main 反超**——注释密集语�
 push 到 main 由 CI 自动跑全变体差分 + 矩阵基准，报告归档到
 bench-reports 分支并累积图表页（`index.html`，GitHub Pages 在线看：
 <https://johnhax.net/my-scanner/>）。趋势折线以
-「vs yuku-0.10.1 倍数」为主口径——锚点是钉版快照、固定不漂，相对
+「vs baseline 倍数」为主口径——基线（yuku v0.10.1 快照）固定不漂，相对
 倍数跨 run、跨 runner 代际均可比（2026-09-16 自 yuku-main 切换，
 历史点由 best_ns 全量重算，无断档）；「vs 同族参照」口径（scalar 对
-yuku-old、jump_vec 对 yuku-main、two_phase 对 oxc_bitmap）衡量各族
+baseline、jump_vec 对 yuku-main、two_phase 对 oxc_bitmap）衡量各族
 自身成熟度。首批本地基线梯度与各层净贡献的拆解见
 [architecture.md](architecture.md) 的「总览」一节。
 
@@ -108,7 +108,7 @@ Mtok/s 几乎恒定而 GB/s 随 token 密度反向变化——瓶颈是每 token
 开销（分发 + emit + append），不是 SIMD 扫描本身。所以 roadmap 的下一
 优先级长期是 token 批量产出（SoA 输出、token 簇融合）。
 
-## 附：趋势页断档说明（yuku_old 钉版）
+## 附：趋势页断档说明（yuku_old 固定 v0.10.1）
 
 2026-09-16 之前，CI 上的 yuku_old 并非名义的「0.10.1 快照」：CI 每 run
 从空 `.bench-deps` 出发，两个 yuku 目录都 fresh clone 上游 HEAD，
@@ -119,11 +119,11 @@ yuku_old 实为 yuku-main 的内容副本（差异仅 ~3% 的测量顺序偏差�
 scalar 对 main 副本，此后才是真·对 v0.10.1。本地各快照（M2 表等）的
 yuku-old 内容经 md5 核对本就是 v0.10.1，本地历史数字同样不受影响。
 
-同日稍后，趋势页锚点自 yuku-main 切换为 **yuku-old（v0.10.1 钉版）**：
-yuku-main 跟踪上游 HEAD、本身会漂，不适合作锚；钉版锚点的相对倍数
+同日稍后，趋势页锚点自 yuku-main 切换为 **yuku-old（v0.10.1 固定快照）**：
+yuku-main 跟踪上游 HEAD、本身会漂，不适合作锚；固定锚点的相对倍数
 跨 run、跨 runner 代际均可比。update-index 一律由 data.json 的
 best_ns 重算 ratio（弃用旧 vs_anchor 字段），历史点同步换算、口径
-统一；唯钉版日之前的 yuku_old 实为 main 副本（见上节），各倍数序列
+统一；唯固定生效前的 yuku_old 实为 main 副本（见上节），各倍数序列
 在该日同有一次性语义跳变——与「vs 同族参照」断档同因同日。
 GB/s 与「vs 同族参照」口径定义不变。
 

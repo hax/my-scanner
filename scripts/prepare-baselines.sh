@@ -2,7 +2,7 @@
 # 准备第三方 yuku 基线源码(.bench-deps/,已 gitignore):
 #   .bench-deps/yuku       — yuku_old,固定钉在 v0.10.1(引入向量化前的快照,
 #                            永不自动更新;CI 曾每次 fresh clone HEAD 漂成
-#                            yuku-main 副本,钉版恢复名义语义,趋势断档见
+#                            yuku-main 副本,固定后恢复名义语义,趋势断档见
 #                            docs/benchmarks.md)
 #   .bench-deps/yuku-main  — yuku_main,跟踪上游 HEAD,上游移动才重 clone
 #

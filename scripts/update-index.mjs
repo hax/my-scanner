@@ -38,7 +38,7 @@ try {
 } catch { /* 缺清单则回退为原始路径 */ }
 
 // index.json:运行列表 + 每文件每实现的 vs 锚点 与 GB/s 序列。
-// 锚点 = yuku_old(v0.10.1 钉版快照;yuku-main 跟踪上游会漂,不做锚)。
+// 基线 = yuku_old(v0.10.1 固定快照;yuku-main 跟踪上游会漂,不做基线)。
 // ratio 一律由 best_ns 重算(历史 data.json 的 vs_anchor 是旧锚口径,不可用);
 // 同族参照(与 make-report.mjs 的 PEER 同步):自有实现 → 同族第三方对照,
 // pratio 同样由 best_ns 补算,历史 run 无 vs_peer 字段也兼容。
@@ -46,9 +46,9 @@ const PEERS = { scalar: "yuku_old", jump_vec: "yuku_main", two_phase: "oxc_bitma
 const index = {
   updated: new Date().toISOString(),
   anchor: "yuku_old",
-  anchor_label: "yuku-0.10.1",
+  anchor_label: "baseline",
   peers: PEERS,
-  impls: ["scalar", "jump_vec", "two_phase", "yuku_old", "yuku_main", "swc", "oxc", "oxc_bitmap"],
+  impls: ["scalar", "jump_vec", "two_phase", "yuku_old", "yuku_main", "oxc", "swc", "oxc_bitmap"],
   // 基线溯源(bench.zig 自 prepare-baselines 版本标记带入):取最近一个带该字段的 run
   baselines: (() => { for (let i = runs.length - 1; i >= 0; i--) if (runs[i].baselines) return runs[i].baselines; return null; })(),
   corpus: corpusMeta,
@@ -100,21 +100,21 @@ const html = `<!doctype html>
 <script src="vendor/echarts.min.js"></script>
 <style>
   :root { color-scheme: light dark; }
-  body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 0 auto; max-width: 1400px; padding: 1rem 1.5rem 4rem; line-height: 1.6; }
-  h1 { font-size: 1.4rem; margin-bottom: .4rem; } h2 { font-size: 1.1rem; margin-top: 2rem; }
-  h3 { font-size: .95rem; margin: 1rem 0 .1rem; font-weight: 600; }
-  h3 .note { font-weight: 400; font-size: .82rem; color: gray; }
+  body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 0 auto; max-width: 1400px; padding: 1rem 1.5rem 4rem; line-height: 1.6; font-size: 17px; }
+  h1 { font-size: 1.5rem; margin-bottom: .4rem; } h2 { font-size: 1.15rem; margin-top: 2rem; }
+  h3 { font-size: 1rem; margin: 1rem 0 .1rem; font-weight: 600; }
   .intro { font-size: 1rem; }
-  .meta { color: gray; font-size: .85rem; }
-  #impls, #machines { border-collapse: collapse; font-size: .92rem; margin: .4rem 0 0; }
-  #impls td, #machines td { padding: .14rem .9rem .14rem 0; vertical-align: top; }
-  #impls td:first-child, #machines td:first-child { white-space: nowrap; }
+  .meta { color: gray; font-size: .88rem; }
+  #impls, #machines, #corpus { border-collapse: collapse; font-size: .95rem; margin: .4rem 0 0; }
+  #impls td, #machines td, #corpus td { padding: .14rem .9rem .14rem 0; vertical-align: top; }
+  #impls td:first-child, #machines td:first-child, #corpus td:first-child { white-space: nowrap; }
+  #corpus td:nth-child(2) { color: gray; white-space: nowrap; }
   .mode { margin: .2rem 0 .6rem; }
   .mode button { cursor: pointer; padding: .2rem .7rem; margin-right: .3rem; border-radius: 6px; border: 1px solid currentColor; background: transparent; color: inherit; }
   .mode button.on { background: #4b7bec; border-color: #4b7bec; color: #fff; }
   .chart { width: 100%; height: 300px; }
   #bars { display: flex; flex-wrap: wrap; gap: .2rem 1.2rem; }
-  .bar-item { flex: 0 0 auto; width: 246px; }
+  .bar-item { flex: 0 0 auto; width: 370px; }
   .bar-item h3 { margin: .5rem 0 0; }
   .bar { width: 100%; height: 200px; }
   code { background: color-mix(in srgb, currentColor 8%, transparent); padding: 0 .3rem; border-radius: 4px; }
@@ -123,45 +123,52 @@ const html = `<!doctype html>
 </head>
 <body>
 <h1>my-scanner 架构矩阵基准</h1>
-<p class="intro">每次 push 跑一轮全变体差分门禁 + 架构矩阵基准,本页汇总 CI 与本机 run。
-纵轴统一为 <code>vs yuku-old</code> 倍数(v0.10.1 钉版快照,&gt;1 即更快)——锚点钉版不漂,
-由同进程同文件实测带入,CI 与各本机基线对齐,相对倍数跨 run、跨机器均可比
-(绝对吞吐 GB/s 只有同机同 run 内可比,数值见 tooltip)。柱状图左 CI 右本机(同色,本机半透明),
-趋势图实线 CI、虚线本机(同机相连,按机器分组)。
-「同族参照」= 自有实现 / 同架构族第三方对照(scalar→yuku-old、jump_vec→yuku-main、
-two_phase→oxc_bitmap,&gt;1 即我方更快),衡量各族自身成熟度。</p>
+<p class="intro">每次 push 跑一轮全变体差分门禁 + 架构矩阵基准，本页汇总 CI 与本机 run。
+纵轴统一为 <code>vs baseline</code> 倍数（yuku v0.10.1 固定快照，&gt;1 即更快）——基线固定不漂，
+由同进程同文件实测带入，CI 与各本机的基线一致，相对倍数跨 run、跨机器均可比
+（绝对吞吐 GB/s 只有同机同 run 内可比，数值见 tooltip）。柱状图左 CI 右本机（同色，本机半透明），
+趋势图实线 CI、虚线本机（同机相连，按机器分组）。
+「同族参照」= 自有实现 / 同架构族第三方对照（scalar→baseline、jump_vec→yuku-main、
+two_phase→oxc_bitmap，&gt;1 即我方更快），衡量各族自身成熟度。</p>
 <table id="impls"></table>
 <h2>机器配置</h2>
-<p class="meta">锚点 yuku-old 钉版 v0.10.1(版本溯源见上表),CI 与各本机基线一致,倍数口径跨机可比。</p>
+<p class="meta">各机基线同为 yuku v0.10.1 固定快照（版本溯源见上表），倍数口径跨机可比。</p>
 <table id="machines"></table>
 <p class="meta" id="runinfo"></p>
-<h2>当前对比 · vs yuku-0.10.1</h2>
+<h2>语料</h2>
+<table id="corpus"></table>
+<h2>当前对比 · vs baseline</h2>
 <p class="meta" id="bars-meta"></p>
 <div id="bars"></div>
 <h2>趋势</h2>
-<p class="mode">口径: <button id="mode-ratio" class="on">vs yuku-0.10.1</button><button id="mode-peer">vs 同族参照</button></p>
+<p class="mode">口径：<button id="mode-ratio" class="on">vs baseline</button><button id="mode-peer">vs 同族参照</button></p>
 <div id="files"></div>
 <script>
 // 每实现一个区分色(对照组不再保持同色系);CI/本机以 实心/半透明(柱)、实线/虚线空心点(趋势) 区分
 const COLORS = { scalar:"#e67e22", jump_vec:"#27ae60", two_phase:"#e74c3c", yuku_old:"#95a5a6", yuku_main:"#2980b9", swc:"#9b59b6", oxc:"#1abc9c", oxc_bitmap:"#d4ac0d" };
-const NAMES  = { scalar:"scalar(全标量)", jump_vec:"jump_vec(单阶段+SIMD跳跃)", two_phase:"two_phase(两阶段)", yuku_old:"yuku-old", yuku_main:"yuku-main", swc:"swc(决策注入)", oxc:"oxc(决策注入)", oxc_bitmap:"oxc-bitmap(位图流水线)" };
-const SHORT  = { scalar:"scalar", jump_vec:"jump_vec", two_phase:"two_phase", yuku_old:"yuku-old", yuku_main:"yuku-main", swc:"swc", oxc:"oxc", oxc_bitmap:"oxc-bitmap" };
+const NAMES  = { scalar:"scalar（全标量）", jump_vec:"jump_vec（单阶段+SIMD跳跃）", two_phase:"two_phase（两阶段）", yuku_old:"baseline", yuku_main:"yuku-main", swc:"swc（决策注入）", oxc:"oxc（决策注入）", oxc_bitmap:"oxc-bitmap（位图流水线）" };
+const SHORT  = { scalar:"scalar", jump_vec:"jump_vec", two_phase:"two_phase", yuku_old:"baseline", yuku_main:"yuku-main", swc:"swc", oxc:"oxc", oxc_bitmap:"oxc-bitmap" };
+const LINKS  = { scalar:"https://github.com/hax/my-scanner", jump_vec:"https://github.com/hax/my-scanner", two_phase:"https://github.com/hax/my-scanner", yuku_old:"https://github.com/yuku-toolchain/yuku", yuku_main:"https://github.com/yuku-toolchain/yuku", swc:"https://github.com/swc-project/swc", oxc:"https://github.com/oxc-project/oxc", oxc_bitmap:"https://github.com/oxc-project/oxc" };
 const DESCR  = {
-  scalar: "自有 · 全标量单阶段(无 SIMD)",
+  scalar: "自有 · 全标量单阶段（无 SIMD）",
   jump_vec: "自有 · 单阶段 + SIMD 长跳跃",
-  two_phase: "自有 · 两阶段 SIMD(先 SIMD 分类出 token 起点掩码,再精确扫描)",
-  yuku_old: "第三方 · yuku v0.10.1 钉版快照(引入向量化前)——本项目锚点,固定不更新",
-  yuku_main: "第三方 · yuku 上游主干(跟踪更新,移动才重拉)",
-  swc: "第三方 · swc lexer,决策注入驱动(同一 my-scanner 正则决策集,与 yuku 对拍同口径)",
-  oxc: "第三方 · oxc lexer,决策注入驱动(同上)",
-  oxc_bitmap: "第三方 · oxc_lexer 多位图流水线(孵化实验,歧义自决+spans 门禁;计时含 value lanes;仅 x86_64 SIMD)"
+  two_phase: "自有 · 两阶段 SIMD（先 SIMD 分类出 token 起点掩码，再精确扫描）",
+  yuku_old: '第三方 · yuku <a href="https://github.com/yuku-toolchain/yuku/tree/v0.10.1">v0.10.1</a> 固定快照（引入向量化前）——本项目基线，固定不更新',
+  yuku_main: "第三方 · yuku 上游主干（跟踪更新，移动才重拉）",
+  swc: "第三方 · swc lexer，决策注入驱动（同一 my-scanner 正则决策集，与 yuku 对拍同口径）",
+  oxc: "第三方 · oxc lexer，决策注入驱动（同上）",
+  oxc_bitmap: "第三方 · oxc_lexer 多位图流水线（孵化实验，歧义自决 + spans 门禁；计时含 value lanes；仅 x86_64 SIMD）"
 };
-// 柱状图按架构族分组(锚点 yuku-old 不进图,由 y=1 虚线代表):swc/oxc 与 jump_vec
-// 同族(单阶段+SIMD 长跳跃/字节搜索),故并入 jump_vec 组;组身份由 markArea 浅底带承担
-const BAR_GROUPS = [["scalar"], ["jump_vec", "yuku_main", "swc", "oxc"], ["two_phase", "oxc_bitmap"]];
-const BAR_IMPLS = BAR_GROUPS.flat();
-const BANDS = []; // 组带范围(隔组填浅底):category 轴带宽坐标,组边界在 x.5
-{ let s = 0; BAR_GROUPS.forEach((g, gi) => { if (gi % 2 === 1) BANDS.push([{ xAxis: s - 0.5 }, { xAxis: s + g.length - 0.5 }]); s += g.length; }); }
+// 柱状图按架构族分组(baseline 两柱恒为 1.0,与 y=1 虚线互证基线对齐):
+// oxc/swc 与 jump_vec 同族(单阶段+SIMD 长跳跃/字节搜索),故并入 jump_vec 组;
+// 组间插一个空槽位作间隔
+const BAR_GROUPS = [["scalar", "yuku_old"], ["jump_vec", "yuku_main", "oxc", "swc"], ["two_phase", "oxc_bitmap"]];
+const BAR_CATS = [];    // x 轴类目(含组间空槽)
+const BAR_IMPL_AT = []; // 类目序号 → 实现(空槽为 null)
+BAR_GROUPS.forEach((g, gi) => {
+  if (gi > 0) { BAR_CATS.push(""); BAR_IMPL_AT.push(null); }
+  g.forEach(impl => { BAR_CATS.push(SHORT[impl]); BAR_IMPL_AT.push(impl); });
+});
 const theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : null;
 let mode = "ratio";
 const trendCharts = [];
@@ -169,21 +176,21 @@ const allCharts = [];
 
 fetch("reports/index.json").then(r => r.json()).then(idx => {
   const nCi = idx.runs.filter(r => r.channel !== "local").length;
-  document.getElementById("runinfo").textContent = nCi + " CI runs + " + (idx.runs.length - nCi) + " local runs · 最近: " + (idx.runs.at(-1)?.date ?? "") + " · 每次 push 一个点,架构变体语义由差分门禁保证";
+  document.getElementById("runinfo").textContent = nCi + " CI runs + " + (idx.runs.length - nCi) + " local runs · 最近：" + (idx.runs.at(-1)?.date ?? "") + " · 每次 push 一个点，架构变体语义由差分门禁保证";
 
-  // ---- 比对者一览(含基线溯源:yuku 版本 sha / 上游 commit 日期) ----
+  // ---- 比对者一览(含基线溯源:yuku 版本 sha / 上游 commit 日期,链接到具体 git) ----
   const bl = idx.baselines ?? {};
   const blText = (impl) => {
     const b = bl[impl];
     if (!b) return "";
     const bits = [];
     if (b.date) bits.push(b.date.slice(0, 10));
-    if (b.sha) bits.push("sha " + b.sha.slice(0, 10));
-    return bits.length ? "(" + bits.join(", ") + ")" : "";
+    if (b.sha) bits.push('<a href="' + LINKS[impl] + "/commit/" + b.sha + '">sha ' + b.sha.slice(0, 10) + "</a>");
+    return bits.length ? "（" + bits.join("，") + "）" : "";
   };
   document.getElementById("impls").innerHTML = idx.impls.map(impl =>
-    "<tr><td><svg width='10' height='10'><rect width='10' height='10' rx='2' fill='" + COLORS[impl] + "'/></svg> <code>"
-    + SHORT[impl] + "</code></td><td>" + (DESCR[impl] ?? impl) + " " + blText(impl) + "</td></tr>"
+    "<tr><td><svg width='10' height='10'><rect width='10' height='10' rx='2' fill='" + COLORS[impl] + "'/></svg> <a href='" + LINKS[impl] + "'><code>"
+    + SHORT[impl] + "</code></a></td><td>" + (DESCR[impl] ?? impl) + " " + blText(impl) + "</td></tr>"
   ).join("");
 
   // ---- run 分堆:CI 序列 + 本机按 label 分组 ----
@@ -200,38 +207,38 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
   });
   const lastCi = ciIdx.length ? ciIdx[ciIdx.length - 1] : null;
   const lastLocal = localByLabel.size ? Math.max(...[...localByLabel.values()].flat()) : null;
+  const localName = label => localByLabel.size > 1 ? "本机 " + label : "本机"; // 单台本机不露机器名
 
-  // ---- 机器配置表:CI runner 与各本机(各取最近一次 run 的环境) ----
+  // ---- 机器配置表:CI runner 与本机(各取最近一次 run 的环境) ----
   const machRows = [];
   if (lastCi != null) machRows.push(["CI", machOf(idx.runs[lastCi])]);
-  localByLabel.forEach((ridx, label) => machRows.push(["本机 " + label, machOf(idx.runs[ridx[ridx.length - 1]])]));
+  localByLabel.forEach((ridx, label) => machRows.push([localName(label), machOf(idx.runs[ridx[ridx.length - 1]])]));
   document.getElementById("machines").innerHTML = machRows.map(m =>
     "<tr><td><b>" + m[0] + "</b></td><td>" + m[1] + "</td></tr>"
   ).join("");
+
+  // ---- 语料说明(图标题只留文件名,出处/构造场景描述集中在此) ----
+  document.getElementById("corpus").innerHTML = Object.keys(idx.series).map(file => {
+    const c = idx.corpus?.[file];
+    return "<tr><td><code>" + (c?.name ?? file) + "</code></td><td>" + (c?.group ?? "") + "</td><td>" + (c?.note ?? "") + "</td></tr>";
+  }).join("");
 
   const pvalOf = p => mode === "peer" ? p.pratio : p.ratio;
   const shownImpl = impl => impl !== idx.anchor && (mode !== "peer" || idx.peers[impl]); // 锚点不进图(y=1 虚线代表);同族口径只画有第三方参照的实现
   const addH3 = (root, file) => {
     const h = document.createElement("h3");
-    const c = idx.corpus?.[file];
-    if (c) {
-      h.textContent = c.name + " ";
-      const span = document.createElement("span");
-      span.className = "note";
-      span.textContent = c.note; // real 为原始出处,synthetic 为构造场景说明
-      h.appendChild(span);
-    } else h.textContent = file;
+    h.textContent = idx.corpus?.[file]?.name ?? file; // 语料描述集中在「语料」一节,图上只留文件名
     root.appendChild(h);
   };
 
-  // ---- 柱状图:每语料一组,最近 CI 与本机 run 的锚点倍数,左 CI 右本机 ----
+  // ---- 柱状图:每语料一组,最近 CI 与本机 run 的基线倍数,左 CI 右本机 ----
   const barPairs = [];
   if (lastCi != null) barPairs.push({ name: "CI", ri: lastCi, local: false });
-  if (lastLocal != null) barPairs.push({ name: "本机 " + (idx.runs[lastLocal].label ?? "?"), ri: lastLocal, local: true });
+  if (lastLocal != null) barPairs.push({ name: localName(idx.runs[lastLocal].label ?? "?"), ri: lastLocal, local: true });
   document.getElementById("bars-meta").textContent = barPairs.map(bp => {
     const r = idx.runs[bp.ri];
-    return bp.name + ": " + r.sha.slice(0, 10) + " · " + r.date.slice(0, 16).replace("T", " ") + "Z · " + machOf(r);
-  }).join(" ｜ ") + " · 左 CI 右本机,柱高 = vs yuku-0.10.1 倍数";
+    return bp.name + "：" + r.sha.slice(0, 10) + " · " + r.date.slice(0, 16).replace("T", " ") + "Z · " + machOf(r);
+  }).join(" ｜ ") + " · 左 CI 右本机，柱高 = vs baseline 倍数";
   const barRoot = document.getElementById("bars");
   for (const [file, series] of Object.entries(idx.series)) {
     const item = document.createElement("div"); item.className = "bar-item";
@@ -242,41 +249,42 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
     allCharts.push(chart);
     chart.setOption({
       backgroundColor: "transparent",
-      grid: { left: 40, right: 6, top: 20, bottom: 64 },
+      grid: { left: 44, right: 6, top: 20, bottom: 56 },
       xAxis: {
         type: "category",
-        data: BAR_IMPLS.map(i => SHORT[i]),
-        axisLabel: { interval: 0, rotate: 90, fontSize: 10 },
+        data: BAR_CATS,
+        axisLabel: { interval: 0, rotate: 45, fontSize: 11 },
         axisTick: { alignWithLabel: true },
         axisLine: { show: false }
       },
-      yAxis: { type: "value", name: "vs yuku-0.10.1", nameTextStyle: { fontSize: 10 }, max: v => Math.ceil(Math.max(v.max * 1.05, 1.15) * 10) / 10 },
+      yAxis: { type: "value", name: "vs baseline", nameTextStyle: { fontSize: 11 }, max: v => Math.ceil(Math.max(v.max * 1.05, 1.15) * 10) / 10 },
       tooltip: {
         trigger: "axis", axisPointer: { type: "shadow" },
         formatter: prs => {
-          const impl = BAR_IMPLS[prs[0].dataIndex];
+          const impl = prs.length ? BAR_IMPL_AT[prs[0].dataIndex] : null;
+          if (!impl) return "";
           let s = NAMES[impl];
           for (const pr of prs) {
             const bp = barPairs[pr.seriesIndex];
             const p = (series[impl] || [])[bp.ri];
-            if (p && p.ratio != null) s += "<br/>" + bp.name + ": " + p.ratio.toFixed(2) + "x (" + p.gbps.toFixed(2) + " GB/s)";
+            if (p && p.ratio != null) s += "<br/>" + bp.name + "：" + p.ratio.toFixed(2) + "x（" + p.gbps.toFixed(2) + " GB/s）";
           }
           return s;
         }
       },
       series: barPairs.map((bp, bi) => ({
         name: bp.name, type: "bar",
-        barWidth: "30%", barGap: "10%", barCategoryGap: "35%",
-        data: BAR_IMPLS.map(impl => {
+        barWidth: "45%", barGap: "10%", barCategoryGap: "25%",
+        data: BAR_IMPL_AT.map(impl => {
+          if (!impl) return null;
           const p = (series[impl] || [])[bp.ri];
           return p && p.ratio != null ? { value: p.ratio, itemStyle: { color: COLORS[impl], opacity: bp.local ? 0.5 : 1 } } : null;
         }),
-        markArea: bi === 0 ? { silent: true, itemStyle: { color: "rgba(127,127,127,0.07)" }, data: BANDS } : undefined,
         markLine: bi === 0 ? {
           silent: true, symbol: "none",
           data: [{ yAxis: 1 }],
           lineStyle: { color: COLORS[idx.anchor], type: "dashed", opacity: .7 },
-          label: { show: true, formatter: "yuku-0.10.1", position: "insideEndTop", fontSize: 10 }
+          label: { show: true, formatter: "baseline", position: "insideEndTop", fontSize: 10 }
         } : undefined
       }))
     });
@@ -301,7 +309,7 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
       sers.push(opt);
       localByLabel.forEach((ridx, label) => {
         sers.push({
-          name: NAMES[impl] + "(本机 " + label + ")", type: "line",
+          name: NAMES[impl] + "（" + localName(label) + "）", type: "line",
           symbolSize: 7,
           lineStyle: { color: COLORS[impl], type: "dashed", opacity: .85 },
           itemStyle: { color: "transparent", borderColor: COLORS[impl], borderWidth: 2 },
@@ -321,7 +329,7 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
       },
       yAxis: {
         type: "value",
-        name: mode === "peer" ? "vs 同族参照" : "vs yuku-0.10.1",
+        name: mode === "peer" ? "vs 同族参照" : "vs baseline",
         max: v => Math.ceil(Math.max(v.max * 1.05, 1.15) * 10) / 10
       },
       dataZoom: [{ type: "inside" }],
@@ -368,13 +376,13 @@ writeFileSync(join(pubDir, ".nojekyll"), "");
 // 分支自述
 const readme = `# my-scanner 架构矩阵基准报告
 
-每次 push 到 main 触发(\`.github/workflows/bench.yml\`):全变体差分门禁 →
+每次 push 到 main 触发（\`.github/workflows/bench.yml\`）：全变体差分门禁 →
 架构矩阵基准 → 本分支归档。
 
-在线图表页(GitHub Pages,源 = 本分支): <https://johnhax.net/my-scanner/>
+在线图表页（GitHub Pages，源 = 本分支）：<https://johnhax.net/my-scanner/>
 
-- [index.html](index.html) — ECharts 图表页:顶部为比对者说明(yuku 基线版本溯源)与机器配置(CI runner 与各本机,锚点 yuku-old 钉版对齐);柱状图为最近一次 CI 与本机 run 的「vs yuku-0.10.1」倍数对比(每语料一张 246px 定宽卡片、随页宽并排;竖排 label;左 CI 右本机、同色本机半透明,架构族由浅底组带区分,锚点由 y=1 虚线代表),下方为趋势折线(vs yuku-0.10.1 锚点 / vs 同族参照两种口径;实线 CI、虚线本机按机器分组、同机相连;锚点钉版,相对值跨 run、跨机可比)。图表依赖 [vendor/echarts.min.js](vendor/echarts.min.js)(tools/package.json 钉版)
-- [reports/](reports/) — 每次 run 的 \`<sha>.md\`(人读报告)与 \`<sha>.json\`(原始数据);本地提交(bench.sh --submit)为 \`<sha>.local-<机器名>.*\`,带机器标识与 CI 主线分层
+- [index.html](index.html) — ECharts 图表页：顶部为比对者说明（链接到各 git 仓，yuku 基线版本溯源）、机器配置（CI runner 与本机，基线同为 yuku v0.10.1 固定快照）与语料说明（出处/构造场景，图上只留文件名）；柱状图为最近一次 CI 与本机 run 的「vs baseline」倍数对比（每语料一张 370px 定宽卡片、随页宽并排；label 45° 斜排；左 CI 右本机、同色本机半透明，架构族间留空槽分组，baseline 两柱恒 1.0、与 y=1 虚线互证基线对齐），下方为趋势折线（vs baseline / vs 同族参照两种口径；实线 CI、虚线本机按机器分组、同机相连；基线固定，相对值跨 run、跨机可比）。图表依赖 [vendor/echarts.min.js](vendor/echarts.min.js)（tools/package.json 固定版本）
+- [reports/](reports/) — 每次 run 的 \`<sha>.md\`（人读报告）与 \`<sha>.json\`（原始数据）；本地提交（bench.sh --submit）为 \`<sha>.local-<机器名>.*\`，带机器标识与 CI 同图并绘
 
 对比口径与架构族谱见仓库 docs/architecture.md。
 `;
