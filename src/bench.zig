@@ -139,13 +139,13 @@ fn benchFile(
         .{ .name = "jump_vec", .variant = .jump_vec },
     };
     for (zig_impls) |impl| {
-        var tokens: std.ArrayList(my_scanner.Token) = .empty;
+        var tokens: std.ArrayList(my_scanner.Lexeme) = .empty;
         defer tokens.deinit(arena);
         var best: i96 = std.math.maxInt(i96);
         var count: usize = 0;
         for (0..repeats) |_| {
             const t0 = Io.Timestamp.now(io, .awake);
-            try impl.variant.scanInto(&tokens, arena, src, .{});
+            try impl.variant.scanInto(&tokens, arena, src);
             const ns = t0.durationTo(Io.Timestamp.now(io, .awake)).nanoseconds;
             best = @min(best, ns);
             count = tokens.items.len;
@@ -182,16 +182,16 @@ fn benchFile(
     // yuku 纯 scanner 与 tsc 同款设计：`/` 保守判除号，正则由 parser 在表达式
     // 位置调 reScanAsRegex 重扫。为保证两个 lexer 做出完全相同的正则/除号
     // 决策，用 my-scanner 的结果确定正则起点集合，命中时按其 parser 方式重扫。
-    // 模板 `${}` 内的正则不在主 token 流（我的模板整体算一个 token），
-    // 靠 scan 的 regex_starts 选项旁路收集，缺了它 yuku 会把正则当除号
-    // 扫死（typescript.min.js 曾因此在 24KB 处报 InvalidUnicodeEscape）。
+    // 模板拆片后 `${}` 内的正则也在主 lexeme 流，决策集直接过滤 .regex 即得
+    // （旧模型模板整体一个 lexeme，内部正则只能靠 regex_starts 旁路收集）。
     var regex_starts = std.AutoHashMap(u32, void).init(arena);
     defer regex_starts.deinit();
     {
-        var regex_list: std.ArrayList(u32) = .empty;
-        const result = try my_scanner.scan(arena, src, .{ .regex_starts = &regex_list });
+        const result = try my_scanner.scan(arena, src);
         defer arena.free(result.tokens);
-        for (regex_list.items) |s| try regex_starts.put(s, {});
+        for (result.tokens) |t| {
+            if (t.kind == .regex) try regex_starts.put(t.start, {});
+        }
     }
 
     const find = struct {
@@ -260,7 +260,8 @@ fn writeJson(arena: std.mem.Allocator, io: Io, path: []const u8, runs: []const F
     try buf.appendSlice(arena, try ap(arena, "{{\"baselines\":{{\"yuku_old\":{s},\"yuku_main\":{s}}},\"runs\":[", .{
         try baselineEntry(arena, bc.old_sha, bc.old_date),
         try baselineEntry(arena, bc.main_sha, bc.main_date),
-    }));    for (runs, 0..) |run, i| {
+    }));
+    for (runs, 0..) |run, i| {
         if (i > 0) try buf.append(arena, ',');
         try buf.appendSlice(arena, try ap(arena, "{{\"file\":\"{s}\",\"bytes\":{d},\"results\":{{", .{ run.path, run.bytes }));
         for (run.results, 0..) |nr, j| {

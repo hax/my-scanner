@@ -1,4 +1,4 @@
-//! CLI 入口：扫描文件、打印统计；`--dump` 看 token；`--bench=N` 测性能。
+//! CLI 入口：扫描文件、打印统计；`--dump` 看 lexeme；`--bench=N` 测性能。
 
 const std = @import("std");
 const Io = std.Io;
@@ -12,8 +12,7 @@ const usage_text =
     \\  my-scanner [选项] <file>...
     \\
     \\选项:
-    \\  --dump           打印每个 token（偏移、类别、文本）
-    \\  --keep-comments  输出注释 token（默认视为 trivia 跳过）
+    \\  --dump           打印每个 lexeme（偏移、类别、文本）
     \\  --variant=NAME   架构变体: two_phase（默认）| scalar | jump_vec
     \\  --bench=N        额外扫描 N 轮，报告 best/avg 耗时与吞吐
     \\  --emit-regex-starts  只输出正则起点决策集（每行一个偏移，含模板内）
@@ -30,7 +29,6 @@ pub fn main(init: std.process.Init) !void {
     const out = &stdout_file_writer.interface;
 
     var variant: my_scanner.Variant = .two_phase;
-    var options: my_scanner.Options = .{};
     var dump = false;
     var bench: usize = 0;
     var emit_regex_starts = false;
@@ -43,8 +41,6 @@ pub fn main(init: std.process.Init) !void {
             return;
         } else if (std.mem.eql(u8, arg, "--dump")) {
             dump = true;
-        } else if (std.mem.eql(u8, arg, "--keep-comments")) {
-            options.keep_comments = true;
         } else if (std.mem.startsWith(u8, arg, "--variant=")) {
             const name = arg["--variant=".len..];
             variant = std.meta.stringToEnum(my_scanner.Variant, name) orelse {
@@ -75,7 +71,7 @@ pub fn main(init: std.process.Init) !void {
 
     var had_error = false;
     for (files.items) |path| {
-        had_error = try scanFile(arena, init.io, out, path, variant, options, dump, bench, emit_regex_starts) or had_error;
+        had_error = try scanFile(arena, init.io, out, path, variant, dump, bench, emit_regex_starts) or had_error;
     }
     try out.flush();
     if (had_error) std.process.exit(1);
@@ -105,7 +101,6 @@ fn scanFile(
     out: *Io.Writer,
     path: []const u8,
     variant: my_scanner.Variant,
-    options: my_scanner.Options,
     dump: bool,
     bench: usize,
     emit_regex_starts: bool,
@@ -115,40 +110,35 @@ fn scanFile(
         return true;
     };
 
-    // 决策导出：挂 regex_starts 旁路收集（主流与模板内的正则起点全入列）
-    var opts = options;
-    var regex_list: std.ArrayList(u32) = .empty;
-    if (emit_regex_starts) opts.regex_starts = &regex_list;
+    var result = try variant.scan(arena, src);
 
-    var result = try variant.scan(arena, src, opts);
-
+    // 决策导出：模板拆片后正则全在主流，直接过滤 .regex 即得决策集
     if (emit_regex_starts) {
-        std.mem.sort(u32, regex_list.items, {}, std.sort.asc(u32));
-        var prev: ?u32 = null;
-        for (regex_list.items) |s| {
-            if (prev != s) try out.print("{d}\n", .{s});
-            prev = s;
+        for (result.tokens) |t| {
+            if (t.kind == .regex) try out.print("{d}\n", .{t.start});
         }
         return false;
     }
 
     if (dump) {
         // TSV：start \t end \t kind \t 转义后的文本（\n 等控制字符转成 \x 序列）\t 行号
-        for (result.tokens) |t| {
-            try out.print("{d}\t{d}\t{s}\t", .{ t.start, t.end, @tagName(t.kind) });
-            try writeEscaped(out, t.slice(src));
+        // lexeme 不存 end：取下一个 lexeme 的 start（连续性不变量；eof 取 src.len）
+        for (result.tokens, 0..) |t, i| {
+            const end: u32 = if (i + 1 < result.tokens.len) result.tokens[i + 1].start else @intCast(src.len);
+            try out.print("{d}\t{d}\t{s}\t", .{ t.start, end, @tagName(t.kind) });
+            try writeEscaped(out, t.slice(src, end));
             try out.print("\t{d}\n", .{try result.lines.lineAt(t.start)});
         }
     }
 
     // kind 分布摘要（跳过计数为 0 的类别）
-    var counts: [@typeInfo(my_scanner.TokenKind).@"enum".fields.len]usize = @splat(0);
+    var counts: [@typeInfo(my_scanner.LexemeKind).@"enum".fields.len]usize = @splat(0);
     for (result.tokens) |t| counts[@intFromEnum(t.kind)] += 1;
 
-    try out.print("{s}: {d} bytes, {d} tokens, {d} lines (", .{
+    try out.print("{s}: {d} bytes, {d} lexemes, {d} lines (", .{
         path, src.len, result.tokens.len, try result.lineCount(),
     });
-    const fields = @typeInfo(my_scanner.TokenKind).@"enum".fields;
+    const fields = @typeInfo(my_scanner.LexemeKind).@"enum".fields;
     var first = true;
     inline for (fields, 0..) |f, i| {
         if (counts[i] > 0) {
@@ -160,13 +150,13 @@ fn scanFile(
     try out.writeAll(")\n");
 
     if (bench > 0) {
-        var tokens: std.ArrayList(my_scanner.Token) = .empty;
+        var tokens: std.ArrayList(my_scanner.Lexeme) = .empty;
         defer tokens.deinit(arena);
         var best: i96 = std.math.maxInt(i96);
         var total: i96 = 0;
         for (0..bench) |_| {
             const t0 = Io.Timestamp.now(io, .awake);
-            _ = try variant.scanInto(&tokens, arena, src, options);
+            _ = try variant.scanInto(&tokens, arena, src);
             const ns = t0.durationTo(Io.Timestamp.now(io, .awake)).nanoseconds;
             best = @min(best, ns);
             total += ns;

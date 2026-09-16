@@ -245,7 +245,8 @@ pub fn danglingUnicodeWs(src: []const u8, i: usize) usize {
 /// OP/ESC 连接（docs/simd-token-boundary-prefilter.md 的完整四位关系）
 /// 经实测为负收益——多字节 punctuator 与转义对中间的假候选由阶段 2 的
 /// pos 跳过兜底，粗筛精化不划算；它们留给将来 candidate 免验证的激进
-/// 阶段 2。WS：本 scanner 不产 whitespace token，ASCII 空白整体排除。
+/// 阶段 2。WS：ASCII 空白整体排除——候选间隙即空白 run，由阶段 2 累积
+/// 落盘为 whitespace/newline lexeme（无需候选位）。
 /// 逻辑换行（\n、孤立 \r、U+2028/U+2029）在同一 pass 计数。
 pub fn classifyTokenStarts(
     allocator: std.mem.Allocator,
@@ -285,8 +286,8 @@ pub fn classifyTokenStarts(
         // 否则清掉的连接不生效（会把码点后的真实边界一起挤掉）。
         // 只做连接修正：首字节对外断 ID-before、末字节对外断 ID-after
         // （码点内部保持 ID 连接）。码点本身不排除出候选——统一由
-        // 阶段 2 在 lead 处产 .whitespace token（跨块码点的尾部字节
-        // 会被消费后的 pos 越过，无需排除）。
+        // 阶段 2 在 lead 处产 whitespace kind 并入空白 run（跨块码点的
+        // 尾部字节会被消费后的 pos 越过，无需排除）。
         // 纯 ASCII 块（且前块末尾无悬挂）整体跳过——corpus 大多是这种。
         var brk_marked: u32 = 0;
         if (high != 0 or (i >= 1 and src[i - 1] >= 0x80) or (i >= 2 and src[i - 2] >= 0x80)) {

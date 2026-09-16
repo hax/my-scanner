@@ -23,21 +23,26 @@ simdjson 证明「结构性跳过」式的向量化能让解析的 I/O 密集阶
 ```sh
 zig build test                        # 跑测试
 zig build run -- src/scanner.zig      # 扫描文件，输出统计
-zig build run -- --dump some.js       # 打印每个 token（含行号）
+zig build run -- --dump some.js       # 打印每个 lexeme（含行号）
 zig build --release=fast run -- --bench=50 big.js   # 吞吐基准
 scripts/check.sh                      # 正确性门禁（全变体 tsc 差分）
 ```
 
 ```
 $ zig build run -- src/scanner.zig
-src/scanner.zig: 26963 bytes, 5649 tokens, 817 lines (eof=1, identifier=1433, keyword=350, number=145, string=348, punct=3372)
+src/scanner.zig: 67626 bytes, 19463 lexemes, 1796 lines (eof=1, identifier=3751, number=334, string=877, punct=7775, line_comment=257, whitespace=4783, newline=1685)
 ```
+
+产出是两套 token 定义中的粗流（`Lexeme`，见 [src/lexeme.zig](src/lexeme.zig)）：
+连续覆盖全文（trivia 常驻），`end` 隐含为下一个 lexeme 的 `start`；
+细流（`Token`/`TokenTag`，[src/token.zig](src/token.zig)）直接采用
+yuku 定义，留作 parser 接口预备。
 
 作为库使用（`build.zig.zon` 依赖 + `@import("my_scanner")`）：
 
 ```zig
-const result = try my_scanner.scan(allocator, src, .{});
-for (result.tokens) |tok| { ... }
+const result = try my_scanner.scan(allocator, src);
+for (result.tokens) |lex| { ... }
 ```
 
 ## License

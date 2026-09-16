@@ -2,6 +2,9 @@
 
 const std = @import("std");
 
+/// 粗粒度词法单元：scanner 的实际产出（连续流，trivia 常驻）
+pub const lexeme = @import("lexeme.zig");
+/// 细粒度 Token/TokenTag：yuku 定义（parser 接口预备）
 pub const token = @import("token.zig");
 pub const simd = @import("simd.zig");
 pub const scanner = @import("scanner.zig");
@@ -20,36 +23,35 @@ pub const Variant = enum {
 
     pub fn scanInto(
         self: Variant,
-        tokens: *std.ArrayList(Token),
+        tokens: *std.ArrayList(Lexeme),
         allocator: std.mem.Allocator,
         src: []const u8,
-        options: Options,
     ) !void {
         return switch (self) {
-            .two_phase => scanner.scanInto(tokens, allocator, src, options),
-            .scalar => variants.scalar.scanInto(tokens, allocator, src, options),
-            .jump_vec => variants.jump_vec.scanInto(tokens, allocator, src, options),
+            .two_phase => scanner.scanInto(tokens, allocator, src),
+            .scalar => variants.scalar.scanInto(tokens, allocator, src),
+            .jump_vec => variants.jump_vec.scanInto(tokens, allocator, src),
         };
     }
 
-    pub fn scan(self: Variant, allocator: std.mem.Allocator, src: []const u8, options: Options) !Result {
+    pub fn scan(self: Variant, allocator: std.mem.Allocator, src: []const u8) !Result {
         return switch (self) {
-            .two_phase => scanner.scan(allocator, src, options),
-            .scalar => variants.scalar.scan(allocator, src, options),
-            .jump_vec => variants.jump_vec.scan(allocator, src, options),
+            .two_phase => scanner.scan(allocator, src),
+            .scalar => variants.scalar.scan(allocator, src),
+            .jump_vec => variants.jump_vec.scan(allocator, src),
         };
     }
 };
 
-pub const Token = token.Token;
-pub const TokenKind = token.TokenKind;
-pub const Options = scanner.Options;
+pub const Lexeme = lexeme.Lexeme;
+pub const LexemeKind = lexeme.LexemeKind;
 pub const Result = scanner.Result;
 pub const scan = scanner.scan;
 pub const scanInto = scanner.scanInto;
 
 test {
     // 显式引用各文件，确保其中的 test 块被收集
+    _ = @import("lexeme.zig");
     _ = @import("token.zig");
     _ = @import("simd.zig");
     _ = @import("scanner.zig");

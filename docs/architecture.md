@@ -142,12 +142,14 @@ masks[] ──► 阶段 2 consume（标量循环 + SIMD 贪心）──► toke
 
 关键数据结构：
 
-- `Token { kind, start: u32, end: u32 }`（12B，无行号——行号按需查 LineIndex，
-  避免写带宽翻倍）
+- `Lexeme { kind, start: u32 }`（8B，无 end——trivia 常驻后流连续覆盖
+  全文，end 隐含为下一 lexeme 的 start；无行号——行号按需查 LineIndex，
+  避免写带宽翻倍）。细流 `Token`/`TokenTag` 另备 yuku 定义
+  （src/token.zig），parser 接口预备
 - `LineIndex { breaks: []u32, prefix: []u32 }`：O(1) `lineAt(offset)`，
   由换行位图 + 块前缀和构成
-- 阶段 2 的全部状态（pos/prev）是循环局部变量——扫描函数全是纯函数，
-  无隐藏 store/load 链（数据流化改造，+5-9%）
+- 阶段 2 的全部状态（pos/prev/tpl 模板栈）是循环局部变量——扫描函数
+  全是纯函数，无隐藏 store/load 链（数据流化改造，+5-9%）
 
 ### 热路径向量化手法
 
@@ -310,7 +312,7 @@ oxc 0.150.0，registry vendored 源码）全部定位为**歧义点无外部驱�
   **模板续扫**：两家独立 lexer 遇 `` ` `` 只产 TemplateHead（到
   `${`），`}` 后的模板续段需外部发起 re-lex——`type X = ` ${T}` ``
   的续段文本塌方成代码（等价 tsc 的 reScanTemplateContinuation；
-  my-scanner 模板整体一个 token，无此问题）。
+  my-scanner 的模板栈内建于主循环，无此问题）。
 
 注入点（drive.rs 实证可用，全 10 语料 0 错误扫至 EOF）：
 
@@ -325,8 +327,8 @@ oxc 0.150.0，registry vendored 源码）全部定位为**歧义点无外部驱�
   `next_template_substitution_tail()`（当前 `}` 重扫）。vendored 副本
   `.bench-deps/oxc_parser-0.150.0`（gitignore），经
   `[patch.crates-io]` 接入，版本升级需重贴这 2 行。
-- **决策集**：my-scanner `--emit-regex-starts`（regex_starts 旁路
-  全集，主流 + 模板内正则起点），与 yuku bench 的决策对齐同源。
+- **决策集**：my-scanner `--emit-regex-starts`（主流即全集——模板
+  拆片后 `${}` 内正则也在主流），与 yuku bench 的决策对齐同源。
 
 实证数字（tools/lexbench-rs `drive --repeats=5`，M2 同机，GB/s best；
 my-scanner/yuku 列为 bench.sh x10 同 session 数字）：

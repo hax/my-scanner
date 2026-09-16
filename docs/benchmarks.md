@@ -18,10 +18,10 @@ N 轮取最优。yuku 纯 scanner 与 tsc 同款把正则/模板续扫推迟给 
 bench 里按 yuku parser 的方式调 `reScanAsRegex` /
 `reScanTemplateContinuation` 对齐（正则决策与 my-scanner 完全一致，
 模板用花括号平衡栈跟踪）。正则起点集合必须含模板 `${}` 内的正则——
-my-scanner 的模板整体算一个 token，主 token 流里没有内部正则，bench
-用 scanner 的 `regex_starts` 选项旁路收集（曾漏收，yuku 在
-typescript.min.js 24KB 处把 `\s` 当标识符转义报 InvalidUnicodeEscape，
-锚点整行失真）。
+模板拆片后它们全在主 lexeme 流，bench 直接过滤 `.regex` 收集
+（旧模型模板整体一个 token，曾靠 `regex_starts` 旁路收集，漏收会让
+yuku 在 typescript.min.js 24KB 处把 `\s` 当标识符转义报
+InvalidUnicodeEscape，锚点整行失真）。
 
 **第三方结果本地缓存**（仅本地迭代用）：yuku/swc/oxc 的计时结果缓存在
 `.bench-deps/`，键含基线版本标记、语料 sha256、轮数与编译器版本，任一

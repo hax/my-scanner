@@ -1,31 +1,24 @@
 //! JS/TS scanner 主循环。
 //!
+//! 产出是粗粒度 Lexeme 流（见 lexeme.zig）：连续覆盖全文，trivia
+//! （whitespace / newline / comment）常驻，end 隐含为下一个 lexeme 的 start。
+//!
 //! 性能设计（与 simd.zig 配合）：
 //! - 热路径全部是"构造 mask → `@ctz` 停 / `@popCount` 数"的模式：
 //!   跳空白、扫标识符、找字符串与模板的结束、找块注释的 `*/`、统计行数。
-//! - 冷路径（数字、正则、punctuator）暂时标量：数字 token 平均很短，
+//! - 冷路径（数字、正则、punctuator）暂时标量：数字 lexeme 平均很短，
 //!   punctuator 一次前缀比较就出结果，先求正确，等 profile 说话再向量化。
 
 const std = @import("std");
-const token_mod = @import("token.zig");
+const lexeme_mod = @import("lexeme.zig");
 const simd = @import("simd.zig");
 const unicode = @import("unicode.zig");
 
-pub const Token = token_mod.Token;
-pub const TokenKind = token_mod.TokenKind;
-
-pub const Options = struct {
-    /// 输出注释 token（默认把注释当 trivia 跳过）
-    keep_comments: bool = false,
-    /// 旁路收集全部正则字面量的起点 offset（bench 驱动 yuku 用：
-    /// 模板 `${}` 内的正则不出现在主 token 流，只有这里能拿到）。
-    /// 容量由 scan/scanInto 按源中 `/` 数（正则数的上界）预留，
-    /// 收集过程中不再分配。
-    regex_starts: ?*std.ArrayList(u32) = null,
-};
+pub const Lexeme = lexeme_mod.Lexeme;
+pub const LexemeKind = lexeme_mod.LexemeKind;
 
 pub const Result = struct {
-    tokens: []Token,
+    tokens: []Lexeme,
     /// 行号查询索引（惰性构建：不查询则零成本，见 LineIndex）
     lines: LineIndex,
 
@@ -96,20 +89,20 @@ pub const LineIndex = struct {
 };
 
 /// ECMAScript 关键字 + 严格模式保留字 + 未来保留字，
-/// 外加 let/static/async/of 这几个上下文关键字（完全合法的标识符，
-/// 归入 keyword 只是给上层的提示，文本仍是判别依据）。
-/// TS 类型层关键字（interface/type/namespace 等）不在列，留给上层。
-///
+/// 外加 let/static/async/of 这几个上下文关键字。
+/// 粗流不再区分 keyword/identifier（全归 identifier），本表收缩为内部
+/// 设施：`/` 的正则/除号判别需要关键字概念（this/super 是值，其余
+/// 关键字把 `/` 放进表达式位置）。
 const keyword_list = [_][]const u8{
-    "async",      "await",   "break",  "case",     "catch",
-    "class",      "const",   "continue", "debugger", "default",
-    "delete",     "do",      "else",   "enum",     "export",
-    "extends",    "finally", "for",    "function", "if",
-    "implements", "import",  "in",     "instanceof", "interface",
-    "let",        "new",     "of",     "package",  "private",
-    "protected",  "public",  "return", "static",   "super",
-    "switch",     "this",    "throw",  "try",      "typeof",
-    "var",        "void",    "while",  "with",     "yield",
+    "async",      "await",   "break",    "case",       "catch",
+    "class",      "const",   "continue", "debugger",   "default",
+    "delete",     "do",      "else",     "enum",       "export",
+    "extends",    "finally", "for",      "function",   "if",
+    "implements", "import",  "in",       "instanceof", "interface",
+    "let",        "new",     "of",       "package",    "private",
+    "protected",  "public",  "return",   "static",     "super",
+    "switch",     "this",    "throw",    "try",        "typeof",
+    "var",        "void",    "while",    "with",       "yield",
 };
 
 /// 判别用 isKeyword（完美哈希一次探查）；本表仅作测试交叉验证与文档。
@@ -121,9 +114,7 @@ const keywords = std.StaticStringMap(void).initComptime(blk: {
 
 /// 关键字判别的热路径：完美哈希（首 + 次 + 末字符 + 长度）一次探查 +
 /// 一次 memcmp 确证。乘数离线搜索到零碰撞（45 词 → 128 槽，构建期
-/// @compileError 验证）。替代 len+首字符两级 switch + memcmp 链：
-/// switch 的间接跳转对多样标识符不友好，内联 memcmp 链还让
-/// scanIdentifier 膨胀到 4KB（profile 实测关键字判别占扫描 11%）。
+/// @compileError 验证）。只服务 `/` 判别路径（冷），不再挂标识符热路径。
 /// 与 keywords 表的等价性由测试交叉验证。
 fn keywordHash(text: []const u8) usize {
     return (text[0] +% text[1] +% text[text.len - 1] *% 62 +% text.len *% 27) & 127;
@@ -149,10 +140,10 @@ pub fn isKeyword(text: []const u8) bool {
     return e.len == text.len and std.mem.eql(u8, text, e.name[0..e.len]);
 }
 
-/// 扫描 src，返回 token 序列（以 eof 收尾）+ 惰性行号索引。
-pub fn scan(allocator: std.mem.Allocator, src: []const u8, options: Options) !Result {
+/// 扫描 src，返回 lexeme 序列（以 eof 收尾）+ 惰性行号索引。
+pub fn scan(allocator: std.mem.Allocator, src: []const u8) !Result {
     std.debug.assert(src.len <= std.math.maxInt(u32));
-    var tokens: std.ArrayList(Token) = .empty;
+    var tokens: std.ArrayList(Lexeme) = .empty;
     errdefer tokens.deinit(allocator);
 
     var cls = try simd.classifyTokenStarts(allocator, src);
@@ -161,8 +152,7 @@ pub fn scan(allocator: std.mem.Allocator, src: []const u8, options: Options) !Re
     defer cls.starts.deinit(allocator);
     errdefer allocator.free(cls.line_breaks);
 
-    if (options.regex_starts) |list| try reserveRegexStarts(allocator, src, list);
-    try consume(&tokens, allocator, src, &cls.starts, options);
+    try consume(&tokens, allocator, src, &cls.starts);
 
     return .{
         .tokens = try tokens.toOwnedSlice(allocator),
@@ -170,84 +160,182 @@ pub fn scan(allocator: std.mem.Allocator, src: []const u8, options: Options) !Re
     };
 }
 
-/// scan 的复用缓冲版本：调用方管理 token 列表（bench 循环里避免反复分配）。
-/// 不产出任何行号信息（行索引是惰性设计，纯 token 化路径零行跟踪成本；
+/// scan 的复用缓冲版本：调用方管理 lexeme 列表（bench 循环里避免反复分配）。
+/// 不产出任何行号信息（行索引是惰性设计，纯词法化路径零行跟踪成本；
 /// 本引擎的 classify 顺带算换行位图，用完即弃）。
 pub fn scanInto(
-    tokens: *std.ArrayList(Token),
+    tokens: *std.ArrayList(Lexeme),
     allocator: std.mem.Allocator,
     src: []const u8,
-    options: Options,
 ) !void {
     var cls = try simd.classifyTokenStarts(allocator, src);
     defer cls.starts.deinit(allocator);
     defer allocator.free(cls.line_breaks);
-    if (options.regex_starts) |list| try reserveRegexStarts(allocator, src, list);
-    try consume(tokens, allocator, src, &cls.starts, options);
+    try consume(tokens, allocator, src, &cls.starts);
 }
 
-/// 正则收集容量预留：正则字面量数以源中 `/` 数为上界。
-pub fn reserveRegexStarts(
-    allocator: std.mem.Allocator,
-    src: []const u8,
-    list: *std.ArrayList(u32),
-) !void {
-    list.clearRetainingCapacity();
-    try list.ensureTotalCapacity(allocator, std.mem.count(u8, src, "/"));
+/// 模板上下文栈：template_head 压一层（每个帧代表"在某模板的一个子表达
+/// 式内"），层内花括号计数；`}` 在计数归零时是模板续片起点（重扫为
+/// middle/tail），否则只是普通块/对象闭合。middle 重开同一模板的下一个
+/// 子表达式（帧保持），tail 弹一层。上界 64 层，真实代码嵌套不过几层；
+/// 溢出不再压栈（按普通 punct 容错，不中断）。三个驱动循环
+/// （两阶段 / jump_vec / scalar）共用。
+pub const TemplateStack = struct {
+    depths: [64]u32 = undefined,
+    len: u32 = 0,
+
+    /// `}` 是否当前帧的模板收尾（花括号计数已归零）
+    pub fn closesTemplate(self: *const TemplateStack) bool {
+        return self.len > 0 and self.depths[self.len - 1] == 0;
+    }
+
+    /// 显著 lexeme 落盘后更新栈（trivia 不调用；c 是 lexeme 首字节，
+    /// 仅 punct 用得到）
+    pub fn track(self: *TemplateStack, kind: LexemeKind, c: u8) void {
+        switch (kind) {
+            // head 开新模板压一层；middle 不压栈——它是同一帧内下一个
+            // 子表达式的开始（`${` 重开当前模板的子表达式，帧在 `}` 拦截
+            // 时已保持归零；多压一层会让模板结束后残留孤帧，把后续普通
+            // `}` 误扫成 template_tail）；tail 收尾弹一层
+            .template_head => self.push(),
+            .template_tail => self.pop(),
+            .punct => {
+                if (self.len > 0) {
+                    if (c == '{') self.depths[self.len - 1] +%= 1;
+                    if (c == '}') self.depths[self.len - 1] -%= 1;
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn push(self: *TemplateStack) void {
+        if (self.len < self.depths.len) {
+            self.depths[self.len] = 0;
+            self.len += 1;
+        }
+    }
+
+    fn pop(self: *TemplateStack) void {
+        self.len -= 1;
+    }
+};
+
+/// 扫描中的临时结果：kind + end。start 由调用方持有，落盘为 Lexeme
+/// 时才定（Lexeme 不存 end，连续性不变量下由下一个 lexeme 的 start 隐含）。
+pub const Scan = struct {
+    kind: LexemeKind,
+    end: usize,
+};
+
+/// 空白 run 落盘：第一个行终止符（\n、\r、U+2028、U+2029）之前是
+/// whitespace（可空），从它起到 run 末尾是 newline。from == to 无操作。
+/// 调用方保证 tokens 至少还有 2 个空位（驱动循环的容量预留已覆盖）。
+pub fn emitTriviaRun(tokens: *std.ArrayList(Lexeme), src: []const u8, from: usize, to: usize) void {
+    if (from >= to) return;
+    if (firstLineTerminator(src, from, to)) |i| {
+        if (i > from) tokens.appendAssumeCapacity(.{ .kind = .whitespace, .start = @intCast(from) });
+        tokens.appendAssumeCapacity(.{ .kind = .newline, .start = @intCast(i) });
+    } else {
+        tokens.appendAssumeCapacity(.{ .kind = .whitespace, .start = @intCast(from) });
+    }
 }
 
-/// 阶段 2：块内迭代候选位，贪心消费。token 区间内的假起点用
-/// `start < pos` 越过。所有状态（pos/prev）都是循环局部变量，
+/// run 内第一个行终止符（\n、\r、U+2028、U+2029）的位置；无则 null。
+/// \v \f 只是空白不是行终止符（与 LineIndex 口径一致）。
+fn firstLineTerminator(src: []const u8, from: usize, to: usize) ?usize {
+    var i = from;
+    while (i < to) : (i += 1) {
+        const c = src[i];
+        if (c == '\n' or c == '\r') return i;
+        // U+2028/U+2029 = E2 80 A8/A9（run 边界必在码点边界上）
+        if (c == 0xE2 and i + 2 < to and src[i + 1] == 0x80 and
+            (src[i + 2] == 0xA8 or src[i + 2] == 0xA9)) return i;
+    }
+    return null;
+}
+
+/// 阶段 2：块内迭代候选位，贪心消费。lexeme 区间内的假起点用
+/// `start < pos` 越过。所有状态（pos/prev/tpl）都是循环局部变量，
 /// 由编译器驻进寄存器——这是数据流化的核心：扫描函数全是纯函数，
 /// 没有隐藏的 store/load 链。
+///
+/// trivia 发射：候选间隙即 ASCII 空白 run，unicode whitespace 经 tokenAt
+/// 产 whitespace kind——两者都累积进 [trivia_from, ...) 的 pending run，
+/// 遇显著 lexeme（含注释）时由 emitTriviaRun 切成 whitespace/newline。
 fn consume(
-    tokens: *std.ArrayList(Token),
+    tokens: *std.ArrayList(Lexeme),
     allocator: std.mem.Allocator,
     src: []const u8,
     starts: *const simd.TokenStarts,
-    options: Options,
 ) !void {
     var pos: usize = 0;
-    var prev: ?Token = null; // 上一个非注释 token，供 `/` 的正则/除号判别
+    var prev_kind: ?LexemeKind = null; // 上一个非 trivia lexeme，供 `/` 判别
+    var prev_text: []const u8 = "";
+    var tpl: TemplateStack = .{};
 
     if (src.len >= 2 and src[0] == '#' and src[1] == '!') {
-        const t = scanShebang(src);
-        pos = t.end;
-        prev = t;
-        try tokens.append(allocator, t);
+        const s = scanShebang(src);
+        pos = s.end;
+        prev_kind = s.kind;
+        prev_text = src[0..s.end];
+        try tokens.append(allocator, .{ .kind = .shebang, .start = 0 });
     }
+    var trivia_from = pos; // pending 空白 run 起点（== pos 表示无待发射）
     for (starts.masks, 0..) |mask, bi| {
-        // 整块已被上一个 token 覆盖（如长块注释/长字符串的后续块）：
+        // 整块已被上一个 lexeme 覆盖（如长块注释/长字符串的后续块）：
         // 直接跳过整块，避免逐假候选迭代（lib.dom.d.ts 这类 JSDoc 密集
         // 语料里，块注释内的 `*` `/` 全是假候选，这里是主要成本）
         if (bi * simd.block_size + simd.block_size <= pos) continue;
-        // 一块最多 32 个候选 → 每 token 的容量检查摊薄为每块一次
-        try tokens.ensureUnusedCapacity(allocator, simd.block_size);
+        // 一块最多 32 个候选，每候选最多 3 个落盘（whitespace + newline + 本体）
+        try tokens.ensureUnusedCapacity(allocator, 3 * simd.block_size);
         var m = mask;
         while (m != 0) {
             const start = bi * simd.block_size + @as(usize, @ctz(m));
             m &= m - 1;
-            if (start < pos) continue; // 上一个 token 已越过该假候选
-            const tok = tokenAt(src, start, prev, options.regex_starts);
-            pos = tok.end;
-            if (tok.kind == .comment or tok.kind == .whitespace) {
-                if (options.keep_comments) tokens.appendAssumeCapacity(tok);
-                continue;
+            if (start < pos) continue; // 上一个 lexeme 已越过该假候选
+            const s = scanAt(src, start, prev_kind, prev_text, &tpl);
+            pos = s.end;
+            if (s.kind == .whitespace) continue; // unicode ws：并入 pending run
+            emitTriviaRun(tokens, src, trivia_from, start);
+            tokens.appendAssumeCapacity(.{ .kind = s.kind, .start = @intCast(start) });
+            trivia_from = pos;
+            if (s.kind != .line_comment and s.kind != .block_comment) {
+                tpl.track(s.kind, src[start]);
+                prev_kind = s.kind;
+                prev_text = src[start..s.end];
             }
-            prev = tok;
-            tokens.appendAssumeCapacity(tok);
         }
     }
-    // 尾部空白不是候选起点，pos 可能落后于 src.len；eof 固定 start == end == src.len
-    try tokens.append(allocator, .{ .kind = .eof, .start = @intCast(src.len), .end = @intCast(src.len) });
+    // 尾部空白不是候选起点，pos 可能落后于 src.len；落盘后 eof 收尾
+    try tokens.ensureUnusedCapacity(allocator, 2);
+    emitTriviaRun(tokens, src, trivia_from, src.len);
+    try tokens.append(allocator, .{ .kind = .eof, .start = @intCast(src.len) });
 }
 
-/// 分发类别码：token 首字节 → 位集，comptime 打进 256 项标量表。
+/// 候选起点处的完整判别：tokenAt + 模板收尾拦截（`}` 在花括号计数归零的
+/// 帧里是模板续片起点）。驱动循环共用，语义单点。
+pub inline fn scanAt(
+    src: []const u8,
+    start: usize,
+    prev_kind: ?LexemeKind,
+    prev_text: []const u8,
+    tpl: *TemplateStack,
+) Scan {
+    const s = tokenAt(src, start, prev_kind, prev_text);
+    if (s.kind == .punct and src[start] == '}' and tpl.closesTemplate()) {
+        return scanTemplatePart(src, start);
+    }
+    return s;
+}
+
+/// 分发类别码：lexeme 首字节 → 位集，comptime 打进 256 项标量表。
 /// 表在 L1 常驻，替代字符 range switch，并给纯单字节 punctuator
 /// 提供零调用快路径。
 pub const Dispatch = struct {
-    /// 单字节 punctuator（`{}()[];,:~@`）：token 恒为 (start, start+1)，
-    /// 无需 punctLen。注意 `.` 不在此列（`.5` 是数字）。
+    /// 单字节 punctuator（`{}()[];,:~@#`）：lexeme 恒为 (start, start+1)，
+    /// 无需 punctLen。注意 `.` 不在此列（`.5` 是数字）；
+    /// `#` 恒单字节（私有名的合法性留 parser：`#foo` = `#` + identifier）
     pub const punct_single: u8 = 1 << 0;
     pub const quote: u8 = 1 << 1; // ' " `
     pub const digit: u8 = 1 << 2; // 0-9
@@ -255,16 +343,15 @@ pub const Dispatch = struct {
     /// 多字节潜在 punctuator（=<>+-*%&|^!?%.，需要 punctLen 贪心）
     pub const punct_multi: u8 = 1 << 4;
     pub const slash: u8 = 1 << 5; // / 注释/正则/除号三义
-    pub const hash: u8 = 1 << 6; // #
     /// ASCII 空白（' ' \t \n \r \v \f）：单阶段变体主循环用它一次表查
     /// 合并「是否空白」与「按什么分发」两个判断（tokenAt 本身不消费此位）
-    pub const whitespace: u8 = 1 << 7;
+    pub const whitespace: u8 = 1 << 6;
     // 其余（非 ASCII 等）为 0，走容错路径
 };
 
 pub const dispatch_table: [256]u8 = blk: {
     var t: [256]u8 = @splat(0);
-    for ("{}()[];,:~@") |ch| t[ch] |= Dispatch.punct_single;
+    for ("{}()[];,:~@#") |ch| t[ch] |= Dispatch.punct_single;
     for ("'\"`") |ch| t[ch] |= Dispatch.quote;
     // 注意 Zig 的 a..b 是半开区间（会漏掉 'z'/'Z'/'9'），用显式集合
     for ("0123456789") |ch| t[ch] |= Dispatch.digit;
@@ -274,7 +361,6 @@ pub const dispatch_table: [256]u8 = blk: {
     for ("=<>+-*%&|^!?") |ch| t[ch] |= Dispatch.punct_multi;
     t['.'] |= Dispatch.punct_multi;
     t['/'] |= Dispatch.slash;
-    t['#'] |= Dispatch.hash;
     t[' '] |= Dispatch.whitespace;
     for (0x09..0x0E) |ch| t[ch] |= Dispatch.whitespace; // \t \n \v \f \r
     break :blk t;
@@ -283,32 +369,29 @@ pub const dispatch_table: [256]u8 = blk: {
 pub inline fn tokenAt(
     src: []const u8,
     start: usize,
-    prev: ?Token,
-    regex_starts: ?*std.ArrayList(u32),
-) Token {
+    prev_kind: ?LexemeKind,
+    prev_text: []const u8,
+) Scan {
     const c = src[start];
     const code = dispatch_table[c];
 
     // 最高频先行：纯单字节 punctuator，直接构造，零函数调用
     if (code & Dispatch.punct_single != 0) {
-        return .{ .kind = .punct, .start = @intCast(start), .end = @intCast(start + 1) };
+        return .{ .kind = .punct, .end = start + 1 };
     }
     if (code & Dispatch.ident_start != 0) return scanIdentifier(src, start);
     if (code & Dispatch.digit != 0) return scanNumber(src, start);
     if (code & Dispatch.quote != 0) {
-        return if (c == '`') scanTemplate(src, start, regex_starts) else scanString(src, start, c);
+        return if (c == '`') scanTemplatePart(src, start) else scanString(src, start, c);
     }
     if (code & Dispatch.slash != 0) {
         // 注释、除号、正则三解
         if (tryComment(src, start)) |comment| return comment;
-        if (regexAllowedAfter(prev, src)) {
-            // 容量由 scan/scanInto 预留（`/` 数上界），此处不再分配
-            if (regex_starts) |list| list.appendAssumeCapacity(@intCast(start));
+        if (regexAllowedAfter(prev_kind, prev_text)) {
             return scanRegex(src, start);
         }
         return scanPunct(src, start);
     }
-    if (code & Dispatch.hash != 0) return scanPrivateName(src, start);
     if (c == '\\') {
         // \uXXXX 转义标识符（tsc 纯 scanner 不合并 \u{...}，对齐）
         if (decodeIdentEscape(src, start)) |r| {
@@ -328,28 +411,28 @@ pub inline fn tokenAt(
 
 // -- trivia --------------------------------------------------------------
 
-/// start 处若是注释则返回 token；否则返回 null。
-fn tryComment(src: []const u8, start: usize) ?Token {
+/// start 处若是注释则返回 Scan；否则返回 null。
+fn tryComment(src: []const u8, start: usize) ?Scan {
     if (start + 1 >= src.len or src[start] != '/') return null;
 
     if (src[start + 1] == '/') {
-        return .{ .kind = .comment, .start = @intCast(start), .end = @intCast(lineEnd(src, start)) };
+        return .{ .kind = .line_comment, .end = lineEnd(src, start) };
     }
     if (src[start + 1] == '*') {
         if (simd.findBlockCommentEnd(src, start + 2)) |end| {
-            return .{ .kind = .comment, .start = @intCast(start), .end = @intCast(end) };
+            return .{ .kind = .block_comment, .end = end };
         }
         // 未闭合的块注释：吞掉余下全部，容错继续（与真实引擎行为一致）
-        return unterminatedBlockComment(src, start);
+        return unterminatedBlockComment(src);
     }
     return null;
 }
 
-// -- token 扫描（全部纯函数：src + start 进，Token 出）--------------------
+// -- lexeme 扫描（全部纯函数：src + start 进，Scan 出）--------------------
 
 /// 单/双引号字符串。SIMD 定位 `引号|反斜杠|换行`，转义对直接跳 2 字节。
 /// 合法字符串不跨行，所以中途不用维护行数。
-fn scanString(src: []const u8, start: usize, quote: u8) Token {
+fn scanString(src: []const u8, start: usize, quote: u8) Scan {
     var i = start + 1;
     while (i < src.len) {
         const chunk = simd.load(src, i);
@@ -361,7 +444,7 @@ fn scanString(src: []const u8, start: usize, quote: u8) Token {
         const idx = i + @as(usize, @ctz(m));
         const c = src[idx];
         if (c == quote) {
-            return .{ .kind = .string, .start = @intCast(start), .end = @intCast(idx + 1) };
+            return .{ .kind = .string, .end = idx + 1 };
         }
         if (c == '\\') {
             // TODO: `\`+CRLF 时这里只跳 2 字节（\ 与 \r），随后的 \n 命中
@@ -370,14 +453,17 @@ fn scanString(src: []const u8, start: usize, quote: u8) Token {
             continue;
         }
         // 裸换行：非法字符串，吞到行尾当 illegal，容错继续
-        return illegalString(start, lineEnd(src, idx));
+        return illegalString(lineEnd(src, idx));
     }
-    return illegalString(start, src.len); // EOF 未闭合
+    return illegalString(src.len); // EOF 未闭合
 }
 
-/// 模板字面量：允许跨行。SIMD 定位 `` ` ``、`\`、`$`。
-/// `${}` 子表达式递归调 scanner 本体定边界（见 scanTemplateSubstitution）。
-fn scanTemplate(src: []const u8, start: usize, regex_starts: ?*std.ArrayList(u32)) Token {
+/// 模板片段：start 在 `` ` ``（模板起点）或 `}`（子表达式收尾、续片起点）。
+/// SIMD 定位 `` ` ``、`\`、`$`：`${` 收尾为 head/middle（含 `${`），
+/// `` ` `` 收尾为 no_substitution/tail（含反引号），EOF 未闭合为 illegal。
+/// 片段内的子表达式由驱动循环按普通 lexeme 流扫描（模板栈判别收尾 `}`）。
+pub fn scanTemplatePart(src: []const u8, start: usize) Scan {
+    const from_backtick = src[start] == '`';
     var i = start + 1;
     while (i < src.len) {
         const chunk = simd.load(src, i);
@@ -388,55 +474,24 @@ fn scanTemplate(src: []const u8, start: usize, regex_starts: ?*std.ArrayList(u32
         }
         const idx = i + @as(usize, @ctz(m));
         switch (src[idx]) {
-            '`' => return .{ .kind = .template, .start = @intCast(start), .end = @intCast(idx + 1) },
+            '`' => return .{
+                .kind = if (from_backtick) .no_substitution_template else .template_tail,
+                .end = idx + 1,
+            },
             '\\' => i = idx + 2,
             '$' => {
                 if (idx + 1 < src.len and src[idx + 1] == '{') {
-                    i = scanTemplateSubstitution(src, idx + 2, regex_starts);
-                } else {
-                    i = idx + 1;
+                    return .{
+                        .kind = if (from_backtick) .template_head else .template_middle,
+                        .end = idx + 2,
+                    };
                 }
+                i = idx + 1;
             },
             else => unreachable, // mask 只含以上三种
         }
     }
-    return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(src.len) }; // EOF 未闭合
-}
-
-/// `${...}` 边界扫描：递归调 scanner 本体（tokenAt + regexAllowedAfter，
-/// 与主循环同口径），返回配对 `}` 之后的位置。产出的 token 只用于找
-/// 边界，全部丢弃。字符串、注释、嵌套模板、正则（含 pattern 里的
-/// `}` / `//` / `/*`）都按主循环同样的语义跳过，无法骗过花括号配对。
-/// 子表达式通常很小，逐个 token 扫描成本可忽略（bench 裁决）。
-fn scanTemplateSubstitution(src: []const u8, from: usize, regex_starts: ?*std.ArrayList(u32)) usize {
-    var depth: usize = 1;
-    var i = from;
-    var prev: ?Token = null; // 与主循环同口径：上一个非注释/非空白 token
-    while (i < src.len) {
-        const c = src[i];
-        if (c == ' ' or (c >= 9 and c <= 13)) {
-            i += 1; // ASCII trivia 逐字节（子表达式通常很小）
-            continue;
-        }
-        const t = tokenAt(src, i, prev, regex_starts);
-        if (t.end <= i) return src.len; // 防御：token 不前进按未闭合处理
-        i = t.end;
-        switch (t.kind) {
-            .comment, .whitespace => continue, // trivia 不进 prev（同主循环）
-            .punct => {
-                const text = t.slice(src);
-                if (text[0] == '{') {
-                    depth += 1;
-                } else if (text[0] == '}') {
-                    depth -= 1;
-                    if (depth == 0) return i;
-                }
-                prev = t;
-            },
-            else => prev = t,
-        }
-    }
-    return i; // EOF 未闭合
+    return .{ .kind = .illegal, .end = src.len }; // EOF 未闭合
 }
 
 /// 解码 i 处（指向 `\`）的标识符转义 `\uXXXX`，返回码点与总长 6。
@@ -465,9 +520,10 @@ pub inline fn isIdentPartRune(cp: u21) bool {
     return if (cp < 0x80) simd.isIdentPart(@intCast(cp)) else unicode.isIdContinue(cp);
 }
 
-/// 标识符/关键字。ASCII 段走快路径（标量 8 字节 + SIMD 续扫），
+/// 标识符。ASCII 段走快路径（标量 8 字节 + SIMD 续扫），
 /// 遇非 ASCII 字节按 UTF-8 解码查 ID_Continue 两级位图续扫。
-pub fn scanIdentifier(src: []const u8, start: usize) Token {
+/// 关键字不在这里判别（粗流全归 identifier；判别只在 `/` 路径按需做）。
+pub fn scanIdentifier(src: []const u8, start: usize) Scan {
     // 首字符合法性由分发保证（ASCII ident start、已验证的非 ASCII
     // ID_Start、或已验证的 \uXXXX 转义）；按实际宽度推进，不能假设 +1
     var i = if (src[start] == '\\') start + 6 else if (src[start] < 0x80) start + 1 else start + unicode.decode(src, start).?.len;
@@ -489,16 +545,13 @@ pub fn scanIdentifier(src: []const u8, start: usize) Token {
         if (!unicode.isIdContinue(r.cp)) break;
         i += r.len;
     }
-    const kind: TokenKind =
-        if (isKeyword(src[start..i])) .keyword else .identifier;
-    return .{ .kind = kind, .start = @intCast(start), .end = @intCast(i) };
+    return .{ .kind = .identifier, .end = i };
 }
 
 /// 非 ASCII 起始标识符的扫描：首字符已由 scanNonAscii decode 并验证
-/// ID_Start（直接复用，不再二次 decode）；keyword 判别可跳过——关键字
-/// 全 ASCII，含非 ASCII 字节的文本 memcmp 必败。入口固定成本是 CJK
+/// ID_Start（直接复用，不再二次 decode）。入口固定成本是 CJK
 /// 标识符密集语料的吞吐关键（oxc 同款结构：handler 直达 + 单 decode）。
-fn scanUnicodeIdentifier(src: []const u8, start: usize, first: unicode.Rune) Token {
+fn scanUnicodeIdentifier(src: []const u8, start: usize, first: unicode.Rune) Scan {
     var i = start + first.len;
     while (i < src.len) {
         const c = src[i];
@@ -517,7 +570,7 @@ fn scanUnicodeIdentifier(src: []const u8, start: usize, first: unicode.Rune) Tok
         if (!unicode.isIdContinue(r.cp)) break;
         i += r.len;
     }
-    return .{ .kind = .identifier, .start = @intCast(start), .end = @intCast(i) };
+    return .{ .kind = .identifier, .end = i };
 }
 
 /// ASCII 标识符字符段的结尾：标量快扫前 8 字节（多数标识符不长），
@@ -547,26 +600,11 @@ fn asciiIdentEnd(src: []const u8, from: usize) usize {
     return i;
 }
 
-/// 私有名 `#foo`（也接受 unicode ID_Start，如 `#π`）；
-/// `#` 后不是标识符起始则整个算 illegal。
-pub fn scanPrivateName(src: []const u8, start: usize) Token {
-    if (start + 1 < src.len) {
-        const c = src[start + 1];
-        const ok = simd.isIdentStart(c) or (c == '\\' and if (decodeIdentEscape(src, start + 1)) |r| isIdentStartRune(r.cp) else false) or
-            (c >= 0x80 and if (unicode.decode(src, start + 1)) |r| unicode.isIdStart(r.cp) else false);
-        if (ok) {
-            const body = scanIdentifier(src, start + 1);
-            return .{ .kind = .private_name, .start = @intCast(start), .end = body.end };
-        }
-    }
-    return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(start + 1) };
-}
-
 /// 数字字面量：0x/0o/0b、十进制、小数、指数、`_` 分隔符、BigInt `n` 后缀。
-/// 标量实现：数字 token 平均只有几字节，SIMD 收益存疑，先求正确。
+/// 标量实现：数字 lexeme 平均只有几字节，SIMD 收益存疑，先求正确。
 /// TODO: legacy 八进制、空十六进制 `0x`、指数无数字 `1.e`、`3in` 等
-/// 非法形态按容错策略产出 token（边界近似 tsc），不产语义错误标记（goals.md L3）。
-pub fn scanNumber(src: []const u8, start: usize) Token {
+/// 非法形态按容错策略产出 lexeme（边界近似 tsc），不产语义错误标记（goals.md L3）。
+pub fn scanNumber(src: []const u8, start: usize) Scan {
     var i = start;
     if (src[i] == '0' and i + 1 < src.len) {
         switch (src[i + 1]) {
@@ -580,11 +618,11 @@ pub fn scanNumber(src: []const u8, start: usize) Token {
     }
     if (i < src.len and src[i] == 'n') i += 1; // BigInt 后缀
     while (i < src.len and src[i] == '_') i += 1; // 尾部非法分隔符一并吞掉
-    return .{ .kind = .number, .start = @intCast(start), .end = @intCast(i) };
+    return .{ .kind = .number, .end = i };
 }
 
 /// 正则字面量 `/pattern/flags`：不能跨行，字符类 `[...]` 里的 `/` 不算结束。
-pub fn scanRegex(src: []const u8, start: usize) Token {
+pub fn scanRegex(src: []const u8, start: usize) Scan {
     var i = start + 1;
     var in_class = false;
     while (i < src.len) {
@@ -601,7 +639,7 @@ pub fn scanRegex(src: []const u8, start: usize) Token {
         } else if (c == '/' and !in_class) {
             i += 1;
             while (i < src.len and simd.isIdentPart(src[i])) i += 1; // flags
-            return .{ .kind = .regex, .start = @intCast(start), .end = @intCast(i) };
+            return .{ .kind = .regex, .end = i };
         }
         i += 1;
     }
@@ -611,16 +649,12 @@ pub fn scanRegex(src: []const u8, start: usize) Token {
 
 /// punctuator，最长匹配（4→3→2→1）。
 /// 主体路径一次 4 字节加载（无逐字节边界检查），文件尾不足 4 字节走慢版。
-pub fn scanPunct(src: []const u8, start: usize) Token {
+pub fn scanPunct(src: []const u8, start: usize) Scan {
     const len = if (start + 4 <= src.len)
         punctLenW(std.mem.readInt(u32, src[start..][0..4], .little))
     else
         punctLen(src[start..]);
-    return .{
-        .kind = .punct,
-        .start = @intCast(start),
-        .end = @intCast(start + len),
-    };
+    return .{ .kind = .punct, .end = start + len };
 }
 
 /// punctLen 的无边界检查版本：w 是 src[start..start+4] 的小端 u32，
@@ -648,73 +682,75 @@ fn punctLenW(w: u32) usize {
     };
 }
 
-pub fn scanShebang(src: []const u8) Token {
-    return .{ .kind = .shebang, .start = 0, .end = @intCast(lineEnd(src, 0)) };
+pub fn scanShebang(src: []const u8) Scan {
+    return .{ .kind = .shebang, .end = lineEnd(src, 0) };
 }
 
-/// 非 ASCII 字节：按完整 UTF-8 码点消费成 illegal，
-/// 避免中文注释碎成一堆单字节 illegal。
-fn scanNonAscii(src: []const u8, start: usize) Token {
+/// 非 ASCII 字节：Unicode whitespace 产 whitespace kind（驱动循环并入
+/// pending 空白 run）；ID_Start 产标识符；其余按完整 UTF-8 码点消费成
+/// illegal，避免中文注释碎成一堆单字节 illegal。
+fn scanNonAscii(src: []const u8, start: usize) Scan {
     @branchHint(.unlikely);
-    // Unicode whitespace（含跨块码点），按 trivia 处理，由主循环过滤
+    // Unicode whitespace（含跨块码点）
     if (simd.unicodeWhitespaceLen(src, start)) |len| {
-        return .{ .kind = .whitespace, .start = @intCast(start), .end = @intCast(start + len) };
+        return .{ .kind = .whitespace, .end = start + len };
     }
     // Unicode 标识符首字符（ID_Start）
     if (unicode.decode(src, start)) |r| {
         if (unicode.isIdStart(r.cp)) return scanUnicodeIdentifier(src, start, r);
     }
     const len = @min(utf8Len(src[start]), src.len - start);
-    return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(start + len) };
+    return .{ .kind = .illegal, .end = start + len };
 }
 
 // 容错路径统一收进冷函数：@branchHint(.unlikely) 等价 cold attribute，
 // 编译器把代码放进 cold 段并让调用点按 unlikely 预测。
 
-fn unterminatedBlockComment(src: []const u8, start: usize) Token {
+fn unterminatedBlockComment(src: []const u8) Scan {
     @branchHint(.unlikely);
-    return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(src.len) };
+    return .{ .kind = .illegal, .end = src.len };
 }
 
-fn illegalString(start: usize, end: usize) Token {
+fn illegalString(end: usize) Scan {
     @branchHint(.unlikely);
-    return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(end) };
+    return .{ .kind = .illegal, .end = end };
 }
 
-fn illegalBackslash(start: usize) Token {
+fn illegalBackslash(start: usize) Scan {
     @branchHint(.unlikely);
-    return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(start + 1) };
+    return .{ .kind = .illegal, .end = start + 1 };
 }
 
-fn illegalRegex(src: []const u8, start: usize) Token {
+fn illegalRegex(src: []const u8, start: usize) Scan {
     @branchHint(.unlikely);
-    return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(lineEnd(src, start)) };
+    return .{ .kind = .illegal, .end = lineEnd(src, start) };
 }
 
-/// `/` 出现在什么 token 之后时是正则开头，否则是除号。
-/// 单 token 回看的启发式，按真实代码的先验取舍，不追语法完备：
-/// - 值类 token（标识符/数字/字符串/模板/正则）之后是除号；
+/// `/` 出现在什么 lexeme 之后时是正则开头，否则是除号。
+/// 单 lexeme 回看的启发式，按真实代码的先验取舍，不追语法完备：
+/// - 值类 lexeme（标识符/数字/字符串/模板整体/模板尾片/正则）之后是除号；
 /// - `++`/`--` 之后是除号：前缀形式要求左值，`++/re/` 本就是错误代码，
 ///   真实代码里只能是后缀，而后缀之后接除法；
 /// - `}` 之后是正则：块尾开新语句常见，`{...} / x` 对象除法在语义上无意义；
 /// - `)`/`]` 之后是除号：`if (x) /re/.test(y)` 这类无副作用的正则方法
 ///   调用作为单独语句，真实代码里几乎不出现；
-/// - 关键字里 this/super 是值，return/typeof/case 等都把 `/` 放进表达式位置。
-pub fn regexAllowedAfter(prev: ?Token, src: []const u8) bool {
-    const t = prev orelse return true; // 文件开头
-    return switch (t.kind) {
-        .identifier, .number, .string, .template, .regex, .private_name => false,
+/// - 关键字里 this/super 是值，return/typeof/case 等都把 `/` 放进表达式位置
+///   （粗流不分 keyword/identifier，这里按文本现查——只在 `/` 路径上付一次）。
+pub fn regexAllowedAfter(prev_kind: ?LexemeKind, prev_text: []const u8) bool {
+    const kind = prev_kind orelse return true; // 文件开头
+    return switch (kind) {
+        .identifier => blk: {
+            // this/super 是值；其余关键字（return/typeof/in/...）把 `/` 放进表达式位置
+            if (!isKeyword(prev_text)) break :blk false;
+            break :blk !std.mem.eql(u8, prev_text, "this") and !std.mem.eql(u8, prev_text, "super");
+        },
+        .number, .string, .regex, .no_substitution_template, .template_tail => false,
         .punct => blk: {
             // ++/-- 走除号侧（见上）；其余 punctuator（= ( , : + 等运算符）都在表达式位置
-            const text = t.slice(src);
-            break :blk text[0] != ')' and text[0] != ']' and
-                !std.mem.eql(u8, text, "++") and !std.mem.eql(u8, text, "--");
+            break :blk prev_text[0] != ')' and prev_text[0] != ']' and
+                !std.mem.eql(u8, prev_text, "++") and !std.mem.eql(u8, prev_text, "--");
         },
-        .keyword => blk: {
-            // this/super 是值；其余关键字（return/typeof/in/...）都把 `/` 放进表达式位置
-            const text = t.slice(src);
-            break :blk !std.mem.eql(u8, text, "this") and !std.mem.eql(u8, text, "super");
-        },
+        // template_head/middle（`${` 后是表达式位置）、shebang、illegal
         else => true,
     };
 }
@@ -740,7 +776,7 @@ fn punctLen(rest: []const u8) usize {
         '/' => if (b1 == '=') 2 else 1,
         '%' => if (b1 == '=') 2 else 1,
         '^' => if (b1 == '=') 2 else 1,
-        // '{' '}' '(' ')' '[' ']' ';' ',' ':' '~' '@' 等单字符
+        // '{' '}' '(' ')' '[' ']' ';' ',' ':' '~' '@' '#' 等单字符
         else => 1,
     };
 }
@@ -826,34 +862,71 @@ pub fn lineEnd(src: []const u8, from: usize) usize {
 const testing = std.testing;
 
 /// (kind, text) 二元组，方便写期望序列
-const Expected = struct { TokenKind, []const u8 };
+const Expected = struct { LexemeKind, []const u8 };
 
-fn expectTokens(src: []const u8, expected: []const Expected) !void {
-    var result = try scan(testing.allocator, src, .{});
-    defer result.deinit(testing.allocator);
-    if (result.tokens.len != expected.len) {
-        std.debug.print("\nsrc: {s}\n期望 {d} 个 token，实际 {d} 个：\n", .{
-            src, expected.len, result.tokens.len,
+fn isTrivia(kind: LexemeKind) bool {
+    return kind == .whitespace or kind == .newline or
+        kind == .line_comment or kind == .block_comment;
+}
+
+/// 实际产出的 (kind, text) 对：text 在收集时按原始流的连续性取
+/// （end = 原始下一个 lexeme 的 start——过滤 trivia 后不能再用过滤视图
+/// 的相邻关系取文本，会跨过被滤掉的 trivia）
+const Actual = struct { kind: LexemeKind, text: []const u8 };
+
+fn collect(src: []const u8, tokens: []const Lexeme, keep_trivia: bool) !std.ArrayList(Actual) {
+    var out: std.ArrayList(Actual) = .empty;
+    for (tokens, 0..) |t, i| {
+        if (!keep_trivia and isTrivia(t.kind)) continue;
+        const next_start: u32 = if (i + 1 < tokens.len) tokens[i + 1].start else @intCast(src.len);
+        try out.append(testing.allocator, .{ .kind = t.kind, .text = t.slice(src, next_start) });
+    }
+    return out;
+}
+
+fn expectSequence(src: []const u8, actual: []const Actual, expected: []const Expected) !void {
+    if (actual.len != expected.len) {
+        std.debug.print("\nsrc: {s}\n期望 {d} 个 lexeme，实际 {d} 个：\n", .{
+            src, expected.len, actual.len,
         });
-        for (result.tokens) |t| {
-            std.debug.print("  ({s}, \"{s}\")\n", .{ @tagName(t.kind), t.slice(src) });
+        for (actual) |t| {
+            std.debug.print("  ({s}, \"{s}\")\n", .{ @tagName(t.kind), t.text });
         }
         return error.TestTokenCountMismatch;
     }
-    for (expected, result.tokens) |e, t| {
-        if (e[0] != t.kind or !std.mem.eql(u8, e[1], t.slice(src))) {
+    for (expected, actual, 0..) |e, t, i| {
+        if (e[0] != t.kind or !std.mem.eql(u8, e[1], t.text)) {
             std.debug.print(
-                "\nsrc: {s}\n第 {d} 个 token 不符：期望 ({s}, \"{s}\")，实际 ({s}, \"{s}\")\n",
-                .{ src, t.start, @tagName(e[0]), e[1], @tagName(t.kind), t.slice(src) },
+                "\nsrc: {s}\n第 {d} 个 lexeme 不符：期望 ({s}, \"{s}\")，实际 ({s}, \"{s}\")\n",
+                .{ src, i, @tagName(e[0]), e[1], @tagName(t.kind), t.text },
             );
             return error.TestTokenMismatch;
         }
     }
 }
 
+/// 比对非 trivia 的显著 lexeme 序列（trivia 常驻后多数用例只关心显著流；
+/// trivia 切分本身由 expectAllTokens 专项覆盖）
+fn expectTokens(src: []const u8, expected: []const Expected) !void {
+    var result = try scan(testing.allocator, src);
+    defer result.deinit(testing.allocator);
+    var sig = try collect(src, result.tokens, false);
+    defer sig.deinit(testing.allocator);
+    try expectSequence(src, sig.items, expected);
+}
+
+/// 比对完整 lexeme 流（含 trivia）
+fn expectAllTokens(src: []const u8, expected: []const Expected) !void {
+    var result = try scan(testing.allocator, src);
+    defer result.deinit(testing.allocator);
+    var all = try collect(src, result.tokens, true);
+    defer all.deinit(testing.allocator);
+    try expectSequence(src, all.items, expected);
+}
+
 test "声明与表达式" {
     try expectTokens("let x = 42;", &.{
-        .{ .keyword, "let" },
+        .{ .identifier, "let" },
         .{ .identifier, "x" },
         .{ .punct, "=" },
         .{ .number, "42" },
@@ -862,11 +935,11 @@ test "声明与表达式" {
     });
 }
 
-test "关键字与标识符" {
+test "关键字全归 identifier" {
     try expectTokens("class impl extends Base {", &.{
-        .{ .keyword, "class" },
+        .{ .identifier, "class" },
         .{ .identifier, "impl" },
-        .{ .keyword, "extends" },
+        .{ .identifier, "extends" },
         .{ .identifier, "Base" },
         .{ .punct, "{" },
         .{ .eof, "" },
@@ -882,93 +955,266 @@ test "字符串与转义" {
     });
 }
 
-test "模板字面量（含子表达式与换行）" {
+test "模板字面量拆片（含子表达式与换行）" {
     try expectTokens(
         "const s = `hi ${name + \"!\"}\nnext`;",
         &.{
-            .{ .keyword, "const" },
+            .{ .identifier, "const" },
             .{ .identifier, "s" },
             .{ .punct, "=" },
-            .{ .template, "`hi ${name + \"!\"}\nnext`" },
+            .{ .template_head, "`hi ${" },
+            .{ .identifier, "name" },
+            .{ .punct, "+" },
+            .{ .string, "\"!\"" },
+            .{ .template_tail, "}\nnext`" },
             .{ .punct, ";" },
             .{ .eof, "" },
         },
     );
+    // 无子表达式模板整体一片
+    try expectTokens("`plain`", &.{
+        .{ .no_substitution_template, "`plain`" },
+        .{ .eof, "" },
+    });
+    // 多段子表达式：head / middle / tail
+    try expectTokens("`a${x}b${y}c`", &.{
+        .{ .template_head, "`a${" },
+        .{ .identifier, "x" },
+        .{ .template_middle, "}b${" },
+        .{ .identifier, "y" },
+        .{ .template_tail, "}c`" },
+        .{ .eof, "" },
+    });
 }
 
 test "模板子表达式里的正则（回归：pattern 里的 //、/*、} 不再骗过配对）" {
     // 回归：typescript.min.js 实测抓到的形态——子表达式内正则里的 `//` 被
     // 当行注释，吞掉模板收尾反引号，整个模板塌成 illegal 直到 EOF
     try expectTokens("` ${r.replace(/\\*\\//g,\"*_/\")} `", &.{
-        .{ .template, "` ${r.replace(/\\*\\//g,\"*_/\")} `" },
+        .{ .template_head, "` ${" },
+        .{ .identifier, "r" },
+        .{ .punct, "." },
+        .{ .identifier, "replace" },
+        .{ .punct, "(" },
+        .{ .regex, "/\\*\\//g" },
+        .{ .punct, "," },
+        .{ .string, "\"*_/\"" },
+        .{ .punct, ")" },
+        .{ .template_tail, "} `" },
         .{ .eof, "" },
     });
-    // 正则 pattern 含 `}`（旧已知限制 tradeoff L1，递归 scanner 后根治）
+    // 正则 pattern 含 `}`（旧已知限制 tradeoff L1，模板栈根治）
     try expectTokens("`a${ /}/.test(x) }b`", &.{
-        .{ .template, "`a${ /}/.test(x) }b`" },
+        .{ .template_head, "`a${" },
+        .{ .regex, "/}/" },
+        .{ .punct, "." },
+        .{ .identifier, "test" },
+        .{ .punct, "(" },
+        .{ .identifier, "x" },
+        .{ .punct, ")" },
+        .{ .template_tail, "}b`" },
         .{ .eof, "" },
     });
     // URL 正则：pattern 里的 `//` 不再吞行
     try expectTokens("` ${u.match(/https?:\\/\\//)} `", &.{
-        .{ .template, "` ${u.match(/https?:\\/\\//)} `" },
+        .{ .template_head, "` ${" },
+        .{ .identifier, "u" },
+        .{ .punct, "." },
+        .{ .identifier, "match" },
+        .{ .punct, "(" },
+        .{ .regex, "/https?:\\/\\//" },
+        .{ .punct, ")" },
+        .{ .template_tail, "} `" },
         .{ .eof, "" },
     });
     // 子表达式里的除法不能反被误判成正则吞掉收尾反引号
     try expectTokens("` ${x/y}` + /re/g", &.{
-        .{ .template, "` ${x/y}`" },
+        .{ .template_head, "` ${" },
+        .{ .identifier, "x" },
+        .{ .punct, "/" },
+        .{ .identifier, "y" },
+        .{ .template_tail, "}`" },
         .{ .punct, "+" },
         .{ .regex, "/re/g" },
         .{ .eof, "" },
     });
     // 嵌套模板 + 内层子表达式的正则（pattern 为 // 本身）
     try expectTokens("`a${ `b${ /\\/\\// }c` }d`", &.{
-        .{ .template, "`a${ `b${ /\\/\\// }c` }d`" },
+        .{ .template_head, "`a${" },
+        .{ .template_head, "`b${" },
+        .{ .regex, "/\\/\\//" },
+        .{ .template_tail, "}c`" },
+        .{ .template_tail, "}d`" },
         .{ .eof, "" },
     });
     // 子表达式里的对象字面量：花括号配对照常
     try expectTokens("` ${({a:1}).a} `", &.{
-        .{ .template, "` ${({a:1}).a} `" },
-        .{ .eof, "" },
-    });
-    // 未闭合：容错不变，illegal 到 EOF
-    try expectTokens("` ${x", &.{
-        .{ .illegal, "` ${x" },
-        .{ .eof, "" },
-    });
-}
-
-test "regex_starts 旁路收集：模板与嵌套模板内的正则，除法不收" {
-    // bench 驱动 yuku 用：模板 `${}` 内的正则不在主 token 流，缺了它
-    // yuku 会把正则当除号扫死（typescript.min.js 在 24KB 处报错回归）
-    const src = "a/b; `x${ /c/ }y${ `z${ /d/ }w` }v`; /e/g";
-    var starts: std.ArrayList(u32) = .empty;
-    defer starts.deinit(testing.allocator);
-    var result = try scan(testing.allocator, src, .{ .regex_starts = &starts });
-    defer result.deinit(testing.allocator);
-    try testing.expectEqualSlices(u32, &.{ 10, 24, 37 }, starts.items);
-    // 每个收集到的起点都确实指向 `/`
-    for (starts.items) |s| try testing.expectEqual(@as(u8, '/'), src[s]);
-}
-
-test "注释默认跳过" {
-    try expectTokens("a // line\n/* block */ b", &.{
+        .{ .template_head, "` ${" },
+        .{ .punct, "(" },
+        .{ .punct, "{" },
         .{ .identifier, "a" },
+        .{ .punct, ":" },
+        .{ .number, "1" },
+        .{ .punct, "}" },
+        .{ .punct, ")" },
+        .{ .punct, "." },
+        .{ .identifier, "a" },
+        .{ .template_tail, "} `" },
+        .{ .eof, "" },
+    });
+    // 未闭合：head 已产出，流按既有 lexeme 收尾（容错不中断）
+    try expectTokens("` ${x", &.{
+        .{ .template_head, "` ${" },
+        .{ .identifier, "x" },
+        .{ .eof, "" },
+    });
+}
+
+test "模板栈帧与 middle 不压栈（回归：模板结束后的普通 } 不被误扫成 template_tail）" {
+    // 多段模板后跟块收尾 `}`：middle 若多压帧会残留孤帧，这个 `}` 会被
+    // 当成模板续片吞到下一个反引号（typescript.js/checker.ts 实测抓回）
+    try expectTokens("{ x = `a${y}b${z}c`; }", &.{
+        .{ .punct, "{" },
+        .{ .identifier, "x" },
+        .{ .punct, "=" },
+        .{ .template_head, "`a${" },
+        .{ .identifier, "y" },
+        .{ .template_middle, "}b${" },
+        .{ .identifier, "z" },
+        .{ .template_tail, "}c`" },
+        .{ .punct, ";" },
+        .{ .punct, "}" },
+        .{ .eof, "" },
+    });
+    // 模板文本里的单引号没有特殊含义：'${' 仍是子表达式起点（tsc 同口径）
+    try expectTokens("f(`a '${x}'`) }", &.{
+        .{ .identifier, "f" },
+        .{ .punct, "(" },
+        .{ .template_head, "`a '${" },
+        .{ .identifier, "x" },
+        .{ .template_tail, "}'`" },
+        .{ .punct, ")" },
+        .{ .punct, "}" },
+        .{ .eof, "" },
+    });
+    // 嵌套模板逐层弹帧后，外层之后的 `}` 照常
+    try expectTokens("{ `a${ `b${x}c` }d`; }", &.{
+        .{ .punct, "{" },
+        .{ .template_head, "`a${" },
+        .{ .template_head, "`b${" },
+        .{ .identifier, "x" },
+        .{ .template_tail, "}c`" },
+        .{ .template_tail, "}d`" },
+        .{ .punct, ";" },
+        .{ .punct, "}" },
+        .{ .eof, "" },
+    });
+}
+
+test "模板 ${} 内的正则在主流中（regex_starts 旁路已随拆片删除）" {
+    // bench 驱动 yuku 的正则起点集合直接取自主流（曾靠旁路收集，因为
+    // 模板整体一个 token；拆片后内部 token 全在主流）
+    try expectTokens("a/b; `x${ /c/ }y${ `z${ /d/ }w` }v`; /e/g", &.{
+        .{ .identifier, "a" },
+        .{ .punct, "/" },
+        .{ .identifier, "b" },
+        .{ .punct, ";" },
+        .{ .template_head, "`x${" },
+        .{ .regex, "/c/" },
+        .{ .template_middle, "}y${" },
+        .{ .template_head, "`z${" },
+        .{ .regex, "/d/" },
+        .{ .template_tail, "}w`" },
+        .{ .template_tail, "}v`" },
+        .{ .punct, ";" },
+        .{ .regex, "/e/g" },
+        .{ .eof, "" },
+    });
+}
+
+test "注释进流（line/block 两个 kind）但不进 prev" {
+    try expectAllTokens("a // line\n/* block */ b", &.{
+        .{ .identifier, "a" },
+        .{ .whitespace, " " },
+        .{ .line_comment, "// line" },
+        .{ .newline, "\n" },
+        .{ .block_comment, "/* block */" },
+        .{ .whitespace, " " },
         .{ .identifier, "b" },
         .{ .eof, "" },
     });
+    // 注释不影响 `/` 判别：prev 仍是注释前的 return → 正则
+    try expectTokens("return /* c */ /x/", &.{
+        .{ .identifier, "return" },
+        .{ .regex, "/x/" },
+        .{ .eof, "" },
+    });
 }
 
-test "保留注释" {
-    const src = "a /* xx */ b";
-    var result = try scan(testing.allocator, src, .{ .keep_comments = true });
-    defer result.deinit(testing.allocator);
-    try testing.expectEqual(TokenKind.comment, result.tokens[1].kind);
-    try testing.expectEqualStrings("/* xx */", result.tokens[1].slice(src));
+test "空白 run 拆 whitespace/newline" {
+    // 首个行终止符前是 whitespace，从它起到 run 末尾是 newline
+    try expectAllTokens("a \n b", &.{
+        .{ .identifier, "a" },
+        .{ .whitespace, " " },
+        .{ .newline, "\n " },
+        .{ .identifier, "b" },
+        .{ .eof, "" },
+    });
+    // run 以换行开始：整体一个 newline
+    try expectAllTokens("a\n\n  b", &.{
+        .{ .identifier, "a" },
+        .{ .newline, "\n\n  " },
+        .{ .identifier, "b" },
+        .{ .eof, "" },
+    });
+    // 无换行：整体一个 whitespace
+    try expectAllTokens("a \t b", &.{
+        .{ .identifier, "a" },
+        .{ .whitespace, " \t " },
+        .{ .identifier, "b" },
+        .{ .eof, "" },
+    });
+    // CRLF 在同一 run 内
+    try expectAllTokens("a\r\nb", &.{
+        .{ .identifier, "a" },
+        .{ .newline, "\r\n" },
+        .{ .identifier, "b" },
+        .{ .eof, "" },
+    });
+    // \v \f 是空白不是行终止符
+    try expectAllTokens("a\x0b\x0cb", &.{
+        .{ .identifier, "a" },
+        .{ .whitespace, "\x0b\x0c" },
+        .{ .identifier, "b" },
+        .{ .eof, "" },
+    });
+    // Unicode whitespace 与 ASCII 混排成同一 run
+    try expectAllTokens("a \xc2\xa0 b", &.{
+        .{ .identifier, "a" },
+        .{ .whitespace, " \xc2\xa0 " },
+        .{ .identifier, "b" },
+        .{ .eof, "" },
+    });
+    // U+2028 是行终止符
+    try expectAllTokens("a \xe2\x80\xa8b", &.{
+        .{ .identifier, "a" },
+        .{ .whitespace, " " },
+        .{ .newline, "\xe2\x80\xa8" },
+        .{ .identifier, "b" },
+        .{ .eof, "" },
+    });
+    // 文件开头与结尾的空白 run
+    try expectAllTokens("\na ", &.{
+        .{ .newline, "\n" },
+        .{ .identifier, "a" },
+        .{ .whitespace, " " },
+        .{ .eof, "" },
+    });
 }
 
 test "正则 vs 除法" {
     try expectTokens("var re = /a\\/b/g;", &.{
-        .{ .keyword, "var" },
+        .{ .identifier, "var" },
         .{ .identifier, "re" },
         .{ .punct, "=" },
         .{ .regex, "/a\\/b/g" },
@@ -984,13 +1230,20 @@ test "正则 vs 除法" {
         .{ .eof, "" },
     });
     try expectTokens("return /x/.test(s)", &.{
-        .{ .keyword, "return" },
+        .{ .identifier, "return" },
         .{ .regex, "/x/" },
         .{ .punct, "." },
         .{ .identifier, "test" },
         .{ .punct, "(" },
         .{ .identifier, "s" },
         .{ .punct, ")" },
+        .{ .eof, "" },
+    });
+    // 关键字判别挪进 `/` 路径：this 是值（除号），return 后是表达式（正则）
+    try expectTokens("this / x", &.{
+        .{ .identifier, "this" },
+        .{ .punct, "/" },
+        .{ .identifier, "x" },
         .{ .eof, "" },
     });
 }
@@ -1006,7 +1259,7 @@ test "正则 vs 除法（按真实代码先验取舍）" {
     });
     // 块尾开新语句是常态；对象除法在语义上无意义 → `}` 之后判正则
     try expectTokens("if (x) {} /y/.test(s)", &.{
-        .{ .keyword, "if" },
+        .{ .identifier, "if" },
         .{ .punct, "(" },
         .{ .identifier, "x" },
         .{ .punct, ")" },
@@ -1022,7 +1275,7 @@ test "正则 vs 除法（按真实代码先验取舍）" {
     });
     // `)` 之后保持除号：if (x) /re/.test(y) 这类无副作用的正则语句真实代码里几乎不出现
     try expectTokens("if (x) /y/.length", &.{
-        .{ .keyword, "if" },
+        .{ .identifier, "if" },
         .{ .punct, "(" },
         .{ .identifier, "x" },
         .{ .punct, ")" },
@@ -1033,18 +1286,28 @@ test "正则 vs 除法（按真实代码先验取舍）" {
         .{ .identifier, "length" },
         .{ .eof, "" },
     });
+    // 模板尾片是值 → 除号
+    try expectTokens("`a${x}` / y", &.{
+        .{ .template_head, "`a${" },
+        .{ .identifier, "x" },
+        .{ .template_tail, "}`" },
+        .{ .punct, "/" },
+        .{ .identifier, "y" },
+        .{ .eof, "" },
+    });
 }
 
 test "尾部空白与 eof" {
-    // 末行换行不是候选起点，eof 仍须 start == end == src.len（曾出过 end 落在
-    // 最后一个 token 末尾、slice 越界 panic 的 bug）
+    // 末行换行不是候选起点，eof 仍须 start == src.len（曾出过 end 落在
+    // 最后一个 lexeme 末尾、slice 越界 panic 的 bug）
     try expectTokens("a\n", &.{
         .{ .identifier, "a" },
         .{ .eof, "" },
     });
-    try expectTokens("return /x/  \n\n", &.{
-        .{ .keyword, "return" },
-        .{ .regex, "/x/" },
+    try expectAllTokens("a  \n", &.{
+        .{ .identifier, "a" },
+        .{ .whitespace, "  " },
+        .{ .newline, "\n" },
         .{ .eof, "" },
     });
 }
@@ -1111,9 +1374,9 @@ test "非 ASCII 按码点消费" {
 }
 
 test "unicode 标识符（ID_Start/ID_Continue）" {
-    // 中文、希腊字母是 ID_Start，整体一个 identifier token
+    // 中文、希腊字母是 ID_Start，整体一个 identifier lexeme
     try expectTokens("let 变量 = 1;", &.{
-        .{ .keyword, "let" },
+        .{ .identifier, "let" },
         .{ .identifier, "变量" },
         .{ .punct, "=" },
         .{ .number, "1" },
@@ -1121,7 +1384,7 @@ test "unicode 标识符（ID_Start/ID_Continue）" {
         .{ .eof, "" },
     });
     try expectTokens("let π = 3.14;", &.{
-        .{ .keyword, "let" },
+        .{ .identifier, "let" },
         .{ .identifier, "π" },
         .{ .punct, "=" },
         .{ .number, "3.14" },
@@ -1145,11 +1408,12 @@ test "unicode 标识符（ID_Start/ID_Continue）" {
         .{ .number, "1" },
         .{ .eof, "" },
     });
-    // unicode 私有名
+    // unicode 私有名：`#` 与标识符两个 lexeme
     try expectTokens("this.#π", &.{
-        .{ .keyword, "this" },
+        .{ .identifier, "this" },
         .{ .punct, "." },
-        .{ .private_name, "#π" },
+        .{ .punct, "#" },
+        .{ .identifier, "π" },
         .{ .eof, "" },
     });
 }
@@ -1194,7 +1458,7 @@ test "块注释跨块（各种对齐）" {
 
 test "行数统计" {
     const src = "a\n// c\nb\n`multi\nline`";
-    var result = try scan(testing.allocator, src, .{});
+    var result = try scan(testing.allocator, src);
     defer result.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 5), try result.lineCount());
 }
@@ -1207,11 +1471,27 @@ test "shebang" {
     });
 }
 
-test "私有名" {
+test "`#` 恒为单字节 punct（合法性留 parser）" {
     try expectTokens("this.#x", &.{
-        .{ .keyword, "this" },
+        .{ .identifier, "this" },
         .{ .punct, "." },
-        .{ .private_name, "#x" },
+        .{ .punct, "#" },
+        .{ .identifier, "x" },
+        .{ .eof, "" },
+    });
+    try expectTokens("#priv in obj;", &.{
+        .{ .punct, "#" },
+        .{ .identifier, "priv" },
+        .{ .identifier, "in" },
+        .{ .identifier, "obj" },
+        .{ .punct, ";" },
+        .{ .eof, "" },
+    });
+    // 裸 `#`（后不跟标识符起始）：原 1 字节 illegal，现统一 punct
+    try expectTokens("a # b", &.{
+        .{ .identifier, "a" },
+        .{ .punct, "#" },
+        .{ .identifier, "b" },
         .{ .eof, "" },
     });
 }
@@ -1279,21 +1559,24 @@ test "isKeyword 与关键字表交叉验证" {
     }
 }
 
-test "Unicode whitespace（U+00A0/U+3000/FEFF）是 trivia 不再 illegal" {
+test "Unicode whitespace（U+00A0/U+3000/FEFF）是 whitespace 不再 illegal" {
     // U+00A0（块内完整）
-    try expectTokens("a\xc2\xa0b", &.{
+    try expectAllTokens("a\xc2\xa0b", &.{
         .{ .identifier, "a" },
+        .{ .whitespace, "\xc2\xa0" },
         .{ .identifier, "b" },
         .{ .eof, "" },
     });
     // U+3000 全角空格
-    try expectTokens("x\xe3\x80\x80y", &.{
+    try expectAllTokens("x\xe3\x80\x80y", &.{
         .{ .identifier, "x" },
+        .{ .whitespace, "\xe3\x80\x80" },
         .{ .identifier, "y" },
         .{ .eof, "" },
     });
     // U+FEFF BOM 式空白
-    try expectTokens("\xef\xbb\xbfa=1", &.{
+    try expectAllTokens("\xef\xbb\xbfa=1", &.{
+        .{ .whitespace, "\xef\xbb\xbf" },
         .{ .identifier, "a" },
         .{ .punct, "=" },
         .{ .number, "1" },
@@ -1303,7 +1586,7 @@ test "Unicode whitespace（U+00A0/U+3000/FEFF）是 trivia 不再 illegal" {
 
 test "跨块的 Unicode whitespace 走兜底路径" {
     // 30 个 ident 字节 + `(`（punct 收尾）+ C2 恰在块尾、A0 在下一块首，
-    // 分类 pass 只修正块内完整码点，这个跨块码点由阶段 2 兜底为 trivia
+    // 分类 pass 只修正块内完整码点，这个跨块码点由阶段 2 兜底为 whitespace
     var buf: [64]u8 = undefined;
     @memset(buf[0..30], 'a');
     buf[30] = '(';
@@ -1311,50 +1594,43 @@ test "跨块的 Unicode whitespace 走兜底路径" {
     buf[32] = 0xA0;
     buf[33] = 'b';
     const src = buf[0..34];
-    try expectTokens(src, &.{
+    try expectAllTokens(src, &.{
         .{ .identifier, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
         .{ .punct, "(" },
+        .{ .whitespace, "\xc2\xa0" },
         .{ .identifier, "b" },
         .{ .eof, "" },
     });
 }
 
-test "keep_comments 模式下 Unicode whitespace token 可见" {
-    const src = "a\xc2\xa0b";
-    var result = try scan(testing.allocator, src, .{ .keep_comments = true });
-    defer result.deinit(testing.allocator);
-    try testing.expectEqual(TokenKind.whitespace, result.tokens[1].kind);
-    try testing.expectEqualStrings("\xc2\xa0", result.tokens[1].slice(src));
-}
-
 test "逻辑换行：U+2028/U+2029 与孤立 \\r" {
     // U+2028 是行终止符
     {
-        var result = try scan(testing.allocator, "a\xe2\x80\xa8b", .{});
+        var result = try scan(testing.allocator, "a\xe2\x80\xa8b");
         defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(usize, 2), try result.lineCount());
     }
     // U+2029 同样
     {
-        var result = try scan(testing.allocator, "a\xe2\x80\xa9b", .{});
+        var result = try scan(testing.allocator, "a\xe2\x80\xa9b");
         defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(usize, 2), try result.lineCount());
     }
     // 孤立 \r 计一次
     {
-        var result = try scan(testing.allocator, "a\rb", .{});
+        var result = try scan(testing.allocator, "a\rb");
         defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(usize, 2), try result.lineCount());
     }
     // CRLF 只计一次
     {
-        var result = try scan(testing.allocator, "a\r\nb", .{});
+        var result = try scan(testing.allocator, "a\r\nb");
         defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(usize, 2), try result.lineCount());
     }
 }
 
-test "OP 连接关系：多字节 punctuator token 流不受影响" {
+test "OP 连接关系：多字节 punctuator lexeme 流不受影响" {
     try expectTokens("a%=b;a==b;a<=b;a&&b;a**b;a??b;a|=b", &.{
         .{ .identifier, "a" }, .{ .punct, "%=" }, .{ .identifier, "b" }, .{ .punct, ";" },
         .{ .identifier, "a" }, .{ .punct, "==" }, .{ .identifier, "b" }, .{ .punct, ";" },
@@ -1381,23 +1657,29 @@ test "模板子表达式：嵌套模板与注释里的 } 不干扰平衡" {
     try expectTokens("x = `a${ `b}c` }d`;", &.{
         .{ .identifier, "x" },
         .{ .punct, "=" },
-        .{ .template, "`a${ `b}c` }d`" },
+        .{ .template_head, "`a${" },
+        .{ .no_substitution_template, "`b}c`" },
+        .{ .template_tail, "}d`" },
         .{ .punct, ";" },
         .{ .eof, "" },
     });
-    // 块注释里的 `}`（此前靠运气正确——注释里的反引号才会真正破坏）
+    // 块注释里的 `}`（注释是 trivia，不进花括号计数）
     try expectTokens("x = `a${ /* } ` */ 1 }d`;", &.{
         .{ .identifier, "x" },
         .{ .punct, "=" },
-        .{ .template, "`a${ /* } ` */ 1 }d`" },
+        .{ .template_head, "`a${" },
+        .{ .number, "1" },
+        .{ .template_tail, "}d`" },
         .{ .punct, ";" },
         .{ .eof, "" },
     });
-    // 行注释同理
+    // 行注释同理（吞到行尾，注释内的 `}` 与反引号都不见）
     try expectTokens("x = `a${ // }`\n1 }d`;", &.{
         .{ .identifier, "x" },
         .{ .punct, "=" },
-        .{ .template, "`a${ // }`\n1 }d`" },
+        .{ .template_head, "`a${" },
+        .{ .number, "1" },
+        .{ .template_tail, "}d`" },
         .{ .punct, ";" },
         .{ .eof, "" },
     });
@@ -1405,7 +1687,9 @@ test "模板子表达式：嵌套模板与注释里的 } 不干扰平衡" {
     try expectTokens("x = `a${ \"}\" }d`;", &.{
         .{ .identifier, "x" },
         .{ .punct, "=" },
-        .{ .template, "`a${ \"}\" }d`" },
+        .{ .template_head, "`a${" },
+        .{ .string, "\"}\"" },
+        .{ .template_tail, "}d`" },
         .{ .punct, ";" },
         .{ .eof, "" },
     });
@@ -1414,7 +1698,7 @@ test "模板子表达式：嵌套模板与注释里的 } 不干扰平衡" {
 test "行号索引 lineAt（逻辑换行：\\n、CRLF、孤立 \\r、U+2028）" {
     const src = "a\nb\r\nc\rd\u{2028}e";
     // 布局：a@0 \n@1 b@2 \r@3 \n@4 c@5 \r@6 d@7 U+2028@8..10 e@11
-    var result = try scan(testing.allocator, src, .{});
+    var result = try scan(testing.allocator, src);
     defer result.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 5), try result.lineCount());
     try testing.expectEqual(@as(usize, 5), try result.lines.lineCount());
@@ -1427,7 +1711,7 @@ test "行号索引 lineAt（逻辑换行：\\n、CRLF、孤立 \\r、U+2028）" 
     try testing.expectEqual(@as(usize, 1), try result.lines.lineAt(1));
     // 越界 offset 归到最后一行
     try testing.expectEqual(@as(usize, 5), try result.lines.lineAt(99));
-    // 与 token 流交叉验证
+    // 与 lexeme 流交叉验证
     for (result.tokens) |t| {
         try testing.expect(try result.lines.lineAt(t.start) <= try result.lineCount());
     }
@@ -1435,12 +1719,12 @@ test "行号索引 lineAt（逻辑换行：\\n、CRLF、孤立 \\r、U+2028）" 
 
 test "行号索引：空文件与单行" {
     {
-        var result = try scan(testing.allocator, "", .{});
+        var result = try scan(testing.allocator, "");
         defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(usize, 1), try result.lines.lineAt(0));
     }
     {
-        var result = try scan(testing.allocator, "let x = 1;", .{});
+        var result = try scan(testing.allocator, "let x = 1;");
         defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(usize, 1), try result.lineCount());
         for (result.tokens) |t| {
@@ -1452,7 +1736,7 @@ test "行号索引：空文件与单行" {
 test "\\uXXXX 转义标识符" {
     // 基本形式与后接 ASCII/中文
     try expectTokens("let \\u0041bc = 1;", &.{
-        .{ .keyword, "let" },
+        .{ .identifier, "let" },
         .{ .identifier, "\\u0041bc" },
         .{ .punct, "=" },
         .{ .number, "1" },
@@ -1461,7 +1745,7 @@ test "\\uXXXX 转义标识符" {
     });
     // 转义的 $ 和 _（ASCII 合法标识符字符）
     try expectTokens("let \\u0024\\u005F = 1;", &.{
-        .{ .keyword, "let" },
+        .{ .identifier, "let" },
         .{ .identifier, "\\u0024\\u005F" },
         .{ .punct, "=" },
         .{ .number, "1" },
@@ -1475,17 +1759,18 @@ test "\\uXXXX 转义标识符" {
         .{ .number, "1" },
         .{ .eof, "" },
     });
-    // 私有名转义（对齐 tsc：合并为 PrivateIdentifier）
+    // 私有名转义：`#` 与转义标识符两个 lexeme
     try expectTokens("this.#\\u0041;", &.{
-        .{ .keyword, "this" },
+        .{ .identifier, "this" },
         .{ .punct, "." },
-        .{ .private_name, "#\\u0041" },
+        .{ .punct, "#" },
+        .{ .identifier, "\\u0041" },
         .{ .punct, ";" },
         .{ .eof, "" },
     });
     // 坏转义：\ 消费 1 字节 illegal，u00ZZ 是普通标识符（对齐 tsc 边界）
     try expectTokens("let \\u00ZZ = 1;", &.{
-        .{ .keyword, "let" },
+        .{ .identifier, "let" },
         .{ .illegal, "\\" },
         .{ .identifier, "u00ZZ" },
         .{ .punct, "=" },
@@ -1494,9 +1779,9 @@ test "\\uXXXX 转义标识符" {
         .{ .eof, "" },
     });
     // \u{...} 形式不合并（对齐 tsc 纯 scanner）：\ 为 illegal，
-    // u、{...} 按普通 token
+    // u、{...} 按普通 lexeme
     try expectTokens("let \\u{41} = 1;", &.{
-        .{ .keyword, "let" },
+        .{ .identifier, "let" },
         .{ .illegal, "\\" },
         .{ .identifier, "u" },
         .{ .punct, "{" },

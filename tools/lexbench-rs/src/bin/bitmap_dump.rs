@@ -20,8 +20,12 @@ fn options_for(path: &str) -> LexOptions {
     o
 }
 
-/// 映射到 my-scanner 的粗类名（identifier/keyword/number/string/template/
+/// 映射到 my-scanner 的粗类名（identifier/number/string/模板四片/
 /// regex/punct/eof）；punct 之外未覆盖的类别打印原始名（JSX 类等）。
+/// 与 my-scanner lexeme.zig 的 LexemeKind 对齐：关键字不细分（一律
+/// identifier），模板拆 no_substitution/head/middle/tail 四片。
+/// private_name 保留原名（my-scanner 拆成 `#` + identifier 两个 lexeme，
+/// 由对拍脚本的吞噬同步对齐）。
 fn coarse(k: TokenKind) -> &'static str {
     if k == TokenKind::Eof {
         return "eof";
@@ -36,7 +40,7 @@ fn coarse(k: TokenKind) -> &'static str {
         return "private_name";
     }
     if k.is_keyword() {
-        return "keyword";
+        return "identifier";
     }
     if k.is_numeric() {
         return "number";
@@ -44,9 +48,17 @@ fn coarse(k: TokenKind) -> &'static str {
     if k.is_string() {
         return "string";
     }
-    if k.is_template_no_sub() || k.is_template_head() || k.is_template_middle() || k.is_template_tail()
-    {
-        return "template";
+    if k.is_template_no_sub() {
+        return "no_substitution_template";
+    }
+    if k.is_template_head() {
+        return "template_head";
+    }
+    if k.is_template_middle() {
+        return "template_middle";
+    }
+    if k.is_template_tail() {
+        return "template_tail";
     }
     if k.is_trivia() {
         // emit_comments=false 的显著流里不应出现；出现即对拍会抓到
