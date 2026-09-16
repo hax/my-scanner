@@ -71,11 +71,15 @@ summary + artifact，并归档到 **bench-reports 分支**
 GitHub Pages 源，图表页在线看： <https://johnhax.net/my-scanner/>
 （`.nojekyll` 静态直出；图表用 **ECharts** 渲染，
 `vendor/echarts.min.js` 由 tools/package.json 钉版、发布时从
-tools/node_modules 拷入）。页面顶部为最近一次 CI run 的吞吐
-**柱状对比**（每语料一组，实现与其同族参照相邻——同机同轮的绝对
-值可直接比较）；下方**趋势折线**以"vs yuku-main 倍数"为主口径——
-绝对吞吐跨 runner 代际不可比，同 run 内相对值始终有效，每条架构线
-一条独立曲线，随提交演化。另有"vs 同族参照"口径衡量各族自身成熟度：
+tools/node_modules 拷入）。页面顶部为比对者说明（yuku 基线版本溯源：
+sha 与上游 commit 日期由 `prepare-baselines.sh` 的 `.date` 标记经
+bench.zig → data.json 带入）与最近一次 CI run 的吞吐**柱状对比**
+（每语料一组，实现与其同族参照相邻、比照组同色系——同机同轮的绝对
+值可直接比较）；下方**趋势折线**以"vs yuku-0.10.1 倍数"为主口径——
+锚点是钉版快照、固定不漂，相对倍数跨 run、跨 runner 代际均可比
+（2026-09-16 自 yuku-main 切换，历史点由 data.json 的 best_ns 全量
+重算，序列无断档）；绝对吞吐（GB/s）仍仅同 run 内可比。另有
+"vs 同族参照"口径衡量各族自身成熟度：
 scalar 对 yuku-old、jump_vec 对 yuku-main（>1 即我方更快，two_phase
 无第三方参照），report.md 含同口径的分组几何平均表。
 

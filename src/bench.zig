@@ -55,6 +55,8 @@ const BaselineCache = struct {
     dirty: bool = false,
     old_sha: ?[]const u8,
     main_sha: ?[]const u8,
+    old_date: ?[]const u8 = null,
+    main_date: ?[]const u8 = null,
 };
 
 const cache_path = ".bench-deps/bench-cache.json";
@@ -75,6 +77,8 @@ pub fn main(init: std.process.Init) !void {
         .refresh = false,
         .old_sha = readBaselineSha(arena, init.io, ".bench-deps/yuku.sha"),
         .main_sha = readBaselineSha(arena, init.io, ".bench-deps/yuku-main.sha"),
+        .old_date = readBaselineSha(arena, init.io, ".bench-deps/yuku.date"),
+        .main_date = readBaselineSha(arena, init.io, ".bench-deps/yuku-main.date"),
     };
     var files: std.ArrayList([]const u8) = .empty;
     for (args[1..]) |arg| {
@@ -108,7 +112,7 @@ pub fn main(init: std.process.Init) !void {
     try out.flush();
 
     if (bc.dirty) try saveCache(arena, init.io, &bc.map);
-    if (json_path) |p| try writeJson(arena, init.io, p, runs.items);
+    if (json_path) |p| try writeJson(arena, init.io, p, runs.items, &bc);
 }
 
 fn benchFile(
@@ -238,13 +242,25 @@ fn benchFile(
 
 /// 把全部 run 写成 JSON（供 scripts/make-report.mjs 汇总；路径由 ASCII
 /// 语料名构成，无需转义）。
-fn writeJson(arena: std.mem.Allocator, io: Io, path: []const u8, runs: []const FileRun) !void {
+/// 单个基线的溯源 JSON:`{"sha":"..","date":".."}`(缺失字段省略,皆缺为 null)。
+fn baselineEntry(arena: std.mem.Allocator, sha: ?[]const u8, date: ?[]const u8) ![]const u8 {
+    if (sha == null and date == null) return "null";
+    const ap = std.fmt.allocPrint;
+    if (sha != null and date != null) return ap(arena, "{{\"sha\":\"{s}\",\"date\":\"{s}\"}}", .{ sha.?, date.? });
+    if (sha) |s| return ap(arena, "{{\"sha\":\"{s}\"}}", .{s});
+    return ap(arena, "{{\"date\":\"{s}\"}}", .{date.?});
+}
+
+fn writeJson(arena: std.mem.Allocator, io: Io, path: []const u8, runs: []const FileRun, bc: *const BaselineCache) !void {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(arena);
     const ap = std.fmt.allocPrint;
 
-    try buf.appendSlice(arena, "{\"runs\":[");
-    for (runs, 0..) |run, i| {
+    // 基线溯源(版本标记由 prepare-baselines.sh 在 clone 时写入;缺失为 null)
+    try buf.appendSlice(arena, try ap(arena, "{{\"baselines\":{{\"yuku_old\":{s},\"yuku_main\":{s}}},\"runs\":[", .{
+        try baselineEntry(arena, bc.old_sha, bc.old_date),
+        try baselineEntry(arena, bc.main_sha, bc.main_date),
+    }));    for (runs, 0..) |run, i| {
         if (i > 0) try buf.append(arena, ',');
         try buf.appendSlice(arena, try ap(arena, "{{\"file\":\"{s}\",\"bytes\":{d},\"results\":{{", .{ run.path, run.bytes }));
         for (run.results, 0..) |nr, j| {
@@ -266,8 +282,9 @@ fn writeJson(arena: std.mem.Allocator, io: Io, path: []const u8, runs: []const F
     try std.Io.Dir.cwd().rename(tmp, std.Io.Dir.cwd(), path, io);
 }
 
-/// 读取基线版本标记（prepare-baselines.sh 在 clone 时写入 <dir>.sha）；
-/// 缺失视为版本未知 → 该基线不走缓存（安全回退为每次都跑）。
+/// 读取基线标记文件（prepare-baselines.sh 在 clone 时写入 <dir>.sha 版本
+/// 标记与 <dir>.date 日期标记）；缺失视为未知 → 对应基线不走缓存（安全
+/// 回退为每次都跑）、溯源字段为 null。
 fn readBaselineSha(arena: std.mem.Allocator, io: Io, path: []const u8) ?[]const u8 {
     const s = std.Io.Dir.readFileAlloc(.cwd(), io, path, arena, .limited(64)) catch return null;
     const t = std.mem.trim(u8, s, " \n\r\t");

@@ -6,8 +6,9 @@
 #                            docs/benchmarks.md)
 #   .bench-deps/yuku-main  — yuku_main,跟踪上游 HEAD,上游移动才重 clone
 #
-# 版本标记:clone 时把 commit sha 写入 <dir>.sha,供 bench.zig 缓存键与
-# 更新探测用;标记缺失的存量目录视为未知版本,重 clone 一次补齐。
+# 版本标记:clone 时把 commit sha 写入 <dir>.sha、commit 日期写入
+# <dir>.date,供 bench.zig 缓存键/基线溯源(zig.json baselines)与更新
+# 探测用;标记缺失的存量目录视为未知版本,重 clone 一次补齐。
 # yuku-main 每次跑用 ls-remote 探测上游(best-effort,离线警告后沿用现有)。
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -26,6 +27,7 @@ clone_yuku() {
     git clone --quiet --depth 1 --branch "$ref" -c advice.detachedHead=false "$YUKU_REPO" "$dest"
   fi
   git -C "$dest" rev-parse HEAD > "$shafile"
+  git -C "$dest" log -1 --format=%cI > "${shafile%.sha}.date"
   rm -rf "$dest/.git"
 }
 

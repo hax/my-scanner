@@ -66,11 +66,13 @@ checker.ts 持平。**lib.dom.d.ts 上 yuku-main 反超**——注释密集语�
 
 项目已转为多架构变体并行演化（scalar / jump_vec / two_phase），每次
 push 到 main 由 CI 自动跑全变体差分 + 矩阵基准，报告归档到
-bench-reports 分支并累积趋势页（`index.html`，GitHub Pages 在线看：
-<https://johnhax.net/my-scanner/>）。趋势页以
-「vs yuku-main 倍数」为主口径——绝对吞吐跨 runner 代际不可比，同 run
-内相对值始终有效；「vs 同族参照」口径（scalar 对 yuku-old、jump_vec
-对 yuku-main）衡量各族自身成熟度。首批本地基线梯度与各层净贡献的拆解见
+bench-reports 分支并累积图表页（`index.html`，GitHub Pages 在线看：
+<https://johnhax.net/my-scanner/>）。趋势折线以
+「vs yuku-0.10.1 倍数」为主口径——锚点是钉版快照、固定不漂，相对
+倍数跨 run、跨 runner 代际均可比（2026-09-16 自 yuku-main 切换，
+历史点由 best_ns 全量重算，无断档）；「vs 同族参照」口径（scalar 对
+yuku-old、jump_vec 对 yuku-main）衡量各族
+自身成熟度。首批本地基线梯度与各层净贡献的拆解见
 [architecture.md](architecture.md) 的「总览」一节。
 
 ## 历史演进（two_phase 主线）
@@ -114,6 +116,13 @@ yuku_old 实为 yuku-main 的内容副本（差异仅 ~3% 的测量顺序偏差�
 自该日起 yuku_old 钉到 **v0.10.1 tag**（`3846715a`，向量化前，
 `prepare-baselines.sh` 固定 clone 该 tag，不再漂移）——趋势页 yuku_old
 线与 scalar 的「vs 同族参照」序列在此**断档跳变一次**：此前的值是
-scalar 对 main 副本，此后才是真·对 v0.10.1。yuku-main 锚点口径定义
-未变（仍跟踪上游 HEAD），不受影响。本地各快照（M2 表等）的 yuku-old
-内容经 md5 核对本就是 v0.10.1，本地历史数字同样不受影响。
+scalar 对 main 副本，此后才是真·对 v0.10.1。本地各快照（M2 表等）的
+yuku-old 内容经 md5 核对本就是 v0.10.1，本地历史数字同样不受影响。
+
+同日稍后，趋势页锚点自 yuku-main 切换为 **yuku-old（v0.10.1 钉版）**：
+yuku-main 跟踪上游 HEAD、本身会漂，不适合作锚；钉版锚点的相对倍数
+跨 run、跨 runner 代际均可比。update-index 一律由 data.json 的
+best_ns 重算 ratio（弃用旧 vs_anchor 字段），历史点同步换算、口径
+统一；唯钉版日之前的 yuku_old 实为 main 副本（见上节），各倍数序列
+在该日同有一次性语义跳变——与「vs 同族参照」断档同因同日。
+GB/s 与「vs 同族参照」口径定义不变。

@@ -28,7 +28,8 @@ const IMPL_META = {
 };
 const IMPL_ORDER = ["scalar", "jump_vec", "two_phase", "yuku_old", "yuku_main", "swc", "oxc"];
 const OWN = ["scalar", "jump_vec", "two_phase"]; // 自有架构(矩阵列)
-const ANCHOR = "yuku_main"; // 相对值锚点
+const ANCHOR = "yuku_old"; // 相对值锚点:钉版固定快照,跨 run 可比(yuku-main 跟踪上游会漂,不做锚)
+const ANCHOR_LABEL = "yuku-0.10.1";
 // 同族参照:自有实现 → 同架构族第三方对照(>1 即我方更快),衡量各族自身成熟度;
 // two_phase 无第三方参照
 const PEER = { scalar: "yuku_old", jump_vec: "yuku_main" };
@@ -69,9 +70,11 @@ const metaByPath = new Map(manifest.files.map((f, i) => [f.path, { ...f, order: 
 
 // 合并 zig + rust 的 runs(按 file 对齐;rust 缺失的文件不补)
 const files = new Map(); // file -> {bytes, results: Map}
+let baselines = null; // zig.json 的基线溯源(prepare-baselines 版本标记),透传给 data.json
 for (const path of [zigJsonPath, opt("--rs")]) {
   if (!path || !existsSync(path)) continue;
   const data = JSON.parse(readFileSync(path, "utf8"));
+  baselines ??= data.baselines ?? null;
   for (const run of data.runs) {
     let f = files.get(run.file);
     if (!f) { f = { bytes: run.bytes, results: new Map() }; files.set(run.file, f); }
@@ -106,7 +109,7 @@ fileRuns.sort((a, b) => a.order - b.order);
 // ---- data.json ----
 const dataJson = {
   sha, date: new Date().toISOString(), subject, repeats: Number(repeats) || null, runner,
-  channel, label: runLabel,
+  channel, label: runLabel, baselines,
   files: fileRuns.map(({ order, ...rest }) => rest),
 };
 writeFileSync(join(outDir, "data.json"), JSON.stringify(dataJson, null, 1) + "\n");
@@ -121,7 +124,11 @@ lines.push(`- 日期: ${dataJson.date}`);
 lines.push(`- 轮数: 每实现 ${repeats} 轮取最优;同进程、同文件、token 产出后丢弃`);
 lines.push(`- 环境: ${runner.os}${runner.cpu ? ` / ${runner.cpu}` : ""}${runner.zig ? ` / zig ${runner.zig}` : ""}`);
 lines.push(`- 通道: ${channel}${channel === "local" ? `(本机: ${runLabel};第三方基线可能来自本地缓存,与 CI 主线分机型分层)` : ""}`);
-lines.push(`- 相对值锚点: ${ANCHOR}(各实现/锚点,>1 即更快)`);
+lines.push(`- 相对值锚点: ${ANCHOR}(${ANCHOR_LABEL} 固定快照,跨 run 可比;各实现/锚点,>1 即更快)`);
+if (baselines) {
+  const fb = (b) => (b ? [b.sha?.slice(0, 10), b.date?.slice(0, 10)].filter(Boolean).join(" ") : null);
+  lines.push(`- 基线版本: yuku_old ${fb(baselines.yuku_old) ?? "?"} / yuku_main ${fb(baselines.yuku_main) ?? "?"}`);
+}
 lines.push(`- 同族参照: scalar vs yuku_old、jump_vec vs yuku_main(自有实现/同族第三方,>1 即我方更快;two_phase 无第三方参照)`);
 if (opt("--rs")) lines.push(`- swc/oxc: lexbench-rs 决策注入驱动(同一 my-scanner 正则决策集 + 模板花括号栈重扫,与 yuku 对拍同口径),独立进程`);
 lines.push("");
@@ -148,7 +155,7 @@ lines.push("");
 for (const fr of fileRuns) {
   lines.push(`## ${fr.file} (${(fr.bytes / 1e6).toFixed(2)} MB)`);
   lines.push("");
-  lines.push("| 实现 | best ms | GB/s | Mtok/s | tokens | vs yuku-main | vs 同族参照 |");
+  lines.push(`| 实现 | best ms | GB/s | Mtok/s | tokens | vs ${ANCHOR_LABEL} | vs 同族参照 |`);
   lines.push("| --- | ---: | ---: | ---: | ---: | ---: | ---: |");
   for (const name of IMPL_ORDER) {
     const r = fr.results[name];
@@ -159,7 +166,7 @@ for (const fr of fileRuns) {
 }
 
 // 变体 × 语料矩阵:一眼看清哪个架构在哪类语料上赢(混合策略的证据底座)
-lines.push("## 变体 × 语料(vs yuku-main;每行最快加粗)");
+lines.push(`## 变体 × 语料(vs ${ANCHOR_LABEL};每行最快加粗)`);
 lines.push("");
 lines.push(`| 语料 | 谱系 | ${OWN.map((x) => `\`${x}\``).join(" | ")} |`);
 lines.push("| --- | --- | ---: | ---: | ---: |");
@@ -178,7 +185,7 @@ lines.push("");
 
 // 分组几何平均(vs 锚点)——真实/构造分开,防止构造语料稀释真实结论;
 // 全体一行保持与旧报告口径连续
-lines.push("## 几何平均(vs yuku-main)");
+lines.push(`## 几何平均(vs ${ANCHOR_LABEL})`);
 lines.push("");
 const geoImpls = IMPL_ORDER.filter((name) => fileRuns.some((fr) => fr.results[name]?.vs_anchor != null));
 lines.push(`| 范围 | ${geoImpls.map((x) => `\`${x}\``).join(" | ")} |`);
