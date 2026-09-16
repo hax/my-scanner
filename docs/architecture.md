@@ -1,126 +1,11 @@
 # my-scanner 架构总览
 
-本文回答四个问题：并行演化的各架构变体长什么样、two_phase 为什么
-长这样（决策史）、两阶段/单阶段的本质 trade-off（含第三形态设想）、
-以及多架构并行演化与 CI 对比的机制。性能数字见 bench-reports
-分支趋势页；实验细节见各专题文档。
+本文先**总览**多架构并行演化的机制与当前格局，再**分述**各架构的
+构造与决策史，最后**横向对比**两阶段/单阶段的本质 trade-off（含
+第三形态设想）。性能数字见 bench-reports 分支趋势页；实验细节见
+各专题文档。
 
-## two_phase：两阶段
-
-本节详述 two_phase 变体的构造；scalar / jump_vec 的对照、基线与
-成熟化记录见下文「架构矩阵」一节。
-
-```
-src ──► 阶段 1 classifyTokenStarts（纯 SIMD，无分支）──► masks[]（每 32B 块一个 u32）
-        ws/ident 平面 → ID 连接 → 候选起点位图                + line_breaks[]（换行位图）
-        + Unicode whitespace 修正（19 码点）                     + newlines（行数）
-        + 逻辑换行（\n、孤立 \r、U+2028/29、CRLF 单计）
-
-masks[] ──► 阶段 2 consume（标量循环 + SIMD 贪心）──► tokens[]
-            块内 m &= m-1 迭代候选位
-            每个起点：dispatch_table[首字节]（comptime 256 项类别码表）
-              → punct_single 快路径（{}();,:~@ 直接构造，零调用）
-              → scanIdentifier / scanNumber / scanPunct …（贪心到 token 终点）
-            整块被上一 token 覆盖 → 块级 continue
-            token 终点即下一次迭代位置（假候选被 pos 越过）
-```
-
-关键数据结构：
-
-- `Token { kind, start: u32, end: u32 }`（12B，无行号——行号按需查 LineIndex，
-  避免写带宽翻倍）
-- `LineIndex { breaks: []u32, prefix: []u32 }`：O(1) `lineAt(offset)`，
-  由换行位图 + 块前缀和构成
-- 阶段 2 的全部状态（pos/prev）是循环局部变量——扫描函数全是纯函数，
-  无隐藏 store/load 链（数据流化改造，+5-9%）
-
-## 热路径向量化手法一览
-
-所有向量化集中在 [src/simd.zig](../src/simd.zig)：用 Zig 的 `@Vector`
-表达，由编译器按目标平台自动降到 AVX2 / NEON，不写 intrinsics。
-阶段 1 的核心是纯位运算推导候选起点掩码：
-
-```
-candidate[i] = !whitespace[i] & !(ident_part[i] & ident_part[i-1])
-```
-
-即"非空白，且不是标识符的中间字节"，跨块用 carry 位衔接。字符串/
-注释/正则内部的字节同样命中候选（阶段 1 不做范围剔除），由阶段 2
-的 pos 跳过兜底（见上图）。多个分类平面可经"矩阵旋转"（`packClasses`）
-打包成每字节一个 u8 类别码（`Class`），后续平面继续叠位。
-
-| 环节 | 手法 |
-| --- | --- |
-| 跳空白 | ~~逐 token 重扫~~ 两阶段：候选位图 + `@ctz` 一步到下一个 token 起点 |
-| 标识符 | 范围比较合成 `[A-Za-z0-9_$]` 掩码，`@ctz(~mask)` 直接得到结尾偏移 |
-| 字符串 / 模板 | 掩码定位 `引号 \| 反斜杠 \| 换行`，转义对直接跳 2 字节；模板另加 `$`（`${`）|
-| 块注释 | `slash_mask & (star_mask << 1)` 一条位逻辑同时探测 32 个位置的 `*/`，跨块用 carry 位衔接 |
-| 行数统计 | 阶段 1 的 `@popCount(newline_mask)` 一趟算完 |
-
-数字、正则、punctuator 目前是标量：数字 token 平均只有几字节，
-punctuator 是 O(1) 的首字符前缀树，先求正确，等 profile 说话再决定
-是否向量化。
-
-## 为什么长这样：决策史（带数字的演进）
-
-| 阶段 | typescript.js | 关键决策 |
-| --- | --- | --- |
-| 单阶段起步 | 34.6 Mtok/s | 平面合成 + 逐 token 前进 |
-| 两阶段分类 | 56.6 | classify pass 产候选位图，阶段 2 ctz 迭代 |
-| 块内迭代 + 快路径 | 75.8 | 块内 m&=m-1、ident 标量快路径、关键字两级判别 |
-| 数据流化 + 冷路径 | 80.1 | 纯函数扫描、寄存器驻留状态、@branchHint |
-| 类别码分发 | 96.5 | 256 项 dispatch 表 + 单字节 punct 零调用快路径 |
-| boundary v2 语义 | 84.2 | ID 连接 + Unicode ws/逻辑换行（-13% 换正确性） |
-| 整块跳过 | ~82* | 长 token 覆盖的块直接 continue |
-
-（*不同语料差异大：minified 端 ~84-96，注释密集端 ~65-83；
-当前对 yuku-main：minified +6~9%，注释密集 -8~-29%）
-
-被数据否决的分支（详见 roadmap 各条目）：阶段融合（-3~12%）、
-block_size=16（-9%）、完整四位连接 OP/ESC（-25~30%）、whitespace 查表
-（JS 空白连续区间，范围比较已最优）、单字节 punct 批量块（纯块率仅
-4-7%）、跳跃驱动分类（零净收益，见专题文档）。
-
-## 两阶段 vs 单阶段：本质 trade-off
-
-**单阶段**（jump_vec / yuku 的形态）：一条直线走到底，每产一个 token 完成
-"发现起点 → 扫到终点"。关键特性是**每个字节只被触碰一次**；上下文天然
-完整（正则/除号歧义、字符串范围都由位置决定）。代价是每前进一步都要
-做决定——minified 代码每 ~7 字节一个 token，逐字节决策成本被放大。
-
-**两阶段**（two_phase 的形态）：先用一趟无分支 SIMD 扫描画"地图"（哪些位置
-可能是 token 起点），再按图行军——只在起点降落，token 中间和空白完全
-跳过。代价有三：字节读两遍、位图数组的写读、阶段 1 无上下文产生的
-假候选（字符串/注释内部字节也是候选，靠阶段 2 的 pos 跳过兜底）。
-
-一句话：**两阶段用"多读一遍 + 一张位图"的固定成本，换"跳过所有
-非决策点"的收益；token 越密越划算，token 越稀越亏**。
-
-- minified 端（typescript.js，137 tok/KB）：+6~9%
-- 注释密集端（lib.dom.d.ts，62 tok/KB；line-comments.js）：cls 占总时间
-  21-31%，而单阶段没有这一趟 → -8~29%
-
-两次试图治"注释密集端"的实验失败于同一根因：
-
-1. **阶段融合**（classify+consume 逐块交织、消灭位图数组）：-3~12%。
-   两趟分开时阶段 1 是无依赖的向量流水线、位图驻留 L1；交织后 SIMD
-   与标量互相打断。
-2. **跳跃前移**（字符串/注释终点判定进阶段 1，见
-   [跳跃驱动实验](jump-driven-classify-experiment.md)）：正确性做成
-   （7 语料差分全绿），但 line-comments 账本显示 cls +0.27ms / 阶段 2
-   -0.27ms——**工作等量搬迁，零净收益**。yuku 跳跃便宜的本质不是
-   跳跃在哪个阶段做，而是单阶段字节只触一次。
-
-## 第三形态设想（未实施）
-
-两阶段的真正成本不是"两趟"本身，而是**趟间物化**（全文件 masks 数组）
-与**重叠触碰**（跳跃区间被块循环和跳跃函数都摸一遍）。设想：
-**单阶段驱动 + 按块候选缓冲**——每个 32 字节块先在寄存器里产出候选
-掩码、立即就地消费、然后丢弃，不落盘全文件数组。字节只读一遍
-（单阶段的优点），起点跳跃靠 SIMD 位图（两阶段的优点）。这是下一个
-架构级候选，需从头设计块间的 carry 与上下文传递。
-
-## 架构矩阵：并行演化机制
+## 总览：多架构并行演化
 
 历史教训：被局部优化数据否决的方向，可能只是那条线还没优化到位。
 为此架构不再"一条主线改到底"，而是**多架构共存于一个代码库，各自
@@ -141,34 +26,24 @@ block_size=16（-9%）、完整四位连接 OP/ESC（-25~30%）、whitespace 查
 每个变体跑 tsc 差分）；各架构独立优化不许互相拉扯；`jump_vec` 是
 第三形态的直接前驱（驱动一致，只差块内候选缓冲）。
 
-首批本地基线（M2 / 8 轮快测，几何平均 vs yuku-main，正式数字以
-CI 25 轮为准）：scalar 0.59x → jump_vec 0.72x → two_phase 0.82x。
-梯度分离了各层的净贡献：跳跃向量化 +22%，两阶段化再 +14%。
-cn-dense 上 jump_vec ≈ two_phase——中文密集语料两阶段无优势，
-与"token 越稀两阶段越亏"的判断一致。
+### 当前格局
 
 jump_vec 成熟化后（2026-09-16，M3 Pro / CI 口径 25 轮取最优，
 几何平均 vs yuku-main）：scalar 0.71x、two_phase 0.88x、
 **jump_vec 0.99x（真实语料 1.00x 追平 yuku-main）**——9/10 语料
-成为矩阵最快：minified 端 typescript.min.js 1.06x，CJK 端
+成为矩阵最快，唯一例外是 typescript.js（two_phase 1.03x 对
+1.02x 微胜）：minified 端 typescript.min.js 1.06x，CJK 端
 cn-dense 1.14x / hanzi-chai 1.09x，注释密集端 lib.dom 0.80x→0.93x、
 line-comments 0.65x→0.92x 结构性收敛（cls pass 白工被整端消去）。
 仍落后的 strings 0.86x 与 react 0.90x：换行 pass（行号口径成本）
-在跳跃/ token 密集语料上占 jump_vec 总时间 20%+——exp 分支的
+在跳跃/token 密集语料上占 jump_vec 总时间 20%+——exp 分支的
 惰性 LineIndex（扫描期零行号成本）口径下同配置全 7 语料
 1.07-1.26x 反超 yuku-main，口径取舍留作提案待 hax 决策。
-实验弧（v1/E1-E8，含 E3 否决）见
-[类别码纪要](class-code-and-simd-lookup.md) 的单阶段一节。
 
-单阶段变体的行号口径：早期实现是跳跃区间产 token 后逐 span 补一趟
-标量逻辑换行计数；jump_vec 成熟化（2026-09-16，见
-[类别码纪要](class-code-and-simd-lookup.md) 的单阶段一节）后改为
-`simd.classifyLineBreaks` 独立换行 pass（~4 GB/s 的裁剪版分类，
-语义与 classify 位图逐条对齐：`\n`、孤立 `\r`、CRLF 单计、
-U+2028/29）——集中式 SIMD pass 的 0.25 cycles/byte 远低于逐 span
-增量标记的 per-span 调用开销（E3 实验，react -18%/strings -30%
-否决）。两种方案都计入 scanInto 计时（yuku 在 advance 循环里逐字符
-判断，殊途同归）。
+更早的首批基线（2026-09 初，M2 / 8 轮快测）：scalar 0.59x →
+jump_vec 0.72x → two_phase 0.82x，梯度分离了各层净贡献（跳跃
+向量化 +22%，两阶段化再 +14%）——此为 jump_vec 未成熟时的快照，
+层级关系已被成熟化重排（见上），引用时注意区分时期。
 
 ## CI：每次 push 自动对比 + 趋势
 
@@ -194,6 +69,170 @@ summary + artifact，并归档到 **bench-reports 分支**
 `scripts/update-index.mjs` 重建 `index.html` 趋势页）。趋势页以
 "vs yuku-main 倍数"为主口径——绝对吞吐跨 runner 代际不可比，
 同 run 内相对值始终有效，每条架构线一条独立曲线，随提交演化。
+
+## two_phase：两阶段
+
+### 构造
+
+```
+src ──► 阶段 1 classifyTokenStarts（纯 SIMD，无分支）──► masks[]（每 32B 块一个 u32）
+        ws/ident 平面 → ID 连接 → 候选起点位图                + line_breaks[]（换行位图）
+        + Unicode whitespace 修正（19 码点）                     + newlines（行数）
+        + 逻辑换行（\n、孤立 \r、U+2028/29、CRLF 单计）
+
+masks[] ──► 阶段 2 consume（标量循环 + SIMD 贪心）──► tokens[]
+            块内 m &= m-1 迭代候选位
+            每个起点：dispatch_table[首字节]（comptime 256 项类别码表）
+              → punct_single 快路径（{}();,:~@ 直接构造，零调用）
+              → scanIdentifier / scanNumber / scanPunct …（贪心到 token 终点）
+            整块被上一 token 覆盖 → 块级 continue
+            token 终点即下一次迭代位置（假候选被 pos 越过）
+```
+
+关键数据结构：
+
+- `Token { kind, start: u32, end: u32 }`（12B，无行号——行号按需查 LineIndex，
+  避免写带宽翻倍）
+- `LineIndex { breaks: []u32, prefix: []u32 }`：O(1) `lineAt(offset)`，
+  由换行位图 + 块前缀和构成
+- 阶段 2 的全部状态（pos/prev）是循环局部变量——扫描函数全是纯函数，
+  无隐藏 store/load 链（数据流化改造，+5-9%）
+
+### 热路径向量化手法
+
+所有向量化集中在 [src/simd.zig](../src/simd.zig)（共享层，jump_vec 的
+长跳跃复用同一原语集）：用 Zig 的 `@Vector` 表达，由编译器按目标
+平台自动降到 AVX2 / NEON，不写 intrinsics。阶段 1 的核心是纯位运算
+推导候选起点掩码：
+
+```
+candidate[i] = !whitespace[i] & !(ident_part[i] & ident_part[i-1])
+```
+
+即"非空白，且不是标识符的中间字节"，跨块用 carry 位衔接。字符串/
+注释/正则内部的字节同样命中候选（阶段 1 不做范围剔除），由阶段 2
+的 pos 跳过兜底（见构造图）。多个分类平面可经"矩阵旋转"
+（`packClasses`）打包成每字节一个 u8 类别码（`Class`），后续平面
+继续叠位。
+
+| 环节 | 手法 |
+| --- | --- |
+| 跳空白 | ~~逐 token 重扫~~ 候选位图 + `@ctz` 一步到下一个 token 起点 |
+| 标识符 | 范围比较合成 `[A-Za-z0-9_$]` 掩码，`@ctz(~mask)` 直接得到结尾偏移 |
+| 字符串 / 模板 | 掩码定位 `引号 \| 反斜杠 \| 换行`，转义对直接跳 2 字节；模板另加 `$`（`${`）|
+| 块注释 | `slash_mask & (star_mask << 1)` 一条位逻辑同时探测 32 个位置的 `*/`，跨块用 carry 位衔接 |
+| 行数统计 | 阶段 1 的 `@popCount(newline_mask)` 一趟算完 |
+
+数字、正则、punctuator 目前是标量：数字 token 平均只有几字节，
+punctuator 是 O(1) 的首字符前缀树，先求正确，等 profile 说话再决定
+是否向量化。
+
+### 决策史（带数字的演进）
+
+| 阶段 | typescript.js | 关键决策 |
+| --- | --- | --- |
+| 单阶段起步 | 34.6 Mtok/s | 平面合成 + 逐 token 前进 |
+| 两阶段分类 | 56.6 | classify pass 产候选位图，阶段 2 ctz 迭代 |
+| 块内迭代 + 快路径 | 75.8 | 块内 m&=m-1、ident 标量快路径、关键字两级判别 |
+| 数据流化 + 冷路径 | 80.1 | 纯函数扫描、寄存器驻留状态、@branchHint |
+| 类别码分发 | 96.5 | 256 项 dispatch 表 + 单字节 punct 零调用快路径 |
+| boundary v2 语义 | 84.2 | ID 连接 + Unicode ws/逻辑换行（-13% 换正确性） |
+| 整块跳过 | ~82* | 长 token 覆盖的块直接 continue |
+
+（*不同语料差异大：minified 端 ~84-96，注释密集端 ~65-83；当时对
+yuku-main：minified +6~9%，注释密集 -8~-29%——jump_vec 成熟化前
+的对比。）
+
+被数据否决的分支（详见 roadmap 各条目）：阶段融合（-3~12%）、
+block_size=16（-9%）、完整四位连接 OP/ESC（-25~30%）、whitespace 查表
+（JS 空白连续区间，范围比较已最优）、单字节 punct 批量块（纯块率仅
+4-7%）、跳跃驱动分类（零净收益，见专题文档）。
+
+## jump_vec：单阶段 + SIMD 长跳跃
+
+与 scalar 同为 pos 循环驱动的单阶段，差别在跳跃全部走 SIMD 原语
+（复用共享 simd.zig）。2026-09-16 成熟化四件套：
+
+- dispatch 表空白位一次表查 + 空白 run 短展开、长块扫（SIMD 跳空白）；
+- 注释 trivia 快跳：行/块注释不构造 token 直接跳过；
+- token 容量按 src.len/8 预留，消除 append 扩容；
+- isKeyword 完美哈希一次探查（连带共享层 unicode ID 两级位图，
+  cn-dense +33%）。
+
+成熟化验证了「SIMD 预分类的收益只在跳跃」的假设——**一半成立**：
+省掉候选位图后还须压掉逐 token 常数才兑现（v1 曾因 ctz 迭代的
+OoO 重叠劣势慢 10-23%）。实验弧（v1/E1-E8，含 E3 增量行标记否决）
+全记录见 [类别码纪要](class-code-and-simd-lookup.md) 的单阶段一节。
+
+### 行号口径
+
+早期实现是跳跃区间产 token 后逐 span 补一趟标量逻辑换行计数；
+成熟化后改为 `simd.classifyLineBreaks` 独立换行 pass（~4 GB/s 的
+裁剪版分类，语义与 classify 位图逐条对齐：`\n`、孤立 `\r`、CRLF
+单计、U+2028/29）——集中式 SIMD pass 的 0.25 cycles/byte 远低于
+逐 span 增量标记的 per-span 调用开销（E3 实验，react -18%/
+strings -30% 否决）。两种方案都计入 scanInto 计时（yuku 在 advance
+循环里逐字符判断，殊途同归）。
+
+## scalar：全标量基线
+
+pos 循环逐字节决策、跳跃也纯标量的单阶段。定位是基线而非竞品：
+与 yuku-old（0.10.1，yuku 向量化前快照）同形态对拍，隔离「架构」
+与「实现」变量；同时充当 SIMD 收益的标量参照。自身不做架构级
+优化投入，语义层修复经共享层自然生效。
+
+## 横向权衡：两阶段 vs 单阶段
+
+**单阶段**（jump_vec / yuku 的形态）：一条直线走到底，每产一个
+token 完成"发现起点 → 扫到终点"。关键特性是**每个字节只被触碰
+一次**；上下文天然完整（正则/除号歧义、字符串范围都由位置决定）。
+代价是每前进一步都要做决定——minified 代码每 ~7 字节一个 token，
+逐字节决策成本被放大。
+
+**两阶段**（two_phase 的形态）：先用一趟无分支 SIMD 扫描画"地图"
+（哪些位置可能是 token 起点），再按图行军——只在起点降落，token
+中间和空白完全跳过。代价有三：字节读两遍、位图数组的写读、
+阶段 1 无上下文产生的假候选（字符串/注释内部字节也是候选，靠
+阶段 2 的 pos 跳过兜底）。
+
+机制账本不变：**两阶段用"多读一遍 + 一张位图"的固定成本，换
+"跳过所有非决策点"的收益**；但跨架构的胜负读数随两条线各自的
+优化完成度漂移：
+
+- jump_vec 未成熟时（two_phase 对 yuku-main）：minified 端 +6~9%
+  （typescript.js，137 tok/KB），注释密集端 cls 占总时间 21-31%
+  → -8~29%，由此得出过"token 越密两阶段越划算"的判断；
+- jump_vec 成熟化后（2026-09-16）：两阶段仅剩 typescript.js 一线
+  微胜，9/10 语料由 jump_vec 领跑——"越密越划算"未守住，
+  "越稀越亏"依旧（cls 白工被单阶段整端消去）。
+
+**教训与「总览」一节同源：跨架构的胜负读数只是两条线当下优化
+完成度的快照，不是架构的终局判定。**两阶段线尚未兑现的候选优化
+（SoA 输出、token 簇融合、免验证阶段 2）与按文件特征选架构的
+混合策略，见 [roadmap](roadmap.md)。
+
+### 注释密集端的两次失败实验（two_phase）
+
+两次试图治"注释密集端"的实验失败于同一根因：
+
+1. **阶段融合**（classify+consume 逐块交织、消灭位图数组）：-3~12%。
+   两趟分开时阶段 1 是无依赖的向量流水线、位图驻留 L1；交织后 SIMD
+   与标量互相打断。
+2. **跳跃前移**（字符串/注释终点判定进阶段 1，见
+   [跳跃驱动实验](jump-driven-classify-experiment.md)）：正确性做成
+   （7 语料差分全绿），但 line-comments 账本显示 cls +0.27ms / 阶段 2
+   -0.27ms——**工作等量搬迁，零净收益**。yuku 跳跃便宜的本质不是
+   跳跃在哪个阶段做，而是单阶段字节只触一次——jump_vec 成熟化
+   从正面证实了这一点。
+
+### 第三形态设想（未实施）
+
+两阶段的真正成本不是"两趟"本身，而是**趟间物化**（全文件 masks 数组）
+与**重叠触碰**（跳跃区间被块循环和跳跃函数都摸一遍）。设想：
+**单阶段驱动 + 按块候选缓冲**——每个 32 字节块先在寄存器里产出候选
+掩码、立即就地消费、然后丢弃，不落盘全文件数组。字节只读一遍
+（单阶段的优点），起点跳跃靠 SIMD 位图（两阶段的优点）。这是下一个
+架构级候选，需从头设计块间的 carry 与上下文传递。
 
 ## TODO（接入 swc/oxc 的前置条件）
 

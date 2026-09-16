@@ -45,7 +45,7 @@ yuku 主干的向量化覆盖四处：`findAnyPos`（@Vector 16/8 字节找命�
 lib.dom.d.ts +44%、react.js +13%，minified 的 typescript.js +3%、
 checker.ts 持平。**lib.dom.d.ts 上 yuku-main 反超**——注释密集语料是
 当时的明确短板，后续「整块跳过」优化已部分收敛（见 roadmap），剩余
-差距的结构性分析见 architecture.md 的语料谱系一节。
+差距的结构性分析见 architecture.md 的「横向权衡」一节。
 
 ## 架构矩阵与 CI
 
@@ -54,7 +54,7 @@ push 到 main 由 CI 自动跑全变体差分 + 矩阵基准，报告归档到
 bench-reports 分支并累积趋势页（`index.html`）。趋势页以
 「vs yuku-main 倍数」为主口径——绝对吞吐跨 runner 代际不可比，同 run
 内相对值始终有效。首批本地基线梯度与各层净贡献的拆解见
-[architecture.md](architecture.md) 的「架构矩阵」一节。
+[architecture.md](architecture.md) 的「总览」一节。
 
 ## 历史演进（two_phase 主线）
 
