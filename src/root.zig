@@ -24,7 +24,7 @@ pub const Variant = enum {
         allocator: std.mem.Allocator,
         src: []const u8,
         options: Options,
-    ) !usize {
+    ) !void {
         return switch (self) {
             .two_phase => scanner.scanInto(tokens, allocator, src, options),
             .scalar => variants.scalar.scanInto(tokens, allocator, src, options),

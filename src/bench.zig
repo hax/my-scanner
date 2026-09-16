@@ -111,7 +111,7 @@ fn benchFile(
         var count: usize = 0;
         for (0..repeats) |_| {
             const t0 = Io.Timestamp.now(io, .awake);
-            _ = try impl.variant.scanInto(&tokens, arena, src, .{});
+            try impl.variant.scanInto(&tokens, arena, src, .{});
             const ns = t0.durationTo(Io.Timestamp.now(io, .awake)).nanoseconds;
             best = @min(best, ns);
             count = tokens.items.len;

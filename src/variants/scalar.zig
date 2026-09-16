@@ -230,28 +230,24 @@ pub fn scan(allocator: std.mem.Allocator, src: []const u8, options: Options) !Re
     std.debug.assert(src.len <= std.math.maxInt(u32));
     var tokens: std.ArrayList(Token) = .empty;
     errdefer tokens.deinit(allocator);
-    const line_count = try scanInto(&tokens, allocator, src, options);
-    const lines = try common.buildLineIndex(allocator, src);
-    errdefer allocator.free(lines.breaks);
-    errdefer allocator.free(lines.prefix);
+    try scanInto(&tokens, allocator, src, options);
     return .{
         .tokens = try tokens.toOwnedSlice(allocator),
-        .line_count = line_count,
-        .lines = lines,
+        // 行索引留空：首次查询时由 LineIndex 跑 classifyLineBreaks 物化
+        .lines = .{ .src = src, .allocator = allocator },
     };
 }
 
 /// scan 的复用缓冲版本（与两阶段 scanInto 同签名，bench 同口径驱动）。
-/// 返回逻辑行数。
+/// 不产出任何行号信息（行索引惰性，纯 token 化路径零行跟踪成本）。
 pub fn scanInto(
     tokens: *std.ArrayList(Token),
     allocator: std.mem.Allocator,
     src: []const u8,
     options: Options,
-) !usize {
+) !void {
     var pos: usize = 0;
     var prev: ?Token = null; // 上一个非注释 token，供 `/` 的正则/除号判别
-    var newlines: usize = 0;
 
     if (src.len >= 2 and src[0] == '#' and src[1] == '!') {
         const t = scanner.scanShebang(src);
@@ -261,16 +257,11 @@ pub fn scanInto(
     }
 
     while (true) {
-        const ws = common.skipWhitespace(src, pos);
-        pos = ws.pos;
-        newlines += ws.newlines;
+        pos = common.skipWhitespace(src, pos);
         if (pos >= src.len) break;
 
         const tok = tokenAtScalar(src, pos, prev);
         pos = tok.end;
-        if (common.countsNewlines(tok.kind)) {
-            newlines += common.countLogicalNewlines(src[tok.start..tok.end]);
-        }
         if (tok.kind == .comment or tok.kind == .whitespace) {
             if (options.keep_comments) try tokens.append(allocator, tok);
             continue;
@@ -279,7 +270,6 @@ pub fn scanInto(
         try tokens.append(allocator, tok);
     }
     try tokens.append(allocator, .{ .kind = .eof, .start = @intCast(src.len), .end = @intCast(src.len) });
-    return newlines + 1;
 }
 
 // -- 测试：与两阶段交叉验证 ---------------------------------------------------
@@ -287,23 +277,20 @@ pub fn scanInto(
 fn crossCheck(src: []const u8) !void {
     var a = try scanner.scan(std.testing.allocator, src, .{});
     defer a.deinit(std.testing.allocator);
-    var mine: std.ArrayList(Token) = .empty;
+    var mine = try scan(std.testing.allocator, src, .{});
     defer mine.deinit(std.testing.allocator);
-    _ = try scanInto(&mine, std.testing.allocator, src, .{});
-    try std.testing.expectEqual(a.line_count, (try countLines(src)));
-    if (mine.items.len != a.tokens.len) {
-        std.debug.print("token 数不一致：两阶段 {d}，scalar {d}\n", .{ a.tokens.len, mine.items.len });
+    // 行号一致：两阶段预填位图 vs scalar 惰性物化，语义必须相同
+    try std.testing.expectEqual(try a.lineCount(), try mine.lineCount());
+    if (mine.tokens.len != a.tokens.len) {
+        std.debug.print("token 数不一致：两阶段 {d}，scalar {d}\n", .{ a.tokens.len, mine.tokens.len });
         return error.TestTokenCountMismatch;
     }
-    for (a.tokens, mine.items) |x, y| {
+    for (a.tokens, mine.tokens) |x, y| {
         try std.testing.expectEqualDeep(x, y);
     }
-}
-
-fn countLines(src: []const u8) !usize {
-    var mine: std.ArrayList(Token) = .empty;
-    defer mine.deinit(std.testing.allocator);
-    return scanInto(&mine, std.testing.allocator, src, .{});
+    for (a.tokens) |t| {
+        try std.testing.expectEqual(try a.lines.lineAt(t.start), try mine.lines.lineAt(t.start));
+    }
 }
 
 test "scalar 变体与两阶段交叉验证" {

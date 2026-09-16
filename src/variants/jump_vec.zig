@@ -13,9 +13,11 @@
 //! 连 token 都不构造、直接跳（对齐 yuku 的 skipWsAndComments）；字符串/
 //! 模板/块注释/正则的终点查找复用共享语义层已有的 SIMD 原语。
 //!
-//! 行号按主干口径（计入 scanInto 计时）由 simd.classifyLineBreaks
-//! 独立 pass 统一维护——增量逐 span 补计方案经实测为负收益，实验弧见
-//! docs/roadmap.md。
+//! 行号是惰性交付：扫描期零行跟踪成本（对齐 yuku 的交付物——它扫描期
+//! 只带 1-bit line_terminator_before flag，行号由下游按需重算），首次
+//! lineAt/lineCount 查询时才由 LineIndex 跑 simd.classifyLineBreaks
+//! 物化。增量逐 span 补计与独立换行 pass 两方案均经实测否决/淘汰，
+//! 实验弧见 docs/class-code-and-simd-lookup.md。
 //!
 //! 首字节分发与全部语义函数共享 scanner.tokenAt：这条线的演化空间在
 //! 跳跃原语与驱动循环，语义修复由共享层单点生效。
@@ -34,43 +36,26 @@ pub fn scan(allocator: std.mem.Allocator, src: []const u8, options: Options) !Re
     var tokens: std.ArrayList(Token) = .empty;
     errdefer tokens.deinit(allocator);
 
-    // 换行 pass 的位图直接作 LineIndex 的地基（line_breaks 转移给 Result）
-    const cls = try simd.classifyLineBreaks(allocator, src);
-    errdefer allocator.free(cls.line_breaks);
-
     if (options.regex_starts) |list| try scanner.reserveRegexStarts(allocator, src, list);
     try consumeDirect(&tokens, allocator, src, options);
 
-    const prefix = try allocator.alloc(u32, cls.line_breaks.len);
-    errdefer allocator.free(prefix);
-    var acc: u32 = 0;
-    for (cls.line_breaks, 0..) |m, b| {
-        prefix[b] = acc;
-        acc += @popCount(m);
-    }
-    std.debug.assert(acc == cls.newlines); // 与单值计数交叉验证
-
     return .{
         .tokens = try tokens.toOwnedSlice(allocator),
-        .line_count = @as(usize, acc) + 1,
-        .lines = .{ .breaks = cls.line_breaks, .prefix = prefix, .len = src.len },
+        // 行索引留空：首次查询时由 LineIndex 跑 classifyLineBreaks 物化
+        .lines = .{ .src = src, .allocator = allocator },
     };
 }
 
 /// scan 的复用缓冲版本（与两阶段 scanInto 同签名，bench 同口径驱动）。
-/// 返回逻辑行数；换行 pass 计入计时（单阶段为行号付出的成本，如实反映
-/// 架构差异）。
+/// 不产出任何行号信息（行索引惰性，纯 token 化路径零行跟踪成本）。
 pub fn scanInto(
     tokens: *std.ArrayList(Token),
     allocator: std.mem.Allocator,
     src: []const u8,
     options: Options,
-) !usize {
-    const cls = try simd.classifyLineBreaks(allocator, src);
-    defer allocator.free(cls.line_breaks);
+) !void {
     if (options.regex_starts) |list| try scanner.reserveRegexStarts(allocator, src, list);
     try consumeDirect(tokens, allocator, src, options);
-    return cls.newlines + 1;
 }
 
 /// 单阶段驱动：无候选位图，主循环逐 token 顺序分发。
@@ -169,16 +154,20 @@ fn skipWhitespace(src: []const u8, from: usize) usize {
 fn crossCheck(src: []const u8, keep_comments: bool) !void {
     var a = try scanner.scan(std.testing.allocator, src, .{ .keep_comments = keep_comments });
     defer a.deinit(std.testing.allocator);
-    var mine: std.ArrayList(Token) = .empty;
+    var mine = try scan(std.testing.allocator, src, .{ .keep_comments = keep_comments });
     defer mine.deinit(std.testing.allocator);
-    const line_count = try scanInto(&mine, std.testing.allocator, src, .{ .keep_comments = keep_comments });
-    try std.testing.expectEqual(a.line_count, line_count);
-    if (mine.items.len != a.tokens.len) {
-        std.debug.print("token 数不一致：两阶段 {d}，jump_vec {d}\n", .{ a.tokens.len, mine.items.len });
+    // 行号一致：两阶段预填位图 vs 单阶段惰性物化，语义必须相同
+    try std.testing.expectEqual(try a.lineCount(), try mine.lineCount());
+    if (mine.tokens.len != a.tokens.len) {
+        std.debug.print("token 数不一致：两阶段 {d}，jump_vec {d}\n", .{ a.tokens.len, mine.tokens.len });
         return error.TestTokenCountMismatch;
     }
-    for (a.tokens, mine.items) |x, y| {
+    for (a.tokens, mine.tokens) |x, y| {
         try std.testing.expectEqualDeep(x, y);
+    }
+    // lineAt 抽查（每个 token 起点与两阶段同值）
+    for (a.tokens) |t| {
+        try std.testing.expectEqual(try a.lines.lineAt(t.start), try mine.lines.lineAt(t.start));
     }
 }
 

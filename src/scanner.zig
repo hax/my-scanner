@@ -26,40 +26,72 @@ pub const Options = struct {
 
 pub const Result = struct {
     tokens: []Token,
-    /// 逻辑换行总数 + 1（\n、孤立 \r、U+2028/U+2029；含注释与字符串内部）
-    line_count: usize,
-    /// 行号查询索引（按需查任意 offset 的 1-based 行号）
+    /// 行号查询索引（惰性构建：不查询则零成本，见 LineIndex）
     lines: LineIndex,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         allocator.free(self.tokens);
-        allocator.free(self.lines.breaks);
-        allocator.free(self.lines.prefix);
+        self.lines.deinit();
         self.* = undefined;
+    }
+
+    /// 逻辑换行总数 + 1（\n、孤立 \r、U+2028/U+2029；含注释与字符串内部）
+    pub fn lineCount(self: *Result) !usize {
+        return self.lines.lineCount();
     }
 };
 
-/// 逻辑换行索引：每块一个换行位图 + 块前累计行数。
-/// lineAt 为 O(1)：一次块查 + 一次 popcount。
+/// 逻辑换行索引（惰性）：扫描期不建任何行数据结构——只要调用方
+/// 不查行号，行跟踪成本为零（对齐 yuku 等引擎的交付物：它们扫描期
+/// 只顺路带 1-bit「前面有换行」flag，行号是下游按需重算的）。
+/// 首次 lineAt/lineCount 时才跑裁剪版换行 pass（classifyLineBreaks）
+/// 并构建块前缀数组，之后每次查询 O(1)：一次块查 + 一次 popcount。
+/// 行号在真实下游（报错、sourcemap、ASI 判别）本就是按需的。
 pub const LineIndex = struct {
-    breaks: []u32,
-    /// prefix[b] = 块 b 之前的换行总数
-    prefix: []u32,
-    /// 源文件字节数（越界查询归到最后一行）
-    len: usize,
+    src: []const u8,
+    allocator: std.mem.Allocator,
+    /// 每块一个换行位图。两阶段引擎扫描时已顺带算出（预填），
+    /// 单阶段变体留空、ensure 时才计算
+    breaks: []u32 = &.{},
+    /// prefix[b] = 块 b 之前的换行总数（ensure 时从 breaks 构建）
+    prefix: []u32 = &.{},
+    ready: bool = false,
 
-    pub fn lineAt(self: LineIndex, offset: usize) usize {
+    pub fn lineAt(self: *LineIndex, offset: usize) !usize {
+        try self.ensure();
         if (self.prefix.len == 0) return 1;
-        if (offset >= self.len) return self.lineCount();
+        if (offset >= self.src.len) return self.lineCount();
         const b = offset / simd.block_size;
         const within = self.breaks[b] & ((@as(u32, 1) << @intCast(offset % simd.block_size)) - 1);
         return @as(usize, self.prefix[b]) + @as(usize, @popCount(within)) + 1;
     }
 
-    pub fn lineCount(self: LineIndex) usize {
+    pub fn lineCount(self: *LineIndex) !usize {
+        try self.ensure();
         if (self.prefix.len == 0) return 1;
         const last = self.prefix.len - 1;
         return @as(usize, self.prefix[last]) + @as(usize, @popCount(self.breaks[last])) + 1;
+    }
+
+    fn ensure(self: *LineIndex) !void {
+        if (self.ready) return;
+        self.ready = true;
+        if (self.breaks.len == 0 and self.src.len > 0) {
+            const cls = try simd.classifyLineBreaks(self.allocator, self.src);
+            self.breaks = cls.line_breaks;
+        }
+        const prefix = try self.allocator.alloc(u32, self.breaks.len);
+        var acc: u32 = 0;
+        for (self.breaks, 0..) |m, b| {
+            prefix[b] = acc;
+            acc += @popCount(m);
+        }
+        self.prefix = prefix;
+    }
+
+    pub fn deinit(self: *LineIndex) void {
+        self.allocator.free(self.breaks);
+        self.allocator.free(self.prefix);
     }
 };
 
@@ -117,50 +149,41 @@ pub fn isKeyword(text: []const u8) bool {
     return e.len == text.len and std.mem.eql(u8, text, e.name[0..e.len]);
 }
 
-/// 扫描 src，返回 token 序列（以 eof 收尾）+ 行号索引。
+/// 扫描 src，返回 token 序列（以 eof 收尾）+ 惰性行号索引。
 pub fn scan(allocator: std.mem.Allocator, src: []const u8, options: Options) !Result {
     std.debug.assert(src.len <= std.math.maxInt(u32));
     var tokens: std.ArrayList(Token) = .empty;
     errdefer tokens.deinit(allocator);
 
     var cls = try simd.classifyTokenStarts(allocator, src);
-    // masks 只在扫描期间使用（成功路径也释放）；line_breaks 转移给 Result
+    // masks 只在扫描期间使用（成功路径也释放）；line_breaks 是 classify
+    // 的顺带产物，预填给 LineIndex（本引擎的行号地基零额外成本）
     defer cls.starts.deinit(allocator);
     errdefer allocator.free(cls.line_breaks);
 
     if (options.regex_starts) |list| try reserveRegexStarts(allocator, src, list);
     try consume(&tokens, allocator, src, &cls.starts, options);
 
-    const prefix = try allocator.alloc(u32, cls.line_breaks.len);
-    errdefer allocator.free(prefix);
-    var acc: u32 = 0;
-    for (cls.line_breaks, 0..) |m, b| {
-        prefix[b] = acc;
-        acc += @popCount(m);
-    }
-    std.debug.assert(acc == cls.newlines); // 与单值计数交叉验证
-
     return .{
         .tokens = try tokens.toOwnedSlice(allocator),
-        .line_count = @as(usize, acc) + 1,
-        .lines = .{ .breaks = cls.line_breaks, .prefix = prefix, .len = src.len },
+        .lines = .{ .src = src, .allocator = allocator, .breaks = cls.line_breaks },
     };
 }
 
 /// scan 的复用缓冲版本：调用方管理 token 列表（bench 循环里避免反复分配）。
-/// 返回物理行数。
+/// 不产出任何行号信息（行索引是惰性设计，纯 token 化路径零行跟踪成本；
+/// 本引擎的 classify 顺带算换行位图，用完即弃）。
 pub fn scanInto(
     tokens: *std.ArrayList(Token),
     allocator: std.mem.Allocator,
     src: []const u8,
     options: Options,
-) !usize {
+) !void {
     var cls = try simd.classifyTokenStarts(allocator, src);
     defer cls.starts.deinit(allocator);
     defer allocator.free(cls.line_breaks);
     if (options.regex_starts) |list| try reserveRegexStarts(allocator, src, list);
     try consume(tokens, allocator, src, &cls.starts, options);
-    return cls.newlines + 1;
 }
 
 /// 正则收集容量预留：正则字面量数以源中 `/` 数为上界。
@@ -1148,7 +1171,7 @@ test "行数统计" {
     const src = "a\n// c\nb\n`multi\nline`";
     var result = try scan(testing.allocator, src, .{});
     defer result.deinit(testing.allocator);
-    try testing.expectEqual(@as(usize, 5), result.line_count);
+    try testing.expectEqual(@as(usize, 5), try result.lineCount());
 }
 
 test "shebang" {
@@ -1284,25 +1307,25 @@ test "逻辑换行：U+2028/U+2029 与孤立 \\r" {
     {
         var result = try scan(testing.allocator, "a\xe2\x80\xa8b", .{});
         defer result.deinit(testing.allocator);
-        try testing.expectEqual(@as(usize, 2), result.line_count);
+        try testing.expectEqual(@as(usize, 2), try result.lineCount());
     }
     // U+2029 同样
     {
         var result = try scan(testing.allocator, "a\xe2\x80\xa9b", .{});
         defer result.deinit(testing.allocator);
-        try testing.expectEqual(@as(usize, 2), result.line_count);
+        try testing.expectEqual(@as(usize, 2), try result.lineCount());
     }
     // 孤立 \r 计一次
     {
         var result = try scan(testing.allocator, "a\rb", .{});
         defer result.deinit(testing.allocator);
-        try testing.expectEqual(@as(usize, 2), result.line_count);
+        try testing.expectEqual(@as(usize, 2), try result.lineCount());
     }
     // CRLF 只计一次
     {
         var result = try scan(testing.allocator, "a\r\nb", .{});
         defer result.deinit(testing.allocator);
-        try testing.expectEqual(@as(usize, 2), result.line_count);
+        try testing.expectEqual(@as(usize, 2), try result.lineCount());
     }
 }
 
@@ -1368,20 +1391,20 @@ test "行号索引 lineAt（逻辑换行：\\n、CRLF、孤立 \\r、U+2028）" 
     // 布局：a@0 \n@1 b@2 \r@3 \n@4 c@5 \r@6 d@7 U+2028@8..10 e@11
     var result = try scan(testing.allocator, src, .{});
     defer result.deinit(testing.allocator);
-    try testing.expectEqual(@as(usize, 5), result.line_count);
-    try testing.expectEqual(@as(usize, 5), result.lines.lineCount());
-    try testing.expectEqual(@as(usize, 1), result.lines.lineAt(0)); // a
-    try testing.expectEqual(@as(usize, 2), result.lines.lineAt(2)); // b（\n 后）
-    try testing.expectEqual(@as(usize, 3), result.lines.lineAt(5)); // c（\r\n 后只计一次）
-    try testing.expectEqual(@as(usize, 4), result.lines.lineAt(7)); // d（孤立 \r 后）
-    try testing.expectEqual(@as(usize, 5), result.lines.lineAt(11)); // e（U+2028 后）
+    try testing.expectEqual(@as(usize, 5), try result.lineCount());
+    try testing.expectEqual(@as(usize, 5), try result.lines.lineCount());
+    try testing.expectEqual(@as(usize, 1), try result.lines.lineAt(0)); // a
+    try testing.expectEqual(@as(usize, 2), try result.lines.lineAt(2)); // b（\n 后）
+    try testing.expectEqual(@as(usize, 3), try result.lines.lineAt(5)); // c（\r\n 后只计一次）
+    try testing.expectEqual(@as(usize, 4), try result.lines.lineAt(7)); // d（孤立 \r 后）
+    try testing.expectEqual(@as(usize, 5), try result.lines.lineAt(11)); // e（U+2028 后）
     // 换行字节自身仍属于上一行
-    try testing.expectEqual(@as(usize, 1), result.lines.lineAt(1));
+    try testing.expectEqual(@as(usize, 1), try result.lines.lineAt(1));
     // 越界 offset 归到最后一行
-    try testing.expectEqual(@as(usize, 5), result.lines.lineAt(99));
+    try testing.expectEqual(@as(usize, 5), try result.lines.lineAt(99));
     // 与 token 流交叉验证
     for (result.tokens) |t| {
-        try testing.expect(result.lines.lineAt(t.start) <= result.line_count);
+        try testing.expect(try result.lines.lineAt(t.start) <= try result.lineCount());
     }
 }
 
@@ -1389,14 +1412,14 @@ test "行号索引：空文件与单行" {
     {
         var result = try scan(testing.allocator, "", .{});
         defer result.deinit(testing.allocator);
-        try testing.expectEqual(@as(usize, 1), result.lines.lineAt(0));
+        try testing.expectEqual(@as(usize, 1), try result.lines.lineAt(0));
     }
     {
         var result = try scan(testing.allocator, "let x = 1;", .{});
         defer result.deinit(testing.allocator);
-        try testing.expectEqual(@as(usize, 1), result.line_count);
+        try testing.expectEqual(@as(usize, 1), try result.lineCount());
         for (result.tokens) |t| {
-            try testing.expectEqual(@as(usize, 1), result.lines.lineAt(t.start));
+            try testing.expectEqual(@as(usize, 1), try result.lines.lineAt(t.start));
         }
     }
 }
