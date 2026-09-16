@@ -8,7 +8,7 @@
 //!   全标量单阶段        → scalar     vs yuku-old（0.10.1 快照）
 //!   单阶段 + SIMD 长跳跃 → jump_vec   vs yuku-main（perf(lexer) 之后）
 //!   两阶段 SIMD         → two_phase
-//! swc / oxc 由 tools/lexbench-rs 独立计时，报告在 scripts/make-report.mjs
+//! swc / oxc 由 tools/lexbench-rs 独立计时，报告在 scripts/report/make-report.mjs
 //! 汇总（跨语言进程无法同进程对拍）。
 //!
 //! 注意 yuku 纯 scanner 与 tsc 同款设计：`>` 家族不合并、`/` 保守判除号，
@@ -240,7 +240,7 @@ fn benchFile(
     return .{ .path = path, .bytes = src.len, .results = try results.toOwnedSlice(arena) };
 }
 
-/// 把全部 run 写成 JSON（供 scripts/make-report.mjs 汇总；路径由 ASCII
+/// 把全部 run 写成 JSON（供 scripts/report/make-report.mjs 汇总；路径由 ASCII
 /// 语料名构成，无需转义）。
 /// 单个基线的溯源 JSON:`{"sha":"..","date":".."}`(缺失字段省略,皆缺为 null)。
 fn baselineEntry(arena: std.mem.Allocator, sha: ?[]const u8, date: ?[]const u8) ![]const u8 {

@@ -2,7 +2,7 @@
 //!
 //! 与 my-scanner 的 bench 同一口径：读文件（不计入）、N 轮取最优、
 //! 产出的每个 token 交给 black_box 消耗、按各自 token 数计吞吐。
-//! 输出 JSON 与 zig bench 的 --json 同构，由 scripts/make-report.mjs 汇总。
+//! 输出 JSON 与 zig bench 的 --json 同构，由 scripts/report/make-report.mjs 汇总。
 //!
 //! 口径差异说明（与 zig 侧 yuku 对拍不同，这两个是独立进程）：
 //! 本 raw 模式下 `/` 一律按除号产 token、模板 `${` 续段无人 re-lex，

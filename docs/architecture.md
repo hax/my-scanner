@@ -56,7 +56,7 @@ jump_vec 0.72x → two_phase 0.82x，梯度分离了各层净贡献（跳跃
    注入——yuku 走 `reScanAsRegex`/`reScanTemplateContinuation` 对拍）；
 4. 第三方对照（lexbench-rs 独立进程：swc/oxc 决策注入驱动 +
    oxc_bitmap spans 门禁，机制见下「swc/oxc 决策注入」「oxc_bitmap」两节）；
-5. `scripts/make-report.mjs` 汇总成 `report.md` + `data.json`
+5. `scripts/report/make-report.mjs` 汇总成 `report.md` + `data.json`
    （语料谱系表 + 变体 × 语料矩阵 + real/synthetic 分组几何平均）。
 
 语料由 **corpus 孤儿分支**提供（只含语料不含源码）：CI 用第二个
@@ -65,10 +65,11 @@ sha256 校验；谱系、provenance 与更新流程（publish-corpus）见
 [corpus.md](corpus.md)。语料分 real（真实代码）与 synthetic（构造极端
 样本，microbench 专用），分组汇总防止构造数据稀释真实结论。
 
-`.github/workflows/bench.yml`：push 到 main 触发，报告贴进 run
+`.github/workflows/bench.yml`：push 到 main 触发（`docs/**`、
+`**.md`、`scripts/report/**` 豁免，报告页改动不跑基准），报告贴进 run
 summary + artifact，并归档到 **bench-reports 分支**
-（`scripts/publish-report.mjs` → `reports/<sha>.{md,json}`，
-`scripts/update-index.mjs` 重建 `index.html` 图表页）。该分支即
+（`scripts/report/publish-report.mjs` → `reports/<sha>.{md,json}`，
+`scripts/report/update-index.mjs` 重建 `index.html` 图表页）。该分支即
 GitHub Pages 源，图表页在线看： <https://johnhax.net/my-scanner/>
 （`.nojekyll` 静态直出；图表用 **ECharts** 渲染，
 `vendor/echarts.min.js` 由 tools/package.json 固定版本、发布时从
@@ -114,8 +115,8 @@ scalar 对 baseline、jump_vec 对 yuku-main、two_phase 对 oxc_bitmap
 本地 run 可提交趋势页：`scripts/bench.sh --submit` 一键跑完整矩阵
 （默认全 10 语料）+ swc/oxc/oxc_bitmap 对照 → 汇总 → 发布到 bench-reports
 分支（凭据缺省回退 `gh auth token` 与 origin remote）。本地 run 的
-data.json 记 `channel=local` 与机器标识（默认 hostname），文件名
-`<sha>.local-<机器名>.*` 不与 CI 同 sha 互撞；图表页上本机与 CI 同图
+data.json 记 `channel=local`（机器名不进入任何产物），文件名
+`<sha>.local.*` 不与 CI 同 sha 互撞；图表页上本机与 CI 同图
 并绘——柱状图左 CI 右本机（同色、本机半透明），趋势图实线 CI、虚线
 本机（按机器分组、同机相连）——纵轴统一为 vs baseline 基线倍数，
 基线固定、各机一致，跨机可比。

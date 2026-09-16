@@ -74,6 +74,6 @@ fi
 node scripts/run-rs-bench.mjs --repeats="$REPEATS" --regex-dir="$DEC" --json="$OUT/rs.json" "${FILES[@]}"
 
 echo
-echo "==> [3/3] 汇总并发布（channel=local，机器标识入 data.json）"
-node scripts/make-report.mjs "$OUT/zig.json" --rs "$OUT/rs.json" --out "$OUT" --repeats "$REPEATS"
-node scripts/publish-report.mjs --dir "$OUT"
+echo "==> [3/3] 汇总并发布（channel=local，机器名不入产物）"
+node scripts/report/make-report.mjs "$OUT/zig.json" --rs "$OUT/rs.json" --out "$OUT" --repeats "$REPEATS"
+node scripts/report/publish-report.mjs --dir "$OUT"

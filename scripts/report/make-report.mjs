@@ -1,8 +1,9 @@
 // 汇总 bench JSON(zig 必需 + rust 可选)→ report.md(人读) + data.json(趋势累积)。
 //
-//   node scripts/make-report.mjs <zig.json> [--rs <rs.json>] --out <dir>
+//   node scripts/report/make-report.mjs <zig.json> [--rs <rs.json>] --out <dir>
 //         [--sha <sha>] [--subject <msg>] [--repeats N]
-//         [--channel ci|local] [--label <机器名>](默认按 GITHUB_ACTIONS/hostname 判定)
+//         [--channel ci|local] [--label <标识>](channel 默认按 GITHUB_ACTIONS 判定;
+//         label 默认 local 为 "local"、ci 为 null——机器名不进入任何产物)
 //
 // 输出:
 //   <dir>/report.md   — 人读报告(CI step summary / bench-reports 分支归档)
@@ -14,7 +15,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import os from "node:os";
 
 // 架构族谱:实现 → {族, 说明}。表中展示,提醒对比的意义(同族内比实现、跨族比架构)
 const IMPL_META = {
@@ -44,17 +44,18 @@ function opt(name, fallback = undefined) {
 const zigJsonPath = argv[0]?.startsWith("--") ? undefined : argv[0];
 const outDir = opt("--out", "build/bench");
 if (!zigJsonPath || !outDir) {
-  console.error("用法: node scripts/make-report.mjs <zig.json> [--rs <rs.json>] --out <dir> [--sha ..] [--subject ..] [--repeats N]");
+  console.error("用法: node scripts/report/make-report.mjs <zig.json> [--rs <rs.json>] --out <dir> [--sha ..] [--subject ..] [--repeats N]");
   process.exit(2);
 }
 
-const sha = opt("--sha") ?? execFileSync("git", ["rev-parse", "HEAD"], { cwd: new URL("..", import.meta.url), encoding: "utf8" }).trim();
-const subject = opt("--subject") ?? execFileSync("git", ["log", "-1", "--pretty=%s"], { cwd: new URL("..", import.meta.url), encoding: "utf8" }).trim();
+const sha = opt("--sha") ?? execFileSync("git", ["rev-parse", "HEAD"], { cwd: new URL("../..", import.meta.url), encoding: "utf8" }).trim();
+const subject = opt("--subject") ?? execFileSync("git", ["log", "-1", "--pretty=%s"], { cwd: new URL("../..", import.meta.url), encoding: "utf8" }).trim();
 const repeats = opt("--repeats", "?");
-// 通道与机器标识:CI 自动判定(无需改 workflow),本地 run 带机器名,
-// 趋势页按 channel 分层,避免不同机器的本地结果与 CI 主线混淆
+// 通道:CI 自动判定(无需改 workflow);趋势页按 channel 分层,
+// 避免本地结果与 CI 主线混淆。label 只是本机分组的占位标识——
+// 机器名(含 CI runner 名)不进入任何产物
 const channel = opt("--channel") ?? (process.env.GITHUB_ACTIONS === "true" ? "ci" : "local");
-const runLabel = opt("--label") ?? os.hostname();
+const runLabel = opt("--label") ?? (channel === "local" ? "local" : null);
 
 function env(cmd, args) {
   try { return execFileSync(cmd, args, { encoding: "utf8" }).trim(); } catch { return ""; }
@@ -67,7 +68,7 @@ const runner = {
 
 // 语料清单:分组/谱系标签的单一来源(数组顺序即报告展示顺序)
 let manifest = { files: [] };
-try { manifest = JSON.parse(readFileSync(new URL("../tools/corpus-manifest.json", import.meta.url), "utf8")); } catch { /* 缺清单也能出报告 */ }
+try { manifest = JSON.parse(readFileSync(new URL("../../tools/corpus-manifest.json", import.meta.url), "utf8")); } catch { /* 缺清单也能出报告 */ }
 const metaByPath = new Map(manifest.files.map((f, i) => [f.path, { ...f, order: i }]));
 
 // 合并 zig + rust 的 runs(按 file 对齐;rust 缺失的文件不补)
@@ -125,7 +126,7 @@ lines.push(`- 提交：${subject}`);
 lines.push(`- 日期：${dataJson.date}`);
 lines.push(`- 轮数：每实现 ${repeats} 轮取最优；同进程、同文件、token 产出后丢弃`);
 lines.push(`- 环境：${runner.os}${runner.cpu ? ` / ${runner.cpu}` : ""}${runner.zig ? ` / zig ${runner.zig}` : ""}`);
-lines.push(`- 通道：${channel}${channel === "local" ? `（本机：${runLabel}；第三方对照计时可能来自本地缓存，与 CI 主线分机型呈现）` : ""}`);
+lines.push(`- 通道：${channel}${channel === "local" ? `（第三方对照计时可能来自本地缓存，与 CI 主线分机型呈现）` : ""}`);
 lines.push(`- 基线：baseline（yuku v0.10.1 固定快照，跨 run 可比；各实现 / 基线，>1 即更快）`);
 if (baselines) {
   const fb = (b) => (b ? [b.sha?.slice(0, 10), b.date?.slice(0, 10)].filter(Boolean).join(" ") : null);

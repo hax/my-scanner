@@ -1,16 +1,19 @@
 // 把一次 run 的报告归档到 bench-reports 分支并重建趋势索引。
 //
-//   node scripts/publish-report.mjs --dir build/bench
+//   node scripts/report/publish-report.mjs --dir build/bench
 //
 // 环境变量(CI):GITHUB_TOKEN、REPO(owner/name);缺省时依次回退
 // `gh auth token` 与 origin remote,本地一键提交(bench.sh --submit)零配置。
-// 本地 run(channel=local)文件名为 <sha>.local-<机器名>.*,不与 CI 同 sha 互撞。
+// 本地 run(channel=local)文件名为 <sha>.local.*,不与 CI 同 sha 互撞(机器名不入产物)。
 // push 被拒(与 CI 并发)时全新 clone 重建重试一次。
 // 本地调试:--local <dir> 直接发布到已有目录(不碰 git)
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, rmSync, mkdirSync, cpSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
+
+const updateIndex = fileURLToPath(new URL("./update-index.mjs", import.meta.url));
 
 const argv = process.argv.slice(2);
 function opt(name) {
@@ -20,9 +23,10 @@ function opt(name) {
 const srcDir = opt("--dir") ?? "build/bench";
 const data = JSON.parse(readFileSync(join(srcDir, "data.json"), "utf8"));
 const sha = data.sha;
-// 本地 run 带机器标识,文件名与 CI 的 <sha>.* 区分,避免同提交互相覆盖
-const safeLabel = String(data.label ?? "unknown").replace(/[^A-Za-z0-9._-]/g, "_");
-const base = data.channel === "local" ? `${sha}.local-${safeLabel}` : sha;
+// 本地 run 的文件名与 CI 的 <sha>.* 区分,避免同提交互相覆盖;
+// label 仅作显式 --label 时的附加区分,默认 "local" 不含机器名
+const safeLabel = String(data.label ?? "local").replace(/[^A-Za-z0-9._-]/g, "_");
+const base = data.channel === "local" ? `${sha}.local${safeLabel === "local" ? "" : `-${safeLabel}`}` : sha;
 
 function git(args, opts = {}) {
   const r = spawnSync("git", args, { encoding: "utf8", ...opts });
@@ -40,7 +44,7 @@ if (localDir) {
   mkdirSync(join(dest, "reports"), { recursive: true });
   cpSync(join(srcDir, "data.json"), join(dest, "reports", `${base}.json`));
   cpSync(join(srcDir, "report.md"), join(dest, "reports", `${base}.md`));
-  execFileSync("node", ["scripts/update-index.mjs", dest], { stdio: "inherit" });
+  execFileSync("node", [updateIndex, dest], { stdio: "inherit" });
   console.log(`本地发布完成 → ${dest}`);
   process.exit(0);
 }
@@ -68,7 +72,7 @@ for (let attempt = 1; attempt <= 2; attempt++) {
   mkdirSync(join(pub, "reports"), { recursive: true });
   cpSync(join(srcDir, "data.json"), join(pub, "reports", `${base}.json`));
   cpSync(join(srcDir, "report.md"), join(pub, "reports", `${base}.md`));
-  execFileSync("node", ["scripts/update-index.mjs", pub], { stdio: "inherit" });
+  execFileSync("node", [updateIndex, pub], { stdio: "inherit" });
 
   git(["-C", pub, "add", "-A"]);
   const status = git(["-C", pub, "status", "--porcelain"]);
@@ -77,7 +81,7 @@ for (let attempt = 1; attempt <= 2; attempt++) {
     process.exit(0);
   }
   git(["-C", pub, "-c", "user.name=bench-bot", "-c", "user.email=bench-bot@users.noreply.github.com",
-    "commit", "-m", `bench: ${sha.slice(0, 10)}${data.channel === "local" ? `(本地 ${safeLabel})` : ""}`]);
+    "commit", "-m", `bench: ${sha.slice(0, 10)}${data.channel === "local" ? "(本机)" : ""}`]);
   if (!cloned) git(["-C", pub, "remote", "add", "origin", url]);
   const push = spawnSync("git", ["-C", pub, "push", ...(cloned ? [] : ["-u"]), "origin", "bench-reports"], { encoding: "utf8" });
   if (push.status === 0) {

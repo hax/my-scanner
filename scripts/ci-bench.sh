@@ -92,7 +92,7 @@ node scripts/run-rs-bench.mjs --repeats="$REPEATS" --regex-dir="$DEC" --json="$O
 
 echo
 echo "==== 汇总报告 ===="
-node scripts/make-report.mjs "$OUT/zig.json" --rs "$OUT/rs.json" --out "$OUT" --repeats "$REPEATS"
+node scripts/report/make-report.mjs "$OUT/zig.json" --rs "$OUT/rs.json" --out "$OUT" --repeats "$REPEATS"
 
 echo
 echo "报告: $OUT/report.md"

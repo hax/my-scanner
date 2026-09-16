@@ -1,6 +1,6 @@
 //! 决策注入驱动：my-scanner 预扫产出的正则起点决策集驱动 swc/oxc lexer，
 //! 对齐 yuku bench 的 reScanAsRegex / reScanTemplateContinuation 口径。
-//! 输出 JSON 与 zig bench 的 --json 同构，由 scripts/make-report.mjs 汇总。
+//! 输出 JSON 与 zig bench 的 --json 同构，由 scripts/report/make-report.mjs 汇总。
 //!
 //! oxc_bitmap（oxc_lexer 多位图流水线实验 crate）不接受注入：正则/除号由
 //! 内部 disambiguate pass 自决，「决策一致」改由 tools/compare-oxc-bitmap.mjs
