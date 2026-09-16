@@ -28,17 +28,17 @@
 
 ### 当前格局
 
-jump_vec 成熟化后（2026-09-16，M3 Pro / CI 口径 25 轮取最优，
-几何平均 vs yuku-main）：scalar 0.71x、two_phase 0.88x、
-**jump_vec 0.99x（真实语料 1.00x 追平 yuku-main）**——9/10 语料
-成为矩阵最快，唯一例外是 typescript.js（two_phase 1.03x 对
-1.02x 微胜）：minified 端 typescript.min.js 1.06x，CJK 端
-cn-dense 1.14x / hanzi-chai 1.09x，注释密集端 lib.dom 0.80x→0.93x、
-line-comments 0.65x→0.92x 结构性收敛（cls pass 白工被整端消去）。
-仍落后的 strings 0.86x 与 react 0.90x：换行 pass（行号口径成本）
-在跳跃/token 密集语料上占 jump_vec 总时间 20%+——exp 分支的
-惰性 LineIndex（扫描期零行号成本）口径下同配置全 7 语料
-1.07-1.26x 反超 yuku-main，口径取舍留作提案待 hax 决策。
+jump_vec 成熟化 + 行号惰性化后（2026-09-16，M3 Pro / CI 口径
+25 轮取最优，几何平均 vs yuku-main）：two_phase 0.91x、scalar 0.91x、
+**jump_vec 1.08x（真实语料 1.07x 反超 yuku-main）**——8/10 语料
+矩阵最快：minified 端 typescript.min.js 1.10x，CJK 端
+cn-dense 1.31x / hanzi-chai 1.16x，注释密集端 lib.dom 0.80x→0.98x、
+line-comments 0.65x→1.08x（cls pass 白工消去 + 注释快跳），
+react.js 0.90x→1.01x、strings.js 0.86x→0.94x（行号惰性化收益
+最大的两端）。剩余洼地：lib.dom/strings 仍微负——前者是 yuku
+向量化收益最高的语料（1.5x），后者 yuku 字符串路径更简。
+行号惰性化前的同配置数字（0.99x/1.00x，含换行 pass 计时）不可
+直接比，见「行号口径」一节。
 
 更早的首批基线（2026-09 初，M2 / 8 轮快测）：scalar 0.59x →
 jump_vec 0.72x → two_phase 0.82x，梯度分离了各层净贡献（跳跃
@@ -166,13 +166,23 @@ OoO 重叠劣势慢 10-23%）。实验弧（v1/E1-E8，含 E3 增量行标记否
 
 ### 行号口径
 
-早期实现是跳跃区间产 token 后逐 span 补一趟标量逻辑换行计数；
-成熟化后改为 `simd.classifyLineBreaks` 独立换行 pass（~4 GB/s 的
-裁剪版分类，语义与 classify 位图逐条对齐：`\n`、孤立 `\r`、CRLF
-单计、U+2028/29）——集中式 SIMD pass 的 0.25 cycles/byte 远低于
-逐 span 增量标记的 per-span 调用开销（E3 实验，react -18%/
-strings -30% 否决）。两种方案都计入 scanInto 计时（yuku 在 advance
-循环里逐字符判断，殊途同归）。
+全变体统一**惰性交付**（2026-09-16 裁决）：扫描期零行跟踪成本，
+`LineIndex` 首次 `lineAt`/`lineCount` 查询时才物化——两阶段用
+classify 副产品预填位图（零额外成本），单阶段变体留空、首次查询
+跑 `simd.classifyLineBreaks`（裁剪版换行 pass）建索引。对齐 yuku
+的交付物：核查其源码（parser/lexer.zig）确认它扫描期只在空白分类
+switch 里顺路置 1-bit `line_terminator_before` flag（ASI/HTML 注释
+判别用），不维护行号计数器或索引，行号由下游（sourcemap/报错）
+按需从源重算。
+
+此前「yuku 在 advance 循环里逐字符判断、殊途同归」的说法不成立：
+扫描换行（顺带、1-bit）≠ 计算行号（独立一趟全文件 pass、可查询
+索引）——我们曾为一个明显强于对手的交付物付 7-25%（语料谱系
+相关）并误认为公平口径。历史方案存档：逐 span 标量补计（早期）、
+classifyLineBreaks 独立 pass 计入计时（成熟化首日）；E3 增量行
+标记实验（react -18%/strings -30%）否决记录见类别码纪要。
+基准注意：惰性化前后 jump_vec 数字不可直接比（差一趟换行 pass，
+strings/react 端差 ~15-20%）。
 
 ## scalar：全标量基线
 
@@ -202,9 +212,11 @@ token 完成"发现起点 → 扫到终点"。关键特性是**每个字节只�
 - jump_vec 未成熟时（two_phase 对 yuku-main）：minified 端 +6~9%
   （typescript.js，137 tok/KB），注释密集端 cls 占总时间 21-31%
   → -8~29%，由此得出过"token 越密两阶段越划算"的判断；
-- jump_vec 成熟化后（2026-09-16）：两阶段仅剩 typescript.js 一线
-  微胜，9/10 语料由 jump_vec 领跑——"越密越划算"未守住，
-  "越稀越亏"依旧（cls 白工被单阶段整端消去）。
+- jump_vec 成熟化后（2026-09-16，行号未惰性化）：两阶段仅剩
+  typescript.js 一线微胜，9/10 语料由 jump_vec 领跑——"越密越
+  划算"未守住，"越稀越亏"依旧（cls 白工被单阶段整端消去）；
+- 行号惰性化后（同日）：jump_vec 1.08x 全面反超，两阶段仅剩
+  checker.ts 一线（1.09 对 1.07，OOO 重叠优势的最后阵地）。
 
 **教训与「总览」一节同源：跨架构的胜负读数只是两条线当下优化
 完成度的快照，不是架构的终局判定。**两阶段线尚未兑现的候选优化

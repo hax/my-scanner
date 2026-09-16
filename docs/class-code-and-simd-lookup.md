@@ -217,7 +217,7 @@ mine = 两阶段，yuku-main 为外部对照，同 run 比值才可信）：
 | v1 单阶段 | 裁剪换行 pass + 标量驱动循环 | token 密集语料慢 10-23%（候选位图的 ctz 迭代有 OoO 重叠优势）；注释密集赢（省掉 classify 白工） |
 | E1+E2 | `ident_part_table`、dispatch 表加 ws 位合并判断、`skipWhitespace` 展开+SIMD | 7 语料赢 4；strings +12%、line-comments +10% |
 | ❌ E3 | LineTracker 逐 span 增量行标记替代换行 pass | **全面回退**（react -18%、strings -30%）——span 多为 1-4 字节，per-span 开销远超 0.25 cycles/byte 的集中式 SIMD pass。**集中式换行 pass genuinely 高效，逐 span 增量标记是死路** |
-| E5 | **惰性 LineIndex**：扫描期不建任何行数据结构，首次 `lineAt`/`lineCount` 才跑换行 pass | 对齐 yuku 口径（它扫描期只带 1-bit 换行 flag）。单阶段全面反超两阶段（1.00-1.35）——**未并入主干**：主干口径要求行号成本计入 scanInto 计时（architecture.md），jump_vec 用 classifyLineBreaks 满足；惰化作为口径提案另行决策 |
+| E5 | **惰性 LineIndex**：扫描期不建任何行数据结构，首次 `lineAt`/`lineCount` 才跑换行 pass | 对齐 yuku 交付物（后核查其源码确认：扫描期只在空白分类 switch 顺路置 1-bit flag，不维护行号，下游按需重算）。单阶段全面反超两阶段（1.00-1.35）。**已并入主干**（2026-09-16 裁决）：「行号计入计时」口径连同「yuku 逐字符判断、殊途同归」的错误类比一并撤销，全变体统一惰性交付 |
 | E6 | 注释 trivia 快跳：`!keep_comments` 时不构造 token 直接跳 | line-comments 追平 yuku（2.15 vs 2.12 GB/s） |
 | E7 | unicode ID 两级位图（root[cp>>9] → 去重叶 8×u64，2 次 load）替代 795 范围二分 | cn-dense 0.88→1.12 vs yuku（0.84→1.07 GB/s，反超 yuku 的 0.92）。79/86 叶与 yuku 独立实现叶数一致 |
 | E8 | token 容量按 src.len/8 预留 + 内联容量检查（逐 token 调 `ensureUnusedCapacity` 实测占 12%）；isKeyword 换完美哈希 `(c0+c1+clast*62+len*27)&127`（原 len+首字符 switch+memcmp 链占 11.5%，间接跳转对多样标识符不友好） | **全 7 语料反超 yuku-main：1.07-1.26**（exp 分支口径，含惰性行号） |
@@ -247,8 +247,9 @@ mine-1/mine 与 mine-1/yuku-main）。并入主干后的口径数字见
    不需要向量（boundary v2 的 OP 平面否决记录互相印证）。
 3. **并入 jump_vec 而非新变体**：单阶段 pos 驱动 + SIMD 长跳跃正是
    jump_vec 的架构族定义，成熟化是它的族内演化（主干为变体矩阵，
-   不存在「默认引擎」；E1/E6/E7/E8 全部移植，行号按主干口径由
-   simd.classifyLineBreaks 独立 pass 维护）。
+   不存在「默认引擎」；E1/E5/E6/E7/E8 全部移植，行号随主干裁决
+   全变体统一惰性交付——「行号计入计时」的旧口径依据是对 yuku
+   行为的不实类比，已撤销，见 architecture.md 行号口径一节）。
 4. 已知差异（有意保留，合法输入不受影响）：token 位置上紧跟标识符
    字符的非法非 ASCII 字节，单阶段产 illegal（近 tsc Unknown）而
    两阶段静默吞（tradeoff T2 的变体间行为差）；行注释/字符串/正则内
