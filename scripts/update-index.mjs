@@ -34,7 +34,7 @@ const index = {
   updated: new Date().toISOString(),
   anchor: "yuku_main",
   peers: PEERS,
-  impls: ["scalar", "jump_vec", "two_phase", "yuku_old", "yuku_main"],
+  impls: ["scalar", "jump_vec", "two_phase", "yuku_old", "yuku_main", "swc", "oxc"],
   runs: runs.map((r) => ({ sha: r.sha, date: r.date, subject: r.subject, runner: r.runner })),
   series: {},
 };
@@ -95,8 +95,8 @@ const html = `<!doctype html>
 <span class="meta" id="runinfo"></span></p>
 <div id="files"></div>
 <script>
-const COLORS = { scalar:"#e67e22", jump_vec:"#2ecc71", two_phase:"#e74c3c", yuku_old:"#95a5a6", yuku_main:"#3498db" };
-const NAMES  = { scalar:"scalar(全标量)", jump_vec:"jump_vec(单阶段+SIMD跳跃)", two_phase:"two_phase(两阶段)", yuku_old:"yuku-old", yuku_main:"yuku-main" };
+const COLORS = { scalar:"#e67e22", jump_vec:"#2ecc71", two_phase:"#e74c3c", yuku_old:"#95a5a6", yuku_main:"#3498db", swc:"#9b59b6", oxc:"#1abc9c" };
+const NAMES  = { scalar:"scalar(全标量)", jump_vec:"jump_vec(单阶段+SIMD跳跃)", two_phase:"two_phase(两阶段)", yuku_old:"yuku-old", yuku_main:"yuku-main", swc:"swc(决策注入)", oxc:"oxc(决策注入)" };
 let mode = "ratio";
 fetch("reports/index.json").then(r => r.json()).then(idx => {
   document.getElementById("runinfo").textContent = " — " + idx.runs.length + " runs,最近: " + (idx.runs.at(-1)?.date ?? "");

@@ -21,8 +21,8 @@ const IMPL_META = {
   two_phase: { family: "两阶段 SIMD", peer: "—" },
   yuku_old: { family: "全标量单阶段(第三方)", peer: "scalar 的参照" },
   yuku_main: { family: "单阶段 + SIMD 长跳跃(第三方)", peer: "jump_vec 的参照" },
-  swc: { family: "第三方(口径待校准)", peer: "—" },
-  oxc: { family: "第三方(口径待校准)", peer: "—" },
+  swc: { family: "单阶段+字节搜索(第三方,决策注入驱动)", peer: "—" },
+  oxc: { family: "单阶段+字节搜索(第三方,决策注入驱动)", peer: "—" },
 };
 const IMPL_ORDER = ["scalar", "jump_vec", "two_phase", "yuku_old", "yuku_main", "swc", "oxc"];
 const OWN = ["scalar", "jump_vec", "two_phase"]; // 自有架构(矩阵列)
@@ -115,6 +115,7 @@ lines.push(`- 轮数: 每实现 ${repeats} 轮取最优;同进程、同文件、
 lines.push(`- 环境: ${runner.os}${runner.cpu ? ` / ${runner.cpu}` : ""}${runner.zig ? ` / zig ${runner.zig}` : ""}`);
 lines.push(`- 相对值锚点: ${ANCHOR}(各实现/锚点,>1 即更快)`);
 lines.push(`- 同族参照: scalar vs yuku_old、jump_vec vs yuku_main(自有实现/同族第三方,>1 即我方更快;two_phase 无第三方参照)`);
+if (opt("--rs")) lines.push(`- swc/oxc: lexbench-rs 决策注入驱动(同一 my-scanner 正则决策集 + 模板花括号栈重扫,与 yuku 对拍同口径),独立进程`);
 lines.push("");
 lines.push("| 实现 | 架构族 | 第三方参照 |");
 lines.push("| --- | --- | --- |");

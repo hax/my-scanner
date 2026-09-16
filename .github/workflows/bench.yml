@@ -37,6 +37,13 @@ jobs:
         with:
           node-version: 22
 
+      # swc/oxc 对照(lexbench-rs)的 Rust 工具链;oxc_parser MSRV 1.96,用 stable
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/lexbench-rs
+
       - name: 安装对拍依赖(tsc)
         working-directory: tools
         run: npm ci

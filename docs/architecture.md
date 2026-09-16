@@ -296,17 +296,26 @@ token 数三家差 <0.5%（模板分片 vs 整体的口径差），不作三方�
 my-scanner 在 real 语料全面 ≥ oxc-driven（react 小文件 3.4x，
 lib.dom.d.ts 打平）；oxc-driven 全面快于 swc-driven（1.5-2.5x）。
 
-正式接入待办与口径边界：
+CI 接入（2026-09-16 完成，ci-bench.sh 第 [5/5] 步）：
 
-1. bench.sh/ci-bench.sh 调度链：`--emit-regex-starts` 生成决策 →
-   `drive --json` → make-report.mjs 汇总进矩阵。
-2. drive 吞吐含驱动开销（决策集 HashSet + 模板栈 + 正则重扫），与
+`prepare-lexbench.sh` 幂等 vendor oxc（crates.io 官方 .crate + sha256
+校验 + sed 打 2 行 patch）→ 逐语料 `--emit-regex-starts` 生成决策 →
+cargo build → `drive --json` → make-report `--rs` 合并；swc/oxc 列进
+报告矩阵与趋势页，rs.json 与 zig.json 同目录归档。workflow 配
+`dtolnay/rust-toolchain@stable`（oxc_parser MSRV 1.96）+ rust-cache。
+
+口径边界：
+
+1. drive 吞吐含驱动开销（决策集 HashSet + 模板栈 + 正则重扫），与
    yuku bench 的驱动开销对称；lib.dom.d.ts（零正则零模板决策）的
    oxc 1.72 GB/s ≈ 其官方 bench 水平，说明驱动开销占比可忽略。
-3. 决策集是 my-scanner 的歧义口径（tradeoff T1 启发式）——对比的是
+2. 决策集是 my-scanner 的歧义口径（tradeoff T1 启发式）——对比的是
    "同一决策集下的字节吞吐"，不与 swc/oxc 自家 parser 的 token 流对拍。
-4. JSX 当前"恒非 JSX"双方一致（react.js 双方均扫完）；如需 JSX 决策
+3. JSX 当前"恒非 JSX"双方一致（react.js 双方均扫完）；如需 JSX 决策
    注入，swc 入口已公开，oxc 需再 patch `next_jsx_child`。
-5. `A<<T>>` 嵌套泛型在当前语料未出现（`<<` 均为位移）；如需，oxc 要
+4. `A<<T>>` 嵌套泛型在当前语料未出现（`<<` 均为位移）；如需，oxc 要
    再 patch `re_lex_as_typescript_l_angle`，swc 无对应 lexer 侧入口
    （parser 内部拆分），届时另议。
+5. oxc 版本升级：prepare-lexbench.sh 的 VER/SHA256 同步更新并重贴
+   patch（脚本对 patch 未生效有兜底报错）；长期可跟踪上游是否暴露
+   re-lex（swc 公开 trait 是先例）。
