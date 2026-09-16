@@ -42,13 +42,13 @@ try {
 // ratio 一律由 best_ns 重算(历史 data.json 的 vs_anchor 是旧锚口径,不可用);
 // 同族参照(与 make-report.mjs 的 PEER 同步):自有实现 → 同族第三方对照,
 // pratio 同样由 best_ns 补算,历史 run 无 vs_peer 字段也兼容。
-const PEERS = { scalar: "yuku_old", jump_vec: "yuku_main" };
+const PEERS = { scalar: "yuku_old", jump_vec: "yuku_main", two_phase: "oxc_bitmap" };
 const index = {
   updated: new Date().toISOString(),
   anchor: "yuku_old",
   anchor_label: "yuku-0.10.1",
   peers: PEERS,
-  impls: ["scalar", "jump_vec", "two_phase", "yuku_old", "yuku_main", "swc", "oxc"],
+  impls: ["scalar", "jump_vec", "two_phase", "yuku_old", "yuku_main", "swc", "oxc", "oxc_bitmap"],
   // 基线溯源(bench.zig 自 prepare-baselines 版本标记带入):取最近一个带该字段的 run
   baselines: (() => { for (let i = runs.length - 1; i >= 0; i--) if (runs[i].baselines) return runs[i].baselines; return null; })(),
   corpus: corpusMeta,
@@ -136,9 +136,9 @@ const html = `<!doctype html>
 <div id="files"></div>
 <script>
 // 比照组同色系:自有实现饱和色,其同族第三方参照同色系浅色
-const COLORS = { scalar:"#e67e22", jump_vec:"#27ae60", two_phase:"#e74c3c", yuku_old:"#f0b27a", yuku_main:"#82e0aa", swc:"#9b59b6", oxc:"#1abc9c" };
-const NAMES  = { scalar:"scalar(全标量)", jump_vec:"jump_vec(单阶段+SIMD跳跃)", two_phase:"two_phase(两阶段)", yuku_old:"yuku-old", yuku_main:"yuku-main", swc:"swc(决策注入)", oxc:"oxc(决策注入)" };
-const SHORT  = { scalar:"scalar", jump_vec:"jump_vec", two_phase:"two_phase", yuku_old:"yuku-old", yuku_main:"yuku-main", swc:"swc", oxc:"oxc" };
+const COLORS = { scalar:"#e67e22", jump_vec:"#27ae60", two_phase:"#e74c3c", yuku_old:"#f0b27a", yuku_main:"#82e0aa", swc:"#9b59b6", oxc:"#1abc9c", oxc_bitmap:"#f1948a" };
+const NAMES  = { scalar:"scalar(全标量)", jump_vec:"jump_vec(单阶段+SIMD跳跃)", two_phase:"two_phase(两阶段)", yuku_old:"yuku-old", yuku_main:"yuku-main", swc:"swc(决策注入)", oxc:"oxc(决策注入)", oxc_bitmap:"oxc-bitmap(位图流水线)" };
+const SHORT  = { scalar:"scalar", jump_vec:"jump_vec", two_phase:"two_phase", yuku_old:"yuku-old", yuku_main:"yuku-main", swc:"swc", oxc:"oxc", oxc_bitmap:"oxc-bitmap" };
 const DESCR  = {
   scalar: "自有 · 全标量单阶段(无 SIMD)",
   jump_vec: "自有 · 单阶段 + SIMD 长跳跃",
@@ -146,10 +146,11 @@ const DESCR  = {
   yuku_old: "第三方 · yuku v0.10.1 钉版快照(引入向量化前)——本项目锚点,固定不更新",
   yuku_main: "第三方 · yuku 上游主干(跟踪更新,移动才重拉)",
   swc: "第三方 · swc lexer,决策注入驱动(同一 my-scanner 正则决策集,与 yuku 对拍同口径)",
-  oxc: "第三方 · oxc lexer,决策注入驱动(同上)"
+  oxc: "第三方 · oxc lexer,决策注入驱动(同上)",
+  oxc_bitmap: "第三方 · oxc_lexer 多位图流水线(孵化实验,歧义自决+spans 门禁;计时含 value lanes;仅 x86_64 SIMD)"
 };
 // 柱状图比照组:实现紧邻其同族参照,组间空一档
-const BAR_GROUPS = [["scalar", "yuku_old"], ["jump_vec", "yuku_main"], ["two_phase"], ["swc", "oxc"]];
+const BAR_GROUPS = [["scalar", "yuku_old"], ["jump_vec", "yuku_main"], ["two_phase", "oxc_bitmap"], ["swc", "oxc"]];
 const SLOTS = [];
 BAR_GROUPS.forEach((g, gi) => { if (gi > 0) SLOTS.push(null); for (const i of g) SLOTS.push(i); });
 const theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : null;

@@ -65,17 +65,29 @@ scripts/prepare-baselines.sh
 zig build -Doptimize=ReleaseFast bench -- --repeats="$REPEATS" $REFRESH_ZIG --json="$OUT/zig.json" "${CORPUS_FILES[@]}"
 
 echo
-echo "==== [5/5] swc/oxc 对照(lexbench-rs 决策注入驱动,x${REPEATS} 取最优)==="
-# 机制见 docs/architecture.md 的「swc/oxc 决策注入」:my-scanner 预扫产出
-# 正则决策集(主流+模板内),驱动 swc(零 patch)/oxc(vendored 2 行 patch)
-# 在决策点重扫;模板 ${} 用花括号平衡栈,与 yuku bench 同款口径。
+echo "==== [5/5] 第三方对照(swc/oxc 决策注入 + oxc_bitmap,x${REPEATS} 取最优)==="
+# 机制见 docs/architecture.md 的「第三方对照」:my-scanner 预扫产出正则
+# 决策集(主流+模板内),驱动 swc(零 patch)/oxc(vendored 2 行 patch)在决策点
+# 重扫;模板 ${} 用花括号平衡栈,与 yuku bench 同款口径。oxc_bitmap(oxc_lexer
+# 多位图流水线实验 crate)歧义内部自决、不接受注入,进矩阵前须过 spans 门禁。
 scripts/prepare-lexbench.sh
 DEC=build/lexbench-corpus
 mkdir -p "$DEC"
 for f in "${CORPUS_FILES[@]}"; do
   zig-out/bin/my-scanner --emit-regex-starts "$f" > "$DEC/$(basename "$f").regex"
 done
+# oxc_lexer 的 SIMD 核心仅 x86_64 静态 AVX2+BMI2 编译(其余平台 generic
+# fallback,数字不代表其实验形态,仅供 smoke)。RUSTFLAGS 对整个 lexbench-rs
+# 生效:swc/oxc 此前按 baseline SSE2 编(与 zig native 不对称),同开 avx2/bmi2
+# 是向公平修正,趋势断档记 docs/benchmarks.md。
+if [ "$(uname -m)" = "x86_64" ]; then
+  export RUSTFLAGS="-C target-feature=+avx2,+bmi2${RUSTFLAGS:+ $RUSTFLAGS}"
+fi
 ( cd tools/lexbench-rs && cargo build --release )
+if [ "${SKIP_DIFF:-0}" != "1" ]; then
+  echo "---- oxc_bitmap spans 门禁(歧义自决策的等价验证) ----"
+  node tools/compare-oxc-bitmap.mjs "${CORPUS_FILES[@]}"
+fi
 node scripts/run-rs-bench.mjs --repeats="$REPEATS" --regex-dir="$DEC" --json="$OUT/rs.json" $REFRESH_RS "${CORPUS_FILES[@]}"
 
 echo

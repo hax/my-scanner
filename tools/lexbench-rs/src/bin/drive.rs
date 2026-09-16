@@ -2,6 +2,12 @@
 //! 对齐 yuku bench 的 reScanAsRegex / reScanTemplateContinuation 口径。
 //! 输出 JSON 与 zig bench 的 --json 同构，由 scripts/make-report.mjs 汇总。
 //!
+//! oxc_bitmap（oxc_lexer 多位图流水线实验 crate）不接受注入：正则/除号由
+//! 内部 disambiguate pass 自决，「决策一致」改由 tools/compare-oxc-bitmap.mjs
+//! 的全语料 spans 对拍验证（进矩阵的前置门禁，见 ci-bench.sh）。
+//! 其交付物比别家重（value lanes：字符串 cooked、数字解析、atoms、注释元数据，
+//! 流水线内生不可关），计时含这部分工作，报告有口径注记。
+//!
 //! swc 的注入点全部是公开 API（`swc_ecma_parser::input::Tokens` trait）：
 //! - `set_next_regexp(Some(pos))` → 下一 token 强制从 pos 读正则（等价 reScanAsRegex）
 //! - `rescan_template_token(pos, false)` → 从 `}` 重扫模板续段（等价 reScanTemplateContinuation）
@@ -68,6 +74,9 @@ fn main() {
         println!("usage: drive [--repeats=N] [--regex=<file> | --regex-dir=<dir>] [--json=<path>] <file>...");
         std::process::exit(2);
     }
+    if !oxc_lexer::IS_SIMD {
+        eprintln!("warning: 非 x86_64+AVX2/BMI2 静态构建，oxc_bitmap 走 generic fallback（数字不代表其 SIMD 形态，仅供 smoke）");
+    }
 
     let single_set = regex_file.as_ref().map(|p| load_regex_set(p));
 
@@ -101,6 +110,7 @@ fn main() {
         let mut run = Run { file: path.clone(), bytes: src.len(), results: Vec::new() };
         run.results.push(NamedResult { name: "swc", result: Some(drive_swc(&src, repeats, &re_set)) });
         run.results.push(NamedResult { name: "oxc", result: Some(drive_oxc(&src, repeats, &re_set)) });
+        run.results.push(NamedResult { name: "oxc_bitmap", result: Some(drive_oxc_bitmap(&src, path, repeats)) });
         for nr in &run.results {
             if let Some(r) = &nr.result {
                 println!(
@@ -228,6 +238,41 @@ fn drive_swc(src: &str, repeats: u32, re_set: &HashSet<u32>) -> Timed {
             best_ns = dt;
         }
         count = n;
+    }
+    Timed { best_ns, tokens: count }
+}
+
+fn drive_oxc_bitmap(src: &str, path: &str, repeats: u32) -> Timed {
+    use oxc_lexer::{Arena, LexOptions, lex_utf8_arena, PAD};
+
+    // 与 bitmap_dump.rs 同款 options（两边必须一致，否则 spans 门禁失真）：
+    // 全部按 module 计；.ts/.mts/.cts 开 ts 关键字集；.tsx/.jsx 开 jsx。
+    let mut options = LexOptions { source_type_module: true, ..Default::default() };
+    options.ts = path.ends_with(".ts") || path.ends_with(".mts") || path.ends_with(".cts");
+    options.jsx = path.ends_with(".tsx") || path.ends_with(".jsx");
+    if path.ends_with(".tsx") {
+        options.ts = true;
+    }
+
+    // lex_utf8_arena 的调用契约：src 尾部须有 >= PAD 的零填充；arena 的
+    // token 容量 >= len + PAD。arena 跨轮复用（其设计意图即零分配稳态），
+    // 与 zig 侧 tokens.clearRetainingCapacity 同口径。
+    let mut bytes = src.as_bytes().to_vec();
+    bytes.extend_from_slice(&[0u8; PAD]);
+    let n = src.len() as u32;
+    let mut arena = Arena::new(n + PAD as u32, 65536, 0);
+
+    let mut best_ns = u128::MAX;
+    let mut count = 0usize;
+    for _ in 0..repeats {
+        let t0 = Instant::now();
+        let r = lex_utf8_arena(&bytes, n, options, &mut arena);
+        std::hint::black_box(&r);
+        let dt = t0.elapsed().as_nanos();
+        if dt < best_ns {
+            best_ns = dt;
+        }
+        count = r.token_count as usize;
     }
     Timed { best_ns, tokens: count }
 }

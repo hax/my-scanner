@@ -16,6 +16,9 @@ const DRIVE = join(ROOT, "tools/lexbench-rs/target/release/drive");
 const CACHE_PATH = join(ROOT, ".bench-deps/rs-bench-cache.json");
 const LOCK_PATH = join(ROOT, "tools/lexbench-rs/Cargo.lock");
 const OXC_DIR = join(ROOT, ".bench-deps/oxc_parser-0.150.0");
+// oxc_bitmap 的源:prepare-lexbench.sh 钉 rev 的 oxc 仓源码树(rev 不进
+// Cargo.lock,换 rev 必须失缓存,否则 oxc_bitmap 列沿用旧数字)
+const OXC_LEXER_DIR = join(ROOT, ".bench-deps/oxc/crates/oxc_lexer");
 
 let repeats = "10", regexDir, jsonOut, refresh = false;
 const files = [];
@@ -57,14 +60,17 @@ function dirFingerprint(dir) {
   return h.digest("hex");
 }
 
-// 工具指纹:依赖钉版(Cargo.lock)+ 编译器 + vendored oxc 内容
+// 工具指纹:依赖钉版(Cargo.lock)+ 编译器 + vendored oxc 内容 + RUSTFLAGS
+// (x86_64 的 avx2/bmi2 开关改变产物,见 ci-bench.sh)
 function toolFingerprint() {
   let rustc = "unknown";
   try { rustc = execFileSync("rustc", ["--version"], { encoding: "utf8" }).trim(); } catch { /* PATH 外 */ }
   const h = createHash("sha256");
   h.update(readFileSync(LOCK_PATH));
   h.update(rustc);
+  h.update(process.env.RUSTFLAGS ?? "");
   h.update(dirFingerprint(OXC_DIR));
+  h.update(dirFingerprint(OXC_LEXER_DIR));
   return h.digest("hex");
 }
 

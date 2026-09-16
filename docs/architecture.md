@@ -18,8 +18,8 @@
 | 实现名 | 架构族 | 驱动 | 跳跃 | 第三方参照 |
 | --- | --- | --- | --- | --- |
 | `scalar` | 全标量单阶段 | pos 循环 | 纯标量 | yuku-old（0.10.1） |
-| `jump_vec` | 单阶段 + SIMD 长跳跃 | pos 循环 | SIMD 原语 + 空白块扫 + 注释快跳 | yuku-main；swc/oxc（待接入） |
-| `two_phase` | 两阶段 SIMD | 位图 ctz 迭代 | SIMD 原语 | — |
+| `jump_vec` | 单阶段 + SIMD 长跳跃 | pos 循环 | SIMD 原语 + 空白块扫 + 注释快跳 | yuku-main / swc / oxc |
+| `two_phase` | 两阶段 SIMD | 位图 ctz 迭代 | SIMD 原语 | oxc_bitmap（孵化实验，见「oxc_bitmap」一节） |
 | （未实施） | 单阶段 + 按块候选缓冲 | 块内产掩码即消费 | SIMD 原语 | — |
 
 规则：任何语义修复/变更必须全变体差分全绿（`scripts/check.sh` 对
@@ -54,7 +54,8 @@ jump_vec 0.72x → two_phase 0.82x，梯度分离了各层净贡献（跳跃
 3. 架构矩阵基准（同进程 10 语料 × {scalar, jump_vec, two_phase,
    yuku-old, yuku-main}，N 轮取最优，正则/模板歧义点按同一决策集
    注入——yuku 走 `reScanAsRegex`/`reScanTemplateContinuation` 对拍）；
-4. swc/oxc 对照（lexbench-rs 决策注入驱动，机制见下「swc/oxc 决策注入」）；
+4. 第三方对照（lexbench-rs 独立进程：swc/oxc 决策注入驱动 +
+   oxc_bitmap spans 门禁，机制见下「swc/oxc 决策注入」「oxc_bitmap」两节）；
 5. `scripts/make-report.mjs` 汇总成 `report.md` + `data.json`
    （语料谱系表 + 变体 × 语料矩阵 + real/synthetic 分组几何平均）。
 
@@ -80,8 +81,9 @@ bench.zig → data.json 带入）与最近一次 CI run 的吞吐**柱状对比*
 （2026-09-16 自 yuku-main 切换，历史点由 data.json 的 best_ns 全量
 重算，序列无断档）；绝对吞吐（GB/s）仍仅同 run 内可比。另有
 "vs 同族参照"口径衡量各族自身成熟度：
-scalar 对 yuku-old、jump_vec 对 yuku-main（>1 即我方更快，two_phase
-无第三方参照），report.md 含同口径的分组几何平均表。
+scalar 对 yuku-old、jump_vec 对 yuku-main、two_phase 对 oxc_bitmap
+（>1 即我方更快；oxc_bitmap 口径注记见其专节与报告头），report.md
+含同口径的分组几何平均表。
 
 第三方基线的版本管理与本地缓存（`scripts/prepare-baselines.sh` +
 `src/bench.zig` / `scripts/run-rs-bench.mjs` 的缓存层）：
@@ -93,7 +95,8 @@ scalar 对 yuku-old、jump_vec 对 yuku-main（>1 即我方更快，two_phase
 - yuku-main 跟踪上游 HEAD：clone 时记 `<dir>.sha` 版本标记，每跑
   ls-remote 探测，上游移动才重 clone（离线沿用现有副本）。
 - swc/oxc 由 Cargo.lock + vendored oxc 钉版（升级走 prepare-lexbench.sh
-  的 VER/SHA256）。
+  的 VER/SHA256）；oxc_bitmap 的 oxc 仓源码树由 prepare-lexbench.sh
+  钉 rev（`.bench-deps/oxc.sha` 标记，换 rev 才重拉）。
 - **本地缓存**：第三方计时结果缓存在 `.bench-deps/`，键含基线版本
   标记、语料 sha256、轮数与编译器版本，任一变动自动失效——本地迭代
   不为第三方重复付费；`--refresh-baselines`（zig bench）/`--refresh`
@@ -102,8 +105,8 @@ scalar 对 yuku-old、jump_vec 对 yuku-main（>1 即我方更快，two_phase
   实测，缓存的绝对值不能跨 run 复用）。
 
 本地 run 可提交趋势页：`scripts/bench.sh --submit` 一键跑完整矩阵
-（默认全 10 语料）+ swc/oxc 对照 → 汇总 → 发布到 bench-reports 分支
-（凭据缺省回退 `gh auth token` 与 origin remote）。本地 run 的
+（默认全 10 语料）+ swc/oxc/oxc_bitmap 对照 → 汇总 → 发布到 bench-reports
+分支（凭据缺省回退 `gh auth token` 与 origin remote）。本地 run 的
 data.json 记 `channel=local` 与机器标识（默认 hostname），文件名
 `<sha>.local-<机器名>.*` 不与 CI 同 sha 互撞；趋势页默认只画 CI
 主线，勾选「叠加本地 run」后本地点以空心圆叠加（不连线，tooltip
@@ -354,3 +357,38 @@ cargo build → `drive --json` → make-report `--rs` 合并；swc/oxc 列进
 5. oxc 版本升级：prepare-lexbench.sh 的 VER/SHA256 同步更新并重贴
    patch（脚本对 patch 未生效有兜底报错）；长期可跟踪上游是否暴露
    re-lex（swc 公开 trait 是先例）。
+
+## oxc_bitmap：多位图流水线（two_phase 族第三方参照，2026-09-16 接入）
+
+oxc 主仓孵化的 `oxc_lexer` crate（2026-07 合入，与 oxc_parser 的 fused
+lexer 并存的双实现；孵化期 publish=false 不上 crates.io，钉 rev 取仓内
+源码树，prepare-lexbench.sh 负责）是**位图流水线族内另一个、且更极端的
+设计点**，做 two_phase 的第三方参照：
+
+- **六趟 unfused 流水线**：classify（纯 SIMD 产 7 种每 64B 块位图 +
+  每字节 kind 数组）→ misc_pre → carve（SIMD find 走字符串/注释/模板/
+  正则，字面量内部从位图清除）→ coalesce（操作符合并 + 模式作用域
+  关键字集）→ misc_post → compress（位图压成 SoA 平行 kinds[]/spans[]）。
+  我们认定的 two_phase 头号成本「趟间物化」在它身上放大到极限——它
+  同时是「第三形态」（单阶段 + 块候选缓冲，避免全文件物化）的设计参照：
+  其流水线分解演示了全物化的代价结构。
+- **歧义内部自决**（disambiguate pass，test262 全过；含 TS type-context
+  oracle——TS 泛型嵌套的 `>` run 拆单，tsc 同款哲学），**不接受外部
+  决策注入**。公平性改由 `tools/compare-oxc-bitmap.mjs` 全语料 spans
+  门禁验证：模板片（Head/Middle/Tail）与 `>` 拆分按吞噬同步对齐，
+  10/10 语料一致才进矩阵（ci-bench.sh 第 [5/5] 步内，`SKIP_DIFF` 同控）。
+- **交付物更重**：value lanes（字符串 cooked、数字解析 f64、atoms、
+  注释元数据、逐字对齐 oxc_parser 的 diagnostics）流水线内生不可关——
+  计时含这些别家不做的工作，解读「two_phase vs oxc_bitmap」同族参照
+  时记住口径；行号不建（line table 默认关）与全变体惰性 LineIndex
+  口径一致，UTF-8 validation 关闭对齐。
+- **平台**：SIMD 核心仅 x86_64 静态 AVX2+BMI2 编译，其余平台 generic
+  fallback（数字仅供 smoke）——本项注定是 **CI 限定列**。CI（ubuntu
+  x86_64）对 lexbench-rs 统一开 `-C target-feature=+avx2,+bmi2`，
+  swc/oxc 两列同步受益（此前 Rust 侧按 baseline SSE2 编，与 zig native
+  不对称，属向公平修正；趋势断档见 benchmarks.md）。SIMD 构建正确性
+  经 Rosetta 烟测：x86_64 交叉编译的 dump 与 generic 逐字节一致。
+
+计时接入与别家同口径：arena 跨轮复用（其零分配稳态设计意图，等价 zig
+侧 clearRetainingCapacity）、N 轮取最优、token 产出后丢弃；TS 泛型侧
+token 数略多（`>` 拆单），Mtok/s 按各自 token 数计。

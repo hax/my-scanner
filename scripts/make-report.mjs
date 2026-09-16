@@ -20,19 +20,19 @@ import os from "node:os";
 const IMPL_META = {
   scalar: { family: "全标量单阶段", peer: "yuku-old(0.10.1 快照)" },
   jump_vec: { family: "单阶段 + SIMD 长跳跃", peer: "yuku-main / swc / oxc" },
-  two_phase: { family: "两阶段 SIMD", peer: "—" },
+  two_phase: { family: "两阶段 SIMD", peer: "oxc_bitmap(孵化实验 crate)" },
   yuku_old: { family: "全标量单阶段(第三方)", peer: "scalar 的参照" },
   yuku_main: { family: "单阶段 + SIMD 长跳跃(第三方)", peer: "jump_vec 的参照" },
   swc: { family: "单阶段+字节搜索(第三方,决策注入驱动)", peer: "—" },
   oxc: { family: "单阶段+字节搜索(第三方,决策注入驱动)", peer: "—" },
+  oxc_bitmap: { family: "多位图流水线(第三方,孵化实验)", peer: "two_phase 的参照" },
 };
-const IMPL_ORDER = ["scalar", "jump_vec", "two_phase", "yuku_old", "yuku_main", "swc", "oxc"];
+const IMPL_ORDER = ["scalar", "jump_vec", "two_phase", "yuku_old", "yuku_main", "swc", "oxc", "oxc_bitmap"];
 const OWN = ["scalar", "jump_vec", "two_phase"]; // 自有架构(矩阵列)
 const ANCHOR = "yuku_old"; // 相对值锚点:钉版固定快照,跨 run 可比(yuku-main 跟踪上游会漂,不做锚)
 const ANCHOR_LABEL = "yuku-0.10.1";
-// 同族参照:自有实现 → 同架构族第三方对照(>1 即我方更快),衡量各族自身成熟度;
-// two_phase 无第三方参照
-const PEER = { scalar: "yuku_old", jump_vec: "yuku_main" };
+// 同族参照:自有实现 → 同架构族第三方对照(>1 即我方更快),衡量各族自身成熟度
+const PEER = { scalar: "yuku_old", jump_vec: "yuku_main", two_phase: "oxc_bitmap" };
 
 const argv = process.argv.slice(2);
 function opt(name, fallback = undefined) {
@@ -129,8 +129,11 @@ if (baselines) {
   const fb = (b) => (b ? [b.sha?.slice(0, 10), b.date?.slice(0, 10)].filter(Boolean).join(" ") : null);
   lines.push(`- 基线版本: yuku_old ${fb(baselines.yuku_old) ?? "?"} / yuku_main ${fb(baselines.yuku_main) ?? "?"}`);
 }
-lines.push(`- 同族参照: scalar vs yuku_old、jump_vec vs yuku_main(自有实现/同族第三方,>1 即我方更快;two_phase 无第三方参照)`);
-if (opt("--rs")) lines.push(`- swc/oxc: lexbench-rs 决策注入驱动(同一 my-scanner 正则决策集 + 模板花括号栈重扫,与 yuku 对拍同口径),独立进程`);
+lines.push(`- 同族参照: scalar vs yuku_old、jump_vec vs yuku_main、two_phase vs oxc_bitmap(自有实现/同族第三方,>1 即我方更快)`);
+if (opt("--rs")) {
+  lines.push(`- swc/oxc: lexbench-rs 决策注入驱动(同一 my-scanner 正则决策集 + 模板花括号栈重扫,与 yuku 对拍同口径),独立进程`);
+  lines.push(`- oxc_bitmap: oxc_lexer 多位图流水线(孵化实验 crate,钉 rev);歧义内部自决、经全语料 spans 门禁验证;计时含 value lanes(字符串 cooked/数字解析/atoms/注释元数据,比别家多做工);TS 泛型侧不融合 \`>\`,token 数略多;仅 x86_64+AVX2/BMI2 为 SIMD 形态,其余平台 generic fallback(仅 smoke)`);
+}
 lines.push("");
 lines.push("| 实现 | 架构族 | 第三方参照 |");
 lines.push("| --- | --- | --- |");

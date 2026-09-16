@@ -36,4 +36,4 @@ clone）。第三方计时结果缓存在 `.bench-deps/`（版本/语料/轮数/
 3. **性能结论以 bench 实测裁决**：指令数、采样 profile 只是线索不是证据。
 4. **性能表现必须结合语料谱系理解**：如 token 密度、unicode 密度、字符串/注释密度 —— 语料合理性判断及调整须向 hax 请示。语料分 `corpus/real/`（真实代码）与 `corpus/synthetic/`（构造极端样本，microbench/test 专用，与真实分列）；详见 docs/corpus.md。
 5. **实验无论成败都留档**：专题记录进 docs/、条目进 docs/roadmap.md；被否决的实验写明否决原因，架构相关进 docs/architecture.md。
-6. **与第三方 lexer 对比**必须考虑一致性和公平，歧义点决策需可控（`/` 按正则还是除号，`<` 是 jsx/小于/泛型）。
+6. **与第三方 lexer 对比**必须考虑一致性和公平，歧义点决策需可控（`/` 按正则还是除号，`<` 是 jsx/小于/泛型）——两条合规路径：决策注入（yuku/swc/oxc），或歧义自决 + `tools/compare-oxc-bitmap.mjs` 全语料 spans 门禁验证一致（oxc_bitmap）。

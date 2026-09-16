@@ -30,9 +30,9 @@ typescript.min.js 24KB 处把 `\s` 当标识符转义报 InvalidUnicodeEscape，
 同 run 实测，缓存的绝对值不能跨 run 复用。
 
 已知系统偏差：各实现按固定顺序测量（自家 → yuku-old → yuku-main →
-swc → oxc），runner 频率漂移给后测者 ~3% 量级的系统性劣势（CI 上
-yuku_old/yuku_main 恒 ≈0.96-0.98 即由此）；解读第三方相互差时留意，
-同族参照口径（位置相邻）受影响最小。
+swc → oxc → oxc_bitmap），runner 频率漂移给后测者 ~3% 量级的系统性
+劣势（CI 上 yuku_old/yuku_main 恒 ≈0.96-0.98 即由此）；解读第三方
+相互差时留意，同族参照口径（位置相邻）受影响最小。
 
 语料分 **real**（真实代码）与 **synthetic**（构造极端样本，microbench
 专用）两类，唯一权威存储是 corpus 分支（check.sh/ci-bench.sh 自动
@@ -71,7 +71,7 @@ bench-reports 分支并累积图表页（`index.html`，GitHub Pages 在线看�
 「vs yuku-0.10.1 倍数」为主口径——锚点是钉版快照、固定不漂，相对
 倍数跨 run、跨 runner 代际均可比（2026-09-16 自 yuku-main 切换，
 历史点由 best_ns 全量重算，无断档）；「vs 同族参照」口径（scalar 对
-yuku-old、jump_vec 对 yuku-main）衡量各族
+yuku-old、jump_vec 对 yuku-main、two_phase 对 oxc_bitmap）衡量各族
 自身成熟度。首批本地基线梯度与各层净贡献的拆解见
 [architecture.md](architecture.md) 的「总览」一节。
 
@@ -126,3 +126,15 @@ best_ns 重算 ratio（弃用旧 vs_anchor 字段），历史点同步换算、�
 统一；唯钉版日之前的 yuku_old 实为 main 副本（见上节），各倍数序列
 在该日同有一次性语义跳变——与「vs 同族参照」断档同因同日。
 GB/s 与「vs 同族参照」口径定义不变。
+
+## 附：趋势页断档说明（swc/oxc 编译特性 + oxc_bitmap 进矩阵）
+
+2026-09-16 起 CI（x86_64）对 lexbench-rs 统一开
+`-C target-feature=+avx2,+bmi2`：oxc_bitmap 的 SIMD 核心此前提，
+swc/oxc 两列同步受益——此前 Rust 侧按 baseline SSE2 编（zig 侧
+native，口径不对称），故 swc/oxc 的绝对值与相对值在此**断档跳变
+一次**（方向向上，幅度随语料）。同日起矩阵新增 **oxc_bitmap** 列
+（oxc_lexer 多位图流水线实验 crate，two_phase 族第三方参照）：
+歧义内部自决 + 全语料 spans 门禁、计时含 value lanes、仅 x86_64
+SIMD 形态（其余平台 generic fallback 仅 smoke）——口径注记见
+architecture.md 的「oxc_bitmap」一节与 report.md 头部。
