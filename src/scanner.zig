@@ -466,8 +466,7 @@ pub inline fn isIdentPartRune(cp: u21) bool {
 }
 
 /// 标识符/关键字。ASCII 段走快路径（标量 8 字节 + SIMD 续扫），
-/// 遇非 ASCII 字节按 UTF-8 解码查 ID_Continue 表续扫——unicode 标识符
-/// 字符在真实代码中罕见，二分查表（~10 次比较）的代价可接受。
+/// 遇非 ASCII 字节按 UTF-8 解码查 ID_Continue 两级位图续扫。
 pub fn scanIdentifier(src: []const u8, start: usize) Token {
     // 首字符合法性由分发保证（ASCII ident start、已验证的非 ASCII
     // ID_Start、或已验证的 \uXXXX 转义）；按实际宽度推进，不能假设 +1
@@ -493,6 +492,32 @@ pub fn scanIdentifier(src: []const u8, start: usize) Token {
     const kind: TokenKind =
         if (isKeyword(src[start..i])) .keyword else .identifier;
     return .{ .kind = kind, .start = @intCast(start), .end = @intCast(i) };
+}
+
+/// 非 ASCII 起始标识符的扫描：首字符已由 scanNonAscii decode 并验证
+/// ID_Start（直接复用，不再二次 decode）；keyword 判别可跳过——关键字
+/// 全 ASCII，含非 ASCII 字节的文本 memcmp 必败。入口固定成本是 CJK
+/// 标识符密集语料的吞吐关键（oxc 同款结构：handler 直达 + 单 decode）。
+fn scanUnicodeIdentifier(src: []const u8, start: usize, first: unicode.Rune) Token {
+    var i = start + first.len;
+    while (i < src.len) {
+        const c = src[i];
+        if (c == '\\') {
+            const r = decodeIdentEscape(src, i) orelse break;
+            if (!isIdentPartRune(r.cp)) break;
+            i += 6;
+            continue;
+        }
+        if (c < 0x80) {
+            i = asciiIdentEnd(src, i);
+            if (i < src.len and src[i] >= 0x80) continue;
+            break;
+        }
+        const r = unicode.decode(src, i) orelse break;
+        if (!unicode.isIdContinue(r.cp)) break;
+        i += r.len;
+    }
+    return .{ .kind = .identifier, .start = @intCast(start), .end = @intCast(i) };
 }
 
 /// ASCII 标识符字符段的结尾：标量快扫前 8 字节（多数标识符不长），
@@ -637,7 +662,7 @@ fn scanNonAscii(src: []const u8, start: usize) Token {
     }
     // Unicode 标识符首字符（ID_Start）
     if (unicode.decode(src, start)) |r| {
-        if (unicode.isIdStart(r.cp)) return scanIdentifier(src, start);
+        if (unicode.isIdStart(r.cp)) return scanUnicodeIdentifier(src, start, r);
     }
     const len = @min(utf8Len(src[start]), src.len - start);
     return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(start + len) };

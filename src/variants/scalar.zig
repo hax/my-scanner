@@ -174,10 +174,33 @@ fn scanNonAsciiScalar(src: []const u8, start: usize) Token {
         return .{ .kind = .whitespace, .start = @intCast(start), .end = @intCast(start + len) };
     }
     if (unicode.decode(src, start)) |r| {
-        if (unicode.isIdStart(r.cp)) return scanIdentifierScalar(src, start);
+        if (unicode.isIdStart(r.cp)) return scanUnicodeIdentifierScalar(src, start, r);
     }
     const len = @min(utf8LenScalar(src[start]), src.len - start);
     return .{ .kind = .illegal, .start = @intCast(start), .end = @intCast(start + len) };
+}
+
+/// scanUnicodeIdentifier 的标量版（首字符已验证，直通循环，免 keyword 判别）。
+fn scanUnicodeIdentifierScalar(src: []const u8, start: usize, first: unicode.Rune) Token {
+    var i = start + first.len;
+    while (i < src.len) {
+        const c = src[i];
+        if (c == '\\') {
+            const r = scanner.decodeIdentEscape(src, i) orelse break;
+            if (!scanner.isIdentPartRune(r.cp)) break;
+            i += 6;
+            continue;
+        }
+        if (c < 0x80) {
+            if (!simd.isIdentPart(c)) break;
+            i += 1;
+            continue;
+        }
+        const r = unicode.decode(src, i) orelse break;
+        if (!unicode.isIdContinue(r.cp)) break;
+        i += r.len;
+    }
+    return .{ .kind = .identifier, .start = @intCast(start), .end = @intCast(i) };
 }
 
 fn utf8LenScalar(first: u8) usize {
