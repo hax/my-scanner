@@ -1,0 +1,444 @@
+{
+ "sha": "df9f7ccec0c2093218150098512baf34753d744c",
+ "date": "2026-09-16T06:35:44.211Z",
+ "subject": "ci: package-lock 的 registry URL 改回 npmjs —— 内网 host 在 CI 不可达",
+ "repeats": 25,
+ "runner": {
+  "os": "Linux x86_64",
+  "cpu": "model name\t: AMD EPYC 9V74 80-Core Processor",
+  "zig": "0.16.0"
+ },
+ "files": [
+  {
+   "file": "corpus/real/typescript.min.js",
+   "bytes": 2959754,
+   "results": {
+    "scalar": {
+     "best_ns": 17637327,
+     "tokens": 1048546,
+     "gbps": 0.16781193658200022,
+     "mtoks": 59.450391774218396,
+     "vs_anchor": 0.9936765361327144
+    },
+    "jump_vec": {
+     "best_ns": 15044897,
+     "tokens": 1048546,
+     "gbps": 0.19672809989991955,
+     "mtoks": 69.69446184975544,
+     "vs_anchor": 1.164899832813744
+    },
+    "two_phase": {
+     "best_ns": 16400847,
+     "tokens": 1048546,
+     "gbps": 0.18046348459930148,
+     "mtoks": 63.93242983121542,
+     "vs_anchor": 1.068591030694939
+    },
+    "yuku_old": {
+     "best_ns": 16872696,
+     "tokens": 1053017,
+     "gbps": 0.17541677986730753,
+     "mtoks": 62.40952838835003,
+     "vs_anchor": 1.0387076256218923
+    },
+    "yuku_main": {
+     "best_ns": 17525798,
+     "tokens": 1053017,
+     "gbps": 0.1688798421618234,
+     "mtoks": 60.08382614018489,
+     "vs_anchor": 1
+    }
+   },
+   "group": "real",
+   "tag": "minified bundle"
+  },
+  {
+   "file": "corpus/real/typescript.js",
+   "bytes": 8207497,
+   "results": {
+    "scalar": {
+     "best_ns": 27268952,
+     "tokens": 1122438,
+     "gbps": 0.30098322077064055,
+     "mtoks": 41.161757884938154,
+     "vs_anchor": 0.9062441416890535
+    },
+    "jump_vec": {
+     "best_ns": 19997220,
+     "tokens": 1122438,
+     "gbps": 0.41043190003410474,
+     "mtoks": 56.129702028581974,
+     "vs_anchor": 1.2357881745562633
+    },
+    "two_phase": {
+     "best_ns": 22100619,
+     "tokens": 1122438,
+     "gbps": 0.3713695530428356,
+     "mtoks": 50.787627260575825,
+     "vs_anchor": 1.118173567898709
+    },
+    "yuku_old": {
+     "best_ns": 24158887,
+     "tokens": 1126204,
+     "gbps": 0.33972993043926236,
+     "mtoks": 46.616551499247464,
+     "vs_anchor": 1.0229083814995286
+    },
+    "yuku_main": {
+     "best_ns": 24712328,
+     "tokens": 1126204,
+     "gbps": 0.33212156297051415,
+     "mtoks": 45.57255795568916,
+     "vs_anchor": 1
+    }
+   },
+   "group": "real",
+   "tag": "编译器 bundle（未压缩）"
+  },
+  {
+   "file": "corpus/real/checker.ts",
+   "bytes": 3120982,
+   "results": {
+    "scalar": {
+     "best_ns": 9269083,
+     "tokens": 343904,
+     "gbps": 0.3367088200634302,
+     "mtoks": 37.102267829514524,
+     "vs_anchor": 0.8773051228476431
+    },
+    "jump_vec": {
+     "best_ns": 6669696,
+     "tokens": 343904,
+     "gbps": 0.4679346704857313,
+     "mtoks": 51.56217014988389,
+     "vs_anchor": 1.2192180873011305
+    },
+    "two_phase": {
+     "best_ns": 7400845,
+     "tokens": 343904,
+     "gbps": 0.42170617003869154,
+     "mtoks": 46.46820734659353,
+     "vs_anchor": 1.0987683163206363
+    },
+    "yuku_old": {
+     "best_ns": 7977161,
+     "tokens": 344506,
+     "gbps": 0.3912396904111626,
+     "mtoks": 43.186542179605,
+     "vs_anchor": 1.0193869723827813
+    },
+    "yuku_main": {
+     "best_ns": 8131814,
+     "tokens": 344506,
+     "gbps": 0.383798989991655,
+     "mtoks": 42.36520904191857,
+     "vs_anchor": 1
+    }
+   },
+   "group": "real",
+   "tag": "编译器源码"
+  },
+  {
+   "file": "corpus/real/lib.dom.d.ts",
+   "bytes": 1874901,
+   "results": {
+    "scalar": {
+     "best_ns": 3511178,
+     "tokens": 116894,
+     "gbps": 0.5339806184704963,
+     "mtoks": 33.29196070378659,
+     "vs_anchor": 0.6294220913892716
+    },
+    "jump_vec": {
+     "best_ns": 1962580,
+     "tokens": 116894,
+     "gbps": 0.9553246237096067,
+     "mtoks": 59.56139367567182,
+     "vs_anchor": 1.126075370175993
+    },
+    "two_phase": {
+     "best_ns": 2394580,
+     "tokens": 116894,
+     "gbps": 0.7829769729973524,
+     "mtoks": 48.81607630565694,
+     "vs_anchor": 0.9229230178152328
+    },
+    "yuku_old": {
+     "best_ns": 2135410,
+     "tokens": 116934,
+     "gbps": 0.878005160601477,
+     "mtoks": 54.759507541877205,
+     "vs_anchor": 1.0349361480933403
+    },
+    "yuku_main": {
+     "best_ns": 2210013,
+     "tokens": 116934,
+     "gbps": 0.8483665028214766,
+     "mtoks": 52.91100097601236,
+     "vs_anchor": 1
+    }
+   },
+   "group": "real",
+   "tag": "注释密集 d.ts"
+  },
+  {
+   "file": "corpus/real/react.js",
+   "bytes": 72141,
+   "results": {
+    "scalar": {
+     "best_ns": 149184,
+     "tokens": 8410,
+     "gbps": 0.4835706241956242,
+     "mtoks": 56.373337623337626,
+     "vs_anchor": 0.7600681038181039
+    },
+    "jump_vec": {
+     "best_ns": 110747,
+     "tokens": 8410,
+     "gbps": 0.6514036497602644,
+     "mtoks": 75.93885161674808,
+     "vs_anchor": 1.0238652062809828
+    },
+    "two_phase": {
+     "best_ns": 115754,
+     "tokens": 8410,
+     "gbps": 0.6232268431328507,
+     "mtoks": 72.65407674896764,
+     "vs_anchor": 0.9795773796153913
+    },
+    "yuku_old": {
+     "best_ns": 103185,
+     "tokens": 8410,
+     "gbps": 0.699142317197267,
+     "mtoks": 81.50409458739158,
+     "vs_anchor": 1.0989000339196588
+    },
+    "yuku_main": {
+     "best_ns": 113390,
+     "tokens": 8410,
+     "gbps": 0.6362201252315018,
+     "mtoks": 74.16879795396419,
+     "vs_anchor": 1
+    }
+   },
+   "group": "real",
+   "tag": "库源码（小文件）"
+  },
+  {
+   "file": "corpus/real/hanzi-chai.ts",
+   "bytes": 254527,
+   "results": {
+    "scalar": {
+     "best_ns": 1365001,
+     "tokens": 46743,
+     "gbps": 0.18646653006115013,
+     "mtoks": 34.243930956827136,
+     "vs_anchor": 1.0279838622828847
+    },
+    "jump_vec": {
+     "best_ns": 1358973,
+     "tokens": 46743,
+     "gbps": 0.1872936401238288,
+     "mtoks": 34.39582684865704,
+     "vs_anchor": 1.0325436929210514
+    },
+    "two_phase": {
+     "best_ns": 1346394,
+     "tokens": 46743,
+     "gbps": 0.1890434746441235,
+     "mtoks": 34.717177884036914,
+     "vs_anchor": 1.0421904732195777
+    },
+    "yuku_old": {
+     "best_ns": 1398993,
+     "tokens": 47129,
+     "gbps": 0.18193586386779634,
+     "mtoks": 33.68780258371557,
+     "vs_anchor": 1.0030064482095336
+    },
+    "yuku_main": {
+     "best_ns": 1403199,
+     "tokens": 47129,
+     "gbps": 0.18139052265573166,
+     "mtoks": 33.586825532230286,
+     "vs_anchor": 1
+    }
+   },
+   "group": "real",
+   "tag": "CJK 标识符密集"
+  },
+  {
+   "file": "corpus/real/mon-entreprise.ts",
+   "bytes": 104340,
+   "results": {
+    "scalar": {
+     "best_ns": 344748,
+     "tokens": 15657,
+     "gbps": 0.30265585297086567,
+     "mtoks": 45.41578196247694,
+     "vs_anchor": 0.7691357165233736
+    },
+    "jump_vec": {
+     "best_ns": 274112,
+     "tokens": 15657,
+     "gbps": 0.38064732664020545,
+     "mtoks": 57.118987858977356,
+     "vs_anchor": 0.9673345201961242
+    },
+    "two_phase": {
+     "best_ns": 292460,
+     "tokens": 15657,
+     "gbps": 0.3567667373316009,
+     "mtoks": 53.53552622580866,
+     "vs_anchor": 0.9066470628462012
+    },
+    "yuku_old": {
+     "best_ns": 262985,
+     "tokens": 15872,
+     "gbps": 0.3967526665018917,
+     "mtoks": 60.35325208662091,
+     "vs_anchor": 1.0082628286784416
+    },
+    "yuku_main": {
+     "best_ns": 265158,
+     "tokens": 15872,
+     "gbps": 0.39350123322698166,
+     "mtoks": 59.858650314152314,
+     "vs_anchor": 1
+    }
+   },
+   "group": "real",
+   "tag": "拉丁变音标识符（偶发 unicode）"
+  },
+  {
+   "file": "corpus/synthetic/line-comments.js",
+   "bytes": 1676670,
+   "results": {
+    "scalar": {
+     "best_ns": 2359667,
+     "tokens": 90001,
+     "gbps": 0.7105536501548736,
+     "mtoks": 38.141398765164745,
+     "vs_anchor": 0.4901746729517343
+    },
+    "jump_vec": {
+     "best_ns": 1338392,
+     "tokens": 90001,
+     "gbps": 1.2527495681384826,
+     "mtoks": 67.24562011727505,
+     "vs_anchor": 0.8642079450564558
+    },
+    "two_phase": {
+     "best_ns": 1770121,
+     "tokens": 90001,
+     "gbps": 0.9472064339104502,
+     "mtoks": 50.84454678521977,
+     "vs_anchor": 0.6534293418359536
+    },
+    "yuku_old": {
+     "best_ns": 1128617,
+     "tokens": 90001,
+     "gbps": 1.485596973995607,
+     "mtoks": 79.74450145620702,
+     "vs_anchor": 1.0248374780815812
+    },
+    "yuku_main": {
+     "best_ns": 1156649,
+     "tokens": 90001,
+     "gbps": 1.4495927459410762,
+     "mtoks": 77.81185130493347,
+     "vs_anchor": 1
+    }
+   },
+   "group": "synthetic",
+   "tag": "行注释密集（构造）"
+  },
+  {
+   "file": "corpus/synthetic/strings.js",
+   "bytes": 547460,
+   "results": {
+    "scalar": {
+     "best_ns": 1289098,
+     "tokens": 84001,
+     "gbps": 0.4246845468692062,
+     "mtoks": 65.1626175822164,
+     "vs_anchor": 0.6955312939745465
+    },
+    "jump_vec": {
+     "best_ns": 1063258,
+     "tokens": 84001,
+     "gbps": 0.5148891426163734,
+     "mtoks": 79.00340274890948,
+     "vs_anchor": 0.8432647579420988
+    },
+    "two_phase": {
+     "best_ns": 1140825,
+     "tokens": 84001,
+     "gbps": 0.4798807880262091,
+     "mtoks": 73.63180154712599,
+     "vs_anchor": 0.785929480858151
+    },
+    "yuku_old": {
+     "best_ns": 882036,
+     "tokens": 84001,
+     "gbps": 0.620677614065639,
+     "mtoks": 95.23534186813237,
+     "vs_anchor": 1.0165208676289856
+    },
+    "yuku_main": {
+     "best_ns": 896608,
+     "tokens": 84001,
+     "gbps": 0.6105901352653557,
+     "mtoks": 93.6875423819551,
+     "vs_anchor": 1
+    }
+   },
+   "group": "synthetic",
+   "tag": "字符串密集（构造）"
+  },
+  {
+   "file": "corpus/synthetic/cn-dense.ts",
+   "bytes": 967530,
+   "results": {
+    "scalar": {
+     "best_ns": 2468660,
+     "tokens": 88001,
+     "gbps": 0.39192517398102616,
+     "mtoks": 35.64727422974407,
+     "vs_anchor": 0.8606057537287435
+    },
+    "jump_vec": {
+     "best_ns": 2166907,
+     "tokens": 88001,
+     "gbps": 0.44650278023006984,
+     "mtoks": 40.61134141889799,
+     "vs_anchor": 0.9804495532110976
+    },
+    "two_phase": {
+     "best_ns": 2182951,
+     "tokens": 88001,
+     "gbps": 0.4432211258979244,
+     "mtoks": 40.31286089335033,
+     "vs_anchor": 0.9732435588338905
+    },
+    "yuku_old": {
+     "best_ns": 2094849,
+     "tokens": 94401,
+     "gbps": 0.4618614515891121,
+     "mtoks": 45.06339120385288,
+     "vs_anchor": 1.0141747686826115
+    },
+    "yuku_main": {
+     "best_ns": 2124543,
+     "tokens": 94401,
+     "gbps": 0.45540617441021436,
+     "mtoks": 44.43355582824165,
+     "vs_anchor": 1
+    }
+   },
+   "group": "synthetic",
+   "tag": "CJK 标识符极端（构造）"
+  }
+ ],
+ "label": null
+}
