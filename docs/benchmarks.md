@@ -2,7 +2,8 @@
 
 性能相关的口径定义与历史数字都在本文。当前架构矩阵的基线与 CI 趋势页
 机制见 [architecture.md](architecture.md)；本文数字为本地 M2 快照，
-最新正式数字以 CI（bench-reports 分支趋势页）为准。
+最新正式数字以 CI 趋势页（GitHub Pages:
+<https://johnhax.net/my-scanner/>，源为 bench-reports 分支）为准。
 
 ## 对比口径
 
@@ -51,9 +52,11 @@ checker.ts 持平。**lib.dom.d.ts 上 yuku-main 反超**——注释密集语�
 
 项目已转为多架构变体并行演化（scalar / jump_vec / two_phase），每次
 push 到 main 由 CI 自动跑全变体差分 + 矩阵基准，报告归档到
-bench-reports 分支并累积趋势页（`index.html`）。趋势页以
+bench-reports 分支并累积趋势页（`index.html`，GitHub Pages 在线看：
+<https://johnhax.net/my-scanner/>）。趋势页以
 「vs yuku-main 倍数」为主口径——绝对吞吐跨 runner 代际不可比，同 run
-内相对值始终有效。首批本地基线梯度与各层净贡献的拆解见
+内相对值始终有效；「vs 同族参照」口径（scalar 对 yuku-old、jump_vec
+对 yuku-main）衡量各族自身成熟度。首批本地基线梯度与各层净贡献的拆解见
 [architecture.md](architecture.md) 的「总览」一节。
 
 ## 历史演进（two_phase 主线）

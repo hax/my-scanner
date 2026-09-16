@@ -27,9 +27,13 @@ for (const f of readdirSync(reportsDir)) {
 runs.sort((a, b) => a.date.localeCompare(b.date));
 
 // index.json:运行列表 + 每文件每实现的 vs yuku_main 与 GB/s 序列
+// 同族参照(与 make-report.mjs 的 PEER 同步):自有实现 → 同族第三方对照,
+// pratio 由 best_ns 补算,历史 run 无 vs_peer 字段也兼容
+const PEERS = { scalar: "yuku_old", jump_vec: "yuku_main" };
 const index = {
   updated: new Date().toISOString(),
   anchor: "yuku_main",
+  peers: PEERS,
   impls: ["scalar", "jump_vec", "two_phase", "yuku_old", "yuku_main"],
   runs: runs.map((r) => ({ sha: r.sha, date: r.date, subject: r.subject, runner: r.runner })),
   series: {},
@@ -43,7 +47,14 @@ for (const file of fileNames) {
     const fr = (r.files ?? []).find((f) => f.file === file);
     for (const impl of index.impls) {
       const e = fr?.results?.[impl];
-      series[impl].push(e ? { gbps: round(e.gbps), ratio: round(e.vs_anchor), sha: r.sha.slice(0, 10), date: r.date } : null);
+      let pratio = null;
+      if (e) {
+        const peer = PEERS[impl];
+        const pv = e.vs_peer ?? (peer && fr?.results?.[peer]?.best_ns > 0 && e.best_ns > 0
+          ? fr.results[peer].best_ns / e.best_ns : null);
+        if (pv != null) pratio = round(pv);
+      }
+      series[impl].push(e ? { gbps: round(e.gbps), ratio: round(e.vs_anchor), pratio, sha: r.sha.slice(0, 10), date: r.date } : null);
     }
   }
   index.series[file] = series;
@@ -76,9 +87,11 @@ const html = `<!doctype html>
 </head>
 <body>
 <h1>my-scanner 架构矩阵基准 — 趋势</h1>
-<p class="meta">相对值锚点 <code>yuku_main</code>(&gt;1 即更快)。绝对吞吐跨 runner 代际不可比,
+<p class="meta">相对值锚点 <code>yuku_main</code>(&gt;1 即更快);同族参照 = 自有实现 /
+同族第三方对照(scalar→yuku-old、jump_vec→yuku-main,&gt;1 即我方更快),衡量各族自身成熟度,
+该口径只画有对照的 scalar / jump_vec。绝对吞吐跨 runner 代际不可比,
 同 run 内相对值始终有效。每次 push 一个点;架构变体语义由差分门禁保证。</p>
-<p class="mode">口径: <button id="mode-ratio" class="on">vs yuku-main</button><button id="mode-gbps">GB/s</button>
+<p class="mode">口径: <button id="mode-ratio" class="on">vs yuku-main</button><button id="mode-peer">vs 同族参照</button><button id="mode-gbps">GB/s</button>
 <span class="meta" id="runinfo"></span></p>
 <div id="files"></div>
 <script>
@@ -105,9 +118,11 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
       svg.innerHTML = "";
       const W = 1000, H = 260, P = 34;
       const n = idx.runs.length;
+      const pval = p => mode === "gbps" ? p.gbps : mode === "peer" ? p.pratio : p.ratio;
+      const shown = impl => mode !== "peer" || idx.peers[impl]; // 同族口径只画有第三方参照的实现
       let ymax = 0;
-      for (const impl of idx.impls) for (const p of series[impl]) if (p) ymax = Math.max(ymax, mode === "ratio" ? p.ratio : p.gbps);
-      if (mode === "ratio") ymax = Math.max(ymax, 1.15);
+      for (const impl of idx.impls) { if (!shown(impl)) continue; for (const p of series[impl]) if (p && pval(p) != null) ymax = Math.max(ymax, pval(p)); }
+      if (mode !== "gbps") ymax = Math.max(ymax, 1.15);
       ymax *= 1.08;
       const x = i => n <= 1 ? W / 2 : P + (W - 2 * P) * i / (n - 1);
       const y = v => H - P - (H - 2 * P) * Math.min(v, ymax) / ymax;
@@ -124,7 +139,7 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
         t.setAttribute("x", 4); t.setAttribute("y", gy + 4); t.setAttribute("font-size", 11); t.setAttribute("fill", "currentColor"); t.setAttribute("opacity", .6);
         t.textContent = val; svg.appendChild(t);
       }
-      if (mode === "ratio") { // 1.0 参考线
+      if (mode !== "gbps") { // 1.0 参考线
         const l = document.createElementNS(svgNS, "line");
         l.setAttribute("x1", P); l.setAttribute("x2", W - P);
         l.setAttribute("y1", y(1)); l.setAttribute("y2", y(1));
@@ -132,17 +147,18 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
         svg.appendChild(l);
       }
       for (const impl of idx.impls) {
+        if (!shown(impl)) continue;
         let d = "", pen = false;
         series[impl].forEach((p, i) => {
-          if (!p) { pen = false; return; }
-          const px = x(i), py = y(mode === "ratio" ? p.ratio : p.gbps);
+          if (!p || pval(p) == null) { pen = false; return; }
+          const px = x(i), py = y(pval(p));
           d += (pen ? "L" : "M") + px.toFixed(1) + " " + py.toFixed(1) + " ";
           pen = true;
           const c = document.createElementNS(svgNS, "circle");
           c.setAttribute("cx", px); c.setAttribute("cy", py); c.setAttribute("r", 2.6);
           c.setAttribute("fill", COLORS[impl]);
           const tip = document.createElementNS(svgNS, "title");
-          tip.textContent = NAMES[impl] + " " + (mode === "ratio" ? p.ratio + "x" : p.gbps + " GB/s") + " @ " + p.sha + " " + p.date.slice(0, 10);
+          tip.textContent = NAMES[impl] + " " + pval(p) + (mode === "gbps" ? " GB/s" : "x") + " @ " + p.sha + " " + p.date.slice(0, 10);
           c.appendChild(tip); svg.appendChild(c);
         });
         if (d) {
@@ -159,10 +175,10 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
     const last = idx.runs.length - 1;
     const fr = series;
     const tbl = document.createElement("table");
-    tbl.innerHTML = "<tr><th>实现</th><th>vs yuku-main</th><th>GB/s</th></tr>" +
+    tbl.innerHTML = "<tr><th>实现</th><th>vs yuku-main</th><th>vs 同族参照</th><th>GB/s</th></tr>" +
       idx.impls.map(impl => {
         const p = fr[impl][last];
-        return p ? "<tr><td>" + NAMES[impl] + "</td><td>" + p.ratio.toFixed(2) + "x</td><td>" + p.gbps.toFixed(2) + "</td></tr>" : "";
+        return p ? "<tr><td>" + NAMES[impl] + "</td><td>" + p.ratio.toFixed(2) + "x</td><td>" + (p.pratio != null ? p.pratio.toFixed(2) + "x" : "—") + "</td><td>" + p.gbps.toFixed(2) + "</td></tr>" : "";
       }).join("");
     sec.appendChild(tbl);
     root.appendChild(sec);
@@ -174,10 +190,12 @@ const redrawFns = [];
 const setMode = m => {
   mode = m;
   document.getElementById("mode-ratio").classList.toggle("on", m === "ratio");
+  document.getElementById("mode-peer").classList.toggle("on", m === "peer");
   document.getElementById("mode-gbps").classList.toggle("on", m === "gbps");
   redrawFns.forEach(f => f());
 };
 document.getElementById("mode-ratio").onclick = () => setMode("ratio");
+document.getElementById("mode-peer").onclick = () => setMode("peer");
 document.getElementById("mode-gbps").onclick = () => setMode("gbps");
 </script>
 </body>
@@ -185,18 +203,24 @@ document.getElementById("mode-gbps").onclick = () => setMode("gbps");
 `;
 writeFileSync(join(pubDir, "index.html"), html);
 
+// GitHub Pages(deploy from branch,源 = 本分支根目录):跳过 Jekyll,
+// index.html 原样服务、reports/*.md 以纯文本可读
+writeFileSync(join(pubDir, ".nojekyll"), "");
+
 // 分支自述
 const readme = `# my-scanner 架构矩阵基准报告
 
 每次 push 到 main 触发(\`.github/workflows/bench.yml\`):全变体差分门禁 →
 架构矩阵基准 → 本分支归档。
 
-- [index.html](index.html) — 趋势页(相对 yuku-main 的倍数,跨 runner 代际可比)
+在线趋势页(GitHub Pages,源 = 本分支): <https://johnhax.net/my-scanner/>
+
+- [index.html](index.html) — 趋势页(vs yuku-main / vs 同族参照 / GB/s 三种口径,相对值跨 runner 代际可比)
 - [reports/](reports/) — 每次 run 的 \`<sha>.md\`(人读报告)与 \`<sha>.json\`(原始数据)
 
 对比口径与架构族谱见仓库 docs/architecture.md。
 `;
 writeFileSync(join(pubDir, "README.md"), readme);
-console.log("index.html / README.md 已生成");
+console.log("index.html / .nojekyll / README.md 已生成");
 
 function round(x) { return Math.round(x * 1000) / 1000; }

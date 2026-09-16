@@ -27,6 +27,9 @@ const IMPL_META = {
 const IMPL_ORDER = ["scalar", "jump_vec", "two_phase", "yuku_old", "yuku_main", "swc", "oxc"];
 const OWN = ["scalar", "jump_vec", "two_phase"]; // 自有架构(矩阵列)
 const ANCHOR = "yuku_main"; // 相对值锚点
+// 同族参照:自有实现 → 同架构族第三方对照(>1 即我方更快),衡量各族自身成熟度;
+// two_phase 无第三方参照
+const PEER = { scalar: "yuku_old", jump_vec: "yuku_main" };
 
 const argv = process.argv.slice(2);
 function opt(name, fallback = undefined) {
@@ -85,6 +88,10 @@ const fileRuns = [...files.entries()].map(([file, f]) => {
   }
   const anchor = results[ANCHOR];
   if (anchor) for (const r of Object.values(results)) r.vs_anchor = anchor.best_ns / r.best_ns;
+  for (const [name, peer] of Object.entries(PEER)) {
+    const r = results[name], p = results[peer];
+    if (r && p && r.best_ns > 0) r.vs_peer = p.best_ns / r.best_ns;
+  }
   const m = metaByPath.get(file);
   return { file, bytes: f.bytes, results, group: m?.group ?? "—", tag: m?.tag ?? "—", order: m?.order ?? 999 };
 });
@@ -107,6 +114,7 @@ lines.push(`- 日期: ${dataJson.date}`);
 lines.push(`- 轮数: 每实现 ${repeats} 轮取最优;同进程、同文件、token 产出后丢弃`);
 lines.push(`- 环境: ${runner.os}${runner.cpu ? ` / ${runner.cpu}` : ""}${runner.zig ? ` / zig ${runner.zig}` : ""}`);
 lines.push(`- 相对值锚点: ${ANCHOR}(各实现/锚点,>1 即更快)`);
+lines.push(`- 同族参照: scalar vs yuku_old、jump_vec vs yuku_main(自有实现/同族第三方,>1 即我方更快;two_phase 无第三方参照)`);
 lines.push("");
 lines.push("| 实现 | 架构族 | 第三方参照 |");
 lines.push("| --- | --- | --- |");
@@ -131,12 +139,12 @@ lines.push("");
 for (const fr of fileRuns) {
   lines.push(`## ${fr.file} (${(fr.bytes / 1e6).toFixed(2)} MB)`);
   lines.push("");
-  lines.push("| 实现 | best ms | GB/s | Mtok/s | tokens | vs yuku-main |");
-  lines.push("| --- | ---: | ---: | ---: | ---: | ---: |");
+  lines.push("| 实现 | best ms | GB/s | Mtok/s | tokens | vs yuku-main | vs 同族参照 |");
+  lines.push("| --- | ---: | ---: | ---: | ---: | ---: | ---: |");
   for (const name of IMPL_ORDER) {
     const r = fr.results[name];
     if (!r) continue;
-    lines.push(`| \`${name}\` | ${fmt(r.best_ns / 1e6)} | ${fmt(r.gbps)} | ${fmt(r.mtoks, 1)} | ${r.tokens} | ${r.vs_anchor != null ? fmt(r.vs_anchor) + "x" : "—"} |`);
+    lines.push(`| \`${name}\` | ${fmt(r.best_ns / 1e6)} | ${fmt(r.gbps)} | ${fmt(r.mtoks, 1)} | ${r.tokens} | ${r.vs_anchor != null ? fmt(r.vs_anchor) + "x" : "—"} | ${r.vs_peer != null ? fmt(r.vs_peer) + "x" : "—"} |`);
   }
   lines.push("");
 }
@@ -173,6 +181,27 @@ for (const [g, label] of [[null, "全体"], ["real", "真实语料"], ["syntheti
     let prod = 1, n = 0;
     for (const fr of subset) {
       const v = fr.results[name]?.vs_anchor;
+      if (v != null) { prod *= v; n++; }
+    }
+    return n ? fmt(Math.pow(prod, 1 / n)) + "x" : "—";
+  });
+  lines.push(`| ${label}(${subset.length} 个) | ${cells.join(" | ")} |`);
+}
+lines.push("");
+
+// 同族成熟度的分组几何平均:自有实现 / 同族第三方参照,各族自身口径
+lines.push("## 几何平均(vs 同族参照)");
+lines.push("");
+const peerImpls = Object.keys(PEER).filter((name) => fileRuns.some((fr) => fr.results[name]?.vs_peer != null));
+lines.push(`| 范围 | ${peerImpls.map((x) => `\`${x}\` vs \`${PEER[x]}\``).join(" | ")} |`);
+lines.push(`| --- |${" ---: |".repeat(peerImpls.length)}`);
+for (const [g, label] of [[null, "全体"], ["real", "真实语料"], ["synthetic", "构造语料"]]) {
+  const subset = g ? fileRuns.filter((fr) => fr.group === g) : fileRuns;
+  if (subset.length === 0) continue;
+  const cells = peerImpls.map((name) => {
+    let prod = 1, n = 0;
+    for (const fr of subset) {
+      const v = fr.results[name]?.vs_peer;
       if (v != null) { prod *= v; n++; }
     }
     return n ? fmt(Math.pow(prod, 1 / n)) + "x" : "—";
