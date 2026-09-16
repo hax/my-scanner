@@ -329,7 +329,7 @@ pub inline fn tokenAt(
 // -- trivia --------------------------------------------------------------
 
 /// start 处若是注释则返回 token；否则返回 null。
-fn tryComment(src: []const u8, start: usize) ?Token {
+pub fn tryComment(src: []const u8, start: usize) ?Token {
     if (start + 1 >= src.len or src[start] != '/') return null;
 
     if (src[start + 1] == '/') {
@@ -349,7 +349,7 @@ fn tryComment(src: []const u8, start: usize) ?Token {
 
 /// 单/双引号字符串。SIMD 定位 `引号|反斜杠|换行`，转义对直接跳 2 字节。
 /// 合法字符串不跨行，所以中途不用维护行数。
-fn scanString(src: []const u8, start: usize, quote: u8) Token {
+pub fn scanString(src: []const u8, start: usize, quote: u8) Token {
     var i = start + 1;
     while (i < src.len) {
         const chunk = simd.load(src, i);
@@ -377,7 +377,7 @@ fn scanString(src: []const u8, start: usize, quote: u8) Token {
 
 /// 模板字面量：允许跨行。SIMD 定位 `` ` ``、`\`、`$`。
 /// `${}` 子表达式递归调 scanner 本体定边界（见 scanTemplateSubstitution）。
-fn scanTemplate(src: []const u8, start: usize, regex_starts: ?*std.ArrayList(u32)) Token {
+pub fn scanTemplate(src: []const u8, start: usize, regex_starts: ?*std.ArrayList(u32)) Token {
     var i = start + 1;
     while (i < src.len) {
         const chunk = simd.load(src, i);
@@ -625,7 +625,7 @@ pub fn scanPunct(src: []const u8, start: usize) Token {
 
 /// punctLen 的无边界检查版本：w 是 src[start..start+4] 的小端 u32，
 /// 一次加载后截取出 b1/b2/b3。
-fn punctLenW(w: u32) usize {
+pub fn punctLenW(w: u32) usize {
     const b1: u8 = @truncate(w >> 8);
     const b2: u8 = @truncate(w >> 16);
     const b3: u8 = @truncate(w >> 24);

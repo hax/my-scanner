@@ -132,11 +132,12 @@ fn benchFile(
     var results: std.ArrayList(NamedResult) = .empty;
     defer results.deinit(arena);
 
-    // ---- 自家矩阵：two_phase / scalar / jump_vec（同一驱动跑三遍）----
+    // ---- 自家矩阵：two_phase / scalar / jump_vec / bitmap（同一驱动跑）----
     const zig_impls = [_]struct { name: []const u8, variant: my_scanner.Variant }{
         .{ .name = "two_phase", .variant = .two_phase },
         .{ .name = "scalar", .variant = .scalar },
         .{ .name = "jump_vec", .variant = .jump_vec },
+        .{ .name = "bitmap", .variant = .bitmap },
     };
     for (zig_impls) |impl| {
         var tokens: std.ArrayList(my_scanner.Token) = .empty;
@@ -227,7 +228,7 @@ fn benchFile(
     {
         const anchor = find.byName(results.items, "yuku_main");
         try out.print("  ", .{});
-        for ([_][]const u8{ "two_phase", "scalar", "jump_vec" }) |name| {
+        for ([_][]const u8{ "two_phase", "scalar", "jump_vec", "bitmap" }) |name| {
             const r = find.byName(results.items, name);
             const ratio = @as(f64, @floatFromInt(anchor.best_ns)) / @as(f64, @floatFromInt(r.best_ns));
             try out.print("{s}/yuku-main={d:.2}x ", .{ name, ratio });
