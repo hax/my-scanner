@@ -114,9 +114,9 @@ const html = `<!doctype html>
   .mode button.on { background: #4b7bec; border-color: #4b7bec; color: #fff; }
   .chart { width: 100%; height: 300px; }
   #bars { display: flex; flex-wrap: wrap; gap: .2rem 1.2rem; }
-  .bar-item { flex: 1 1 340px; max-width: 460px; min-width: 280px; }
+  .bar-item { flex: 0 0 auto; width: 246px; }
   .bar-item h3 { margin: .5rem 0 0; }
-  .bar { width: 100%; height: 190px; }
+  .bar { width: 100%; height: 200px; }
   code { background: color-mix(in srgb, currentColor 8%, transparent); padding: 0 .3rem; border-radius: 4px; }
   a { color: #4b7bec; }
 </style>
@@ -154,7 +154,7 @@ const DESCR  = {
 };
 // 柱状图按架构族分组:swc/oxc 与 jump_vec 同族(单阶段+SIMD 长跳跃/字节搜索),
 // 故并入 jump_vec 组;直接参照同色系浅色,同族其他实现(swc/oxc)保留异色身份。
-// 细柱紧凑布局:间距统一为半柱宽(barCategoryGap 50%),组身份由 markArea
+// 细柱紧凑布局:柱宽钉 16px、槽位 ~25px(间距≈半柱宽),组身份由 markArea
 // 浅底带承担(不再占空档槽位)
 const BAR_GROUPS = [["scalar", "yuku_old"], ["jump_vec", "yuku_main", "swc", "oxc"], ["two_phase", "oxc_bitmap"]];
 const BAR_IMPLS = BAR_GROUPS.flat();
@@ -219,11 +219,11 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
     const anchorGbps = series[idx.anchor]?.[lastCi]?.gbps ?? null;
     chart.setOption({
       backgroundColor: "transparent",
-      grid: { left: 40, right: 6, top: 20, bottom: 46 },
+      grid: { left: 40, right: 6, top: 20, bottom: 64 },
       xAxis: {
         type: "category",
         data: BAR_IMPLS.map(i => SHORT[i]),
-        axisLabel: { interval: 0, rotate: 45, fontSize: 10 },
+        axisLabel: { interval: 0, rotate: 90, fontSize: 10 },
         axisTick: { alignWithLabel: true },
         axisLine: { show: false }
       },
@@ -240,8 +240,9 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
       },
       series: [{
         type: "bar",
-        barWidth: "27%",
-        barCategoryGap: "50%",
+        // 柱宽钉死像素,卡片宽度跟着走(槽位 ~25px → 间距 ~9px≈半柱宽);
+        // 竖排 label 横向只占 12px,窄槽位不重叠
+        barWidth: 16,
         data: BAR_IMPLS.map(impl => {
           const p = (series[impl] || [])[lastCi];
           return p ? { value: p.gbps, itemStyle: { color: COLORS[impl] } } : null;
@@ -361,7 +362,7 @@ const readme = `# my-scanner 架构矩阵基准报告
 
 在线图表页(GitHub Pages,源 = 本分支): <https://johnhax.net/my-scanner/>
 
-- [index.html](index.html) — ECharts 图表页:顶部为比对者说明(yuku 基线版本溯源)与最近一次 CI run 的吞吐柱状对比(每语料一卡片、随页宽并排;细柱紧凑布局,间距半柱宽,架构族由浅底组带区分),下方为趋势折线(vs yuku-0.10.1 锚点 / vs 同族参照 / GB/s 三种口径;锚点钉版,相对值跨 run 可比;本地 run 默认不画,可勾选叠加空心点)。图表依赖 [vendor/echarts.min.js](vendor/echarts.min.js)(tools/package.json 钉版)
+- [index.html](index.html) — ECharts 图表页:顶部为比对者说明(yuku 基线版本溯源)与最近一次 CI run 的吞吐柱状对比(每语料一张 246px 定宽卡片、随页宽并排;柱宽 16px、间距半柱宽、竖排 label,架构族由浅底组带区分),下方为趋势折线(vs yuku-0.10.1 锚点 / vs 同族参照 / GB/s 三种口径;锚点钉版,相对值跨 run 可比;本地 run 默认不画,可勾选叠加空心点)。图表依赖 [vendor/echarts.min.js](vendor/echarts.min.js)(tools/package.json 钉版)
 - [reports/](reports/) — 每次 run 的 \`<sha>.md\`(人读报告)与 \`<sha>.json\`(原始数据);本地提交(bench.sh --submit)为 \`<sha>.local-<机器名>.*\`,带机器标识与 CI 主线分层
 
 对比口径与架构族谱见仓库 docs/architecture.md。
