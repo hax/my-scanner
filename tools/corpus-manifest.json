@@ -1,5 +1,5 @@
 {
-  "comment": "语料清单单一来源：make-report.mjs 用 group/tag 渲染报告，publish-corpus.mjs 用 source/license 渲染分支 MANIFEST.md。新增/调整语料须 hax 审批（见 AGENTS.md）。数组顺序即报告展示顺序（real 在前，synthetic 在后）。",
+  "comment": "语料清单单一来源：make-report.mjs 用 group/tag 渲染报告，update-index.mjs 用 group/note/source 渲染趋势页语料表，publish-corpus.mjs 用 source/license 渲染分支 MANIFEST.md。新增/调整语料须 hax 审批（见 AGENTS.md）。数组顺序即报告展示顺序（real 在前，synthetic 在后）。",
   "files": [
     {
       "path": "corpus/real/typescript.min.js",

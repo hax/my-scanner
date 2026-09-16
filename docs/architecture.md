@@ -76,8 +76,8 @@ tools/node_modules 拷入）。页面顶部为**比对者一览**（链接到各
 yuku 基线版本溯源：sha 与上游 commit 日期由 `prepare-baselines.sh`
 的 `.date` 标记经 bench.zig → data.json 带入）、**机器配置**表
 （CI runner 与本机的 os/CPU/zig 版本，各取最近一次 run；基线同为
-yuku v0.10.1 固定快照，各机一致）与**语料说明**表（real 出处 /
-synthetic 构造场景；图上标题只留文件名）。**柱状对比**为最近一次 CI 与
+yuku v0.10.1 固定快照，各机一致）与**语料说明**表（real 出处、来源
+版本与链接 / synthetic 构造场景；图上标题只留文件名）。**柱状对比**为最近一次 CI 与
 本机 run 的 "vs baseline" 倍数（每语料一张 370px 定宽卡片、flex
 随页宽并排、label 45° 斜排；左 CI 右本机、同色本机半透明，baseline
 两柱恒 1.0、与 y=1 虚线互证基线对齐，架构族间留空槽分组——

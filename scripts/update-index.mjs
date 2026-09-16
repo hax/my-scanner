@@ -30,11 +30,21 @@ for (const f of readdirSync(reportsDir)) {
 runs.sort((a, b) => a.date.localeCompare(b.date));
 
 // 语料清单单一来源(与 make-report.mjs 同读 tools/corpus-manifest.json):
-// 图表标题用「文件名 · 出处/构造场景说明」
+// 图表标题用文件名,「语料」一节用 分组/说明/来源(版本+链接)
+const parseSource = (src) => { // 来源串 → {text, url}:GitHub 仓 @ sha、npm 包@版本、raw 文件 @ tag;构造语料无链接
+  if (!src) return null;
+  const gh = src.match(/^(https:\/\/github\.com\/\S+) @ ([0-9a-f]{7,40})$/);
+  if (gh) return { text: gh[1].replace("https://github.com/", "") + " @ " + gh[2].slice(0, 10), url: gh[1] + "/tree/" + gh[2] };
+  const npm = src.match(/^https:\/\/cdn\.jsdelivr\.net\/npm\/([^@]+)@([^/]+)/);
+  if (npm) return { text: npm[1] + "@" + npm[2], url: src };
+  const raw = src.match(/^https:\/\/raw\.githubusercontent\.com\/([^/]+\/[^/]+)\/([^/]+)/);
+  if (raw) return { text: raw[1] + " @ " + raw[2], url: src };
+  return /^https?:/.test(src) ? { text: src, url: src } : { text: src, url: null };
+};
 const corpusMeta = {};
 try {
   const mf = JSON.parse(readFileSync(new URL("../tools/corpus-manifest.json", import.meta.url), "utf8"));
-  for (const f of mf.files ?? []) corpusMeta[f.path] = { name: f.path.split("/").pop(), note: f.note ?? "", group: f.group ?? "" };
+  for (const f of mf.files ?? []) corpusMeta[f.path] = { name: f.path.split("/").pop(), note: f.note ?? "", group: f.group ?? "", src: parseSource(f.source) };
 } catch { /* 缺清单则回退为原始路径 */ }
 
 // index.json:运行列表 + 每文件每实现的 vs 锚点 与 GB/s 序列。
@@ -217,10 +227,12 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
     "<tr><td><b>" + m[0] + "</b></td><td>" + m[1] + "</td></tr>"
   ).join("");
 
-  // ---- 语料说明(图标题只留文件名,出处/构造场景描述集中在此) ----
+  // ---- 语料说明(图标题只留文件名,分组/出处/来源版本与链接集中在此) ----
   document.getElementById("corpus").innerHTML = Object.keys(idx.series).map(file => {
     const c = idx.corpus?.[file];
-    return "<tr><td><code>" + (c?.name ?? file) + "</code></td><td>" + (c?.group ?? "") + "</td><td>" + (c?.note ?? "") + "</td></tr>";
+    const src = c?.src;
+    const srcHtml = src ? (src.url ? '<a href="' + src.url + '">' + src.text + "</a>" : src.text) : "";
+    return "<tr><td><code>" + (c?.name ?? file) + "</code></td><td>" + (c?.group ?? "") + "</td><td>" + (c?.note ?? "") + "</td><td>" + srcHtml + "</td></tr>";
   }).join("");
 
   const pvalOf = p => mode === "peer" ? p.pratio : p.ratio;
@@ -381,7 +393,7 @@ const readme = `# my-scanner 架构矩阵基准报告
 
 在线图表页（GitHub Pages，源 = 本分支）：<https://johnhax.net/my-scanner/>
 
-- [index.html](index.html) — ECharts 图表页：顶部为比对者说明（链接到各 git 仓，yuku 基线版本溯源）、机器配置（CI runner 与本机，基线同为 yuku v0.10.1 固定快照）与语料说明（出处/构造场景，图上只留文件名）；柱状图为最近一次 CI 与本机 run 的「vs baseline」倍数对比（每语料一张 370px 定宽卡片、随页宽并排；label 45° 斜排；左 CI 右本机、同色本机半透明，架构族间留空槽分组，baseline 两柱恒 1.0、与 y=1 虚线互证基线对齐），下方为趋势折线（vs baseline / vs 同族参照两种口径；实线 CI、虚线本机按机器分组、同机相连；基线固定，相对值跨 run、跨机可比）。图表依赖 [vendor/echarts.min.js](vendor/echarts.min.js)（tools/package.json 固定版本）
+- [index.html](index.html) — ECharts 图表页：顶部为比对者说明（链接到各 git 仓，yuku 基线版本溯源）、机器配置（CI runner 与本机，基线同为 yuku v0.10.1 固定快照）与语料说明（出处、来源版本与链接/构造场景，图上只留文件名）；柱状图为最近一次 CI 与本机 run 的「vs baseline」倍数对比（每语料一张 370px 定宽卡片、随页宽并排；label 45° 斜排；左 CI 右本机、同色本机半透明，架构族间留空槽分组，baseline 两柱恒 1.0、与 y=1 虚线互证基线对齐），下方为趋势折线（vs baseline / vs 同族参照两种口径；实线 CI、虚线本机按机器分组、同机相连；基线固定，相对值跨 run、跨机可比）。图表依赖 [vendor/echarts.min.js](vendor/echarts.min.js)（tools/package.json 固定版本）
 - [reports/](reports/) — 每次 run 的 \`<sha>.md\`（人读报告）与 \`<sha>.json\`（原始数据）；本地提交（bench.sh --submit）为 \`<sha>.local-<机器名>.*\`，带机器标识与 CI 同图并绘
 
 对比口径与架构族谱见仓库 docs/architecture.md。
