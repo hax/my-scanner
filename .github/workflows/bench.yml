@@ -24,9 +24,9 @@ jobs:
           path: corpus
           fetch-depth: 1
 
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@v2
         with:
-          zig-version: 0.16.0
+          version: 0.16.0
 
       - uses: actions/setup-node@v4
         with:
