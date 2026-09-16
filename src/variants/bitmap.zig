@@ -327,7 +327,8 @@ fn miscUnicode(bm: *Bitmaps, src: []const u8, j: usize) usize {
     }
     const lead = src[j];
     const len = std.unicode.utf8ByteSequenceLength(lead) catch {
-        setIllegalByte(bm, j);
+        // 非 UTF-8 起始字节：单字节 illegal
+        setIllegalRange(bm, j, 1);
         return 1;
     };
     // CJK 快路径：0xE4..0xE9 开头的 3 字节码点全部位于 CJK 统一表意文字
@@ -339,20 +340,18 @@ fn miscUnicode(bm: *Bitmaps, src: []const u8, j: usize) usize {
         return 3;
     }
     const r = unicode.decode(src, j) orelse {
-        // 坏 UTF-8：单字节 illegal，从 word 摘出
-        setIllegalByte(bm, j);
+        // 坏 UTF-8：按首字节的标称宽度整段消费成 illegal（对齐
+        // scanNonAscii 的 utf8Len 吞段）
+        setIllegalRange(bm, j, 1);
         return 1;
     };
     if (unicode.isIdStart(r.cp)) {
         // 标识符码点：word 保留（kind 已是 identifier），跳过码点续字节
         return r.len;
     }
-    // 非 ID_Start 非 ws 的非 ASCII：按码点消费成 illegal（对齐 scanNonAscii）
-    const e = @min(j + r.len, n);
-    var k = j;
-    while (k < e) : (k += 1) {
-        setIllegalByte(bm, k);
-    }
+    // 非 ID_Start 非 ws 的非 ASCII：按码点消费成**一个** illegal token
+    //（对齐 scanNonAscii：首字节 st，续字节只清 word+kind）
+    setIllegalRange(bm, j, r.len);
     return r.len;
 }
 
@@ -371,14 +370,19 @@ fn setTriviaRange(bm: *Bitmaps, j: usize, e: usize) void {
     }
 }
 
-/// 单字节 illegal：清 word、kind=illegal、st 保留（单字节 token）、
+/// [j, j+len) 消费成**一个** illegal token（对齐 scanNonAscii 的整段
+/// 吞法）：首字节 st+kind=illegal，续字节只清 word+kind（st 本就 0），
 /// 尾后 word 补 run 首 st
-fn setIllegalByte(bm: *Bitmaps, j: usize) void {
-    bmClear(bm.word, j);
-    bm.kind[j] = @intFromEnum(TokenKind.illegal);
+fn setIllegalRange(bm: *Bitmaps, j: usize, len: usize) void {
+    const e = @min(j + len, bm.n);
+    var k = j;
+    while (k < e) : (k += 1) {
+        bmClear(bm.word, k);
+        bm.kind[k] = @intFromEnum(TokenKind.illegal);
+    }
     bmSet(bm.st, j);
-    if (j + 1 < bm.n and bmGet(bm.word, j + 1)) {
-        bmSet(bm.st, j + 1);
+    if (e < bm.n and bmGet(bm.word, e)) {
+        bmSet(bm.st, e);
     }
 }
 
@@ -387,6 +391,9 @@ fn miscHash(bm: *Bitmaps, src: []const u8, j: usize) void {
     const tok = scanner.scanPrivateName(src, j);
     if (tok.end > j + 1) {
         bmClearRange(bm.st, j + 1, tok.end);
+    } else {
+        // `#` 后不是标识符起始：对齐 scanPrivateName 的 illegal 单字节
+        bm.kind[j] = @intFromEnum(TokenKind.illegal);
     }
 }
 
@@ -421,7 +428,7 @@ fn miscBackslash(bm: *Bitmaps, src: []const u8, j: usize) void {
 // ---------------------------------------------------------------------------
 
 /// SIMD 找下一个 `" ' \` /`（32B 窗口 movemask + ctz）
-fn findOpener(src: []const u8, n: usize, from: usize) usize {
+pub fn findOpener(src: []const u8, n: usize, from: usize) usize {
     var i = from;
     while (i + 32 <= n) {
         const m: Mask = @bitCast((simd.load(src, i) == splat('"')) | (simd.load(src, i) == splat('\'')) |
@@ -438,14 +445,11 @@ fn findOpener(src: []const u8, n: usize, from: usize) usize {
     return n;
 }
 
-/// 供分 pass 计时 harness 使用（dbg_bm.zig）
-pub fn carvePub(bm: *Bitmaps, src: []const u8, options: Options) !void {
-    return carve(bm, src, options);
-}
-
-fn carve(bm: *Bitmaps, src: []const u8, options: Options) !void {
+pub fn carve(bm: *Bitmaps, src: []const u8, options: Options, from: usize) !void {
     const n = src.len;
-    var i: usize = 0;
+    // shebang 行不参与 opener 扫描（scanInto 传入行尾）：行内的 `/` 会
+    // 被误判正则起点污染 regex_starts，行内未闭合反引号会吞到行外
+    var i: usize = from;
     while (true) {
         const s = findOpener(src, n, i);
         if (s >= n) break;
@@ -670,10 +674,11 @@ fn glueNumber(bm: *Bitmaps, src: []const u8, p: usize) usize {
     if (end > p) {
         bmClearRange(bm.opch, p, end);
     }
-    if (end < src.len and bmGet(bm.word, end)) {
+    if (end < src.len and bmGet(bm.word, end) and !bmGet(bm.st, end)) {
         // 非法词邻接（`3in4` 的 `in4`）：end 处放 whitespace kind 的 st 位
         // 作 number 的 end 锚点；该位是 trivia，compress 不产 token，
-        // 整段词对齐 my-scanner 的「吞掉」语义。
+        // 整段词对齐 my-scanner 的「吞掉」语义。end 本就是 st 位时不覆盖
+        // （`3.toFixed` 的 toFixed 是合法 identifier 起点，two_phase 会产出）。
         bmSet(bm.st, end);
         bm.kind[end] = @intFromEnum(TokenKind.whitespace);
     }
@@ -688,26 +693,21 @@ pub fn keywords(bm: *Bitmaps, src: []const u8) void {
     const n = src.len;
     const nb = (n + 63) / 64;
     var wprev: u64 = 0;
-    var dtprev: u64 = 0;
     var w: usize = 0;
     while (w < nb) : (w += 1) {
         const wd = bm.word[w];
         const wnext: u64 = if (w + 1 < nb) bm.word[w + 1] else 0;
-        const dt = bm.numch[w] & ~bm.word[w]; // dot 位（numch 去掉 digit）
-        // dot run 首（前一字节非 dot）；`.foo` 的 foo 不是 keyword 候选
-        const dm = dt & ~((dt << 1) | (dtprev >> 63));
-        const dcarry = ((dtprev >> 63) & ~(dtprev >> 62)) & 1;
         const starts = wd & ~(wd << 1 | wprev >> 63);
         // run 长度 ≤ 10 位并行过滤（对齐 oxc）：位 p 真 ⟺ wd[p..p+11) 全 word
         const r2 = wd & (wd >> 1);
         const r4 = r2 & (r2 >> 2);
         const r8 = r4 & (r4 >> 4);
         const long_run = r8 & (r2 >> 8) & (wd >> 10);
-        // 关键字 ≥2 字符：下一字节也是 word 才可能是 keyword（单字符
-        // 变量 a/b/c 在 minified 语料里占 word run 首的大头）
-        var ev = starts & ~((dm << 1) | dcarry) & ~long_run & ((wd >> 1) | (wnext << 63));
+        // 关键字 ≥2 字符：下一字节也是 word 才可能是 keyword（minified
+        // 语料的单字符变量占 word run 首的大头）。注意不做「不在 dot 后」
+        // 排除：语义层 `.if` 同样判 keyword（isKeyword 无上下文）。
+        var ev = starts & ~long_run & ((wd >> 1) | (wnext << 63));
         wprev = wd;
-        dtprev = dt;
         while (ev != 0) {
             const bit: u32 = @ctz(ev);
             ev &= ev - 1;
@@ -764,6 +764,7 @@ pub fn scanInto(
     src: []const u8,
     options: Options,
 ) !void {
+    std.debug.assert(src.len <= std.math.maxInt(u32));
     if (options.regex_starts) |list| {
         try scanner.reserveRegexStarts(allocator, src, list);
     }
@@ -773,21 +774,25 @@ pub fn scanInto(
     classify(bm, src);
     miscPass(bm, src);
 
-    // shebang 特判（对齐 jump_vec/主循环：文件头 `#!` 是独立 token）
+    // shebang 特判（对齐 jump_vec/主循环：文件头 `#!` 是独立 token），
+    // 并把 carve 起点推到行尾（shebang 行内不做 opener 扫描）
+    var carve_from: usize = 0;
     if (src.len >= 2 and src[0] == '#' and src[1] == '!') {
         const end = scanner.lineEnd(src, 0);
         try tokens.append(allocator, .{ .kind = .shebang, .start = 0, .end = @intCast(end) });
         bmClearRange(bm.st, 1, end);
         bm.kind[0] = @intFromEnum(TokenKind.whitespace); // compress 按 trivia 跳过
+        carve_from = end;
     }
 
-    try carve(bm, src, options);
+    try carve(bm, src, options, carve_from);
     coalesce(bm, src);
     keywords(bm, src);
     try compress(bm, tokens, allocator, options);
 }
 
 pub fn scan(allocator: std.mem.Allocator, src: []const u8, options: Options) !scanner.Result {
+    std.debug.assert(src.len <= std.math.maxInt(u32));
     var tokens: std.ArrayList(Token) = .empty;
     errdefer tokens.deinit(allocator);
     try scanInto(&tokens, allocator, src, options);
@@ -885,5 +890,38 @@ test "bitmap 与两阶段 scanner 交叉验证" {
     try expectSame("#x\\u{41}; // private 内转义");
     try expectSame("x\u{2028}y; // LS 逻辑换行");
     try expectSame("\u{00A0}x; // NBSP 空白");
+    // 防回归：审查发现的容错路径
+    try expectSame("#!/usr/bin/env node\nx = 1;"); // shebang 行不被 carve 扫
+    try expectSame("a \u{2603} b"); // emoji 按码点一个 illegal
+    try expectSame("a # b"); // 非法 # 是 illegal 不是 private_name
+    try expectSame("3.toFixed(2)"); // 数字后词邻接不吞合法标识符
+    try expectSame("x.if = 1;"); // `.if` 的 if 仍是 keyword（语义层无上下文）
+    // 位图 word 边界（n 恰为 64/128 倍数与 n=65）
+    try expectSame("a" ** 64 ++ ";");
+    try expectSame("a" ** 65 ++ ";");
+    try expectSame("a" ** 128 ++ ";");
+    // 复用收缩：大文件后接小文件
+    try expectSame("const abc = 1;" ** 40);
+    try expectSame("x;");
     releaseReuse(std.testing.allocator);
+}
+
+test "bitmap 复用缓冲跨轮一致" {
+    // 大→小→中混合扫描，结果与单独扫描一致
+    const a = std.testing.allocator;
+    const cases = [_][]const u8{ "const hello = 'world';\n" ** 30, "x = 1;", "var yy = `tpl ${a} end`;\n" ** 10 };
+    for (cases) |src| {
+        var got_list: std.ArrayList(Token) = .empty;
+        defer got_list.deinit(a);
+        try scanInto(&got_list, a, src, .{});
+        var want = try scanner.scan(a, src, .{});
+        defer want.deinit(a);
+        try std.testing.expectEqual(want.tokens.len, got_list.items.len);
+        for (want.tokens, got_list.items) |w, g| {
+            try std.testing.expectEqual(w.kind, g.kind);
+            try std.testing.expectEqual(w.start, g.start);
+            try std.testing.expectEqual(w.end, g.end);
+        }
+    }
+    releaseReuse(a);
 }

@@ -5,10 +5,16 @@
 目标：**在 Apple Silicon（NEON）上达到 oxc_lexer（x86_64 AVX2+BMI2）相同的速度**。
 
 **结论速览**：新变体 `bitmap`（`src/variants/bitmap.zig`，oxc 六趟位图
-流水线 × my-scanner 语义）check.sh 44/44 全绿；M3 native 对 CI EPYC 的
-oxc_bitmap AVX2 绝对值 **9/11 语料追平或超过**；vs 本机 jump_vec 6 胜
-5 负，胜负面与 oxc_bitmap 的架构性格一致。未追平的是两个 minified
-语料（0.76-0.82x）——归因见 §6。
+流水线 × my-scanner 语义层）check.sh 44/44 全绿（4 变体 × 11 语料
+差分）；M3 native 对 CI EPYC 的 oxc_bitmap AVX2 绝对值 **9/11 语料
+达到 0.85x 以上、其中 7 个 ≥0.95 追平或反超**；vs 本机 jump_vec
+6 胜 5 负——胜负倾向与 oxc_bitmap 一致（密语料与 unicode 赢、跳跃
+密集输），但幅度普遍缩水、两处方向翻转（strings.js、typescript.js），
+退化源头已知（compress 未 SIMD 化 + coalesce 每事件贪心），见 §9。
+名词：oxc_lexer 是 oxc 主仓孵化的位图流水线实验 crate（bench 矩阵列
+名 oxc_bitmap，口径见 architecture.md「oxc_bitmap」节）；jump_vec 是
+本仓库现有最快的单阶段 SIMD 变体；scalar 是标量基线。「架构性格」
+指语料谱系上的胜负倾向。
 
 ## 0. 问题定义
 
@@ -96,7 +102,7 @@ classify → misc_pre → carve → coalesce → misc_post → compress
 | `scan_number` + glue_number | `scanNumber` |
 | kind 90+ 细类 | 13 类（my-scanner TokenKind），classify kind 数组按此设计 |
 
-### 3. 位图版 regexAllowedAfter（移植最难点）
+## 3. 位图版 regexAllowedAfter（移植最难点）
 
 oxc 的 carve 在 coalesce **之前**做正则决策（此时 st 是原始位：每个标点
 单字节都是 token start；`===` 尚未合并），其 `not_operator_position`
@@ -116,7 +122,9 @@ regexAllowedBitmap(p):   // p = `/` 的位置，返回 true=正则
      - kind[p0]==punct 且字节 '+'/'-' 且 src[p0+1]==同字节 且中间全 trivia
        → false（`++ /` 空格隔开场景）
      - 其他 punct 字节：`)`/`]` → false；否则 true
-  已知可接受 corner：`+++ /`（真实语料 ~0 出现率，check.sh + 随机交叉验证兜底）
+  已知偏差：`+++ /` 判正则（与贪心配对语义可能不一致）；真实语料
+  出现率≈0，check.sh 全绿不构成对此路径的验证（如启用需登记
+  tradeoff.md）。
 ```
 
 ### 4. NEON 原语映射（128-bit vs AVX2 256-bit）
@@ -154,15 +162,44 @@ regexAllowedBitmap(p):   // p = `/` 的位置，返回 true=正则
   coalesce/carve/tables 精读；disambiguate 不移植——用 my-scanner 语义）。
 - 关键发现：无 pext 依赖；compress 是 LUT+shuffle（NEON 友好）；
   movemask 是最大缺口。
-- Rosetta x86_64 基线任务已派出（后台）。
-- 下一步：tables comptime LUT + classify NEON + 标量对照交叉验证。
+- Rosetta x86_64 基线出炉：oxc_bitmap AVX2 经 Rosetta 仅 0.37 GB/s
+  （typescript.js）——比本机 jump_vec 还慢，Rosetta 只能当底线参照，
+  主锚改为 CI EPYC 绝对值。
+
+### 2026-09-17 中段：LUT 路线放弃
+
+- 汇编实验：Zig/LLVM 不合成 vqtbl1q——同一 16B 查表，数组索引展开
+  182 条指令、select 树 39 条（oxc 的 pshufb 是 1 条）。LUT 路线
+  搁置，classify 全改比较链；movemask 用 LLVM 的 bool 向量 bitcast
+  lowering（zip1+addv.8h）。
+- 首版端到端跑通（jump_vec 的 76%），热点：compress 44%、coalesce
+  30%。分 pass 计时工具留档 `tools/bitmap-passes-prof.zig`。
+
+### 2026-09-17 后段：优化与审查
+
+- kw 三重过滤（ts.min kw 判定 -65%）、CJK lead 快路径、位图跨轮
+  复用（react.js 0.35→1.02）；dot-run 排除经审查撤销（与语义层
+  `.if` 判 keyword 相悖）。
+- 子 agent 并行审查（报告 + 代码）后修：carve 不扫 shebang 行
+  （regex_starts 污染）、多字节非法码点整段消费、非法 `#` kind、
+  `3.toFixed` 锚点误吞、4GB assert、CJK 快路径收窄到 0xE5..0xE9；
+  新增 12 个防回归用例，check.sh 44/44 复绿，性能无回退。
 
 ## 7. 实现（commit f9721cd 及前序）
 
 - `src/variants/bitmap.zig`：五张位图（word/st/opch/numch/misc）+ kind
   数组；classify（NEON 比较链）→ miscPass（unicode/`#`/`\`）→ carve
   （opener 事件 + 字面量/正则）→ coalesce（multi/数字事件）→ keywords
-  （三重过滤后 isKeyword）→ compress（位图 → token 流）。
+  （过滤后 isKeyword）→ compress（位图 → token 流）。
+- **与 oxc 的七张位图相比少了 kwinit 与 dot**：kwinit（关键字首字母
+  位图）的预筛职责由 keywords pass 的三重位并行过滤吸收——word run
+  起点、下一字节也是 word（排除单字符）、run 长度 ≤10（关键字都不
+  超过 10 字符）——三关全过才进 isKeyword；oxc 用 kwinit 是为它的
+  模式作用域关键字集服务，my-scanner 的 keyword 判定统一走语义层
+  完美哈希、不分上下文，复制这层不划算。dot 不单独设位图：并入
+  numch（digit|dot），`.5` 数字与 `...` 合并由事件处的 scanPunct
+  口径自然分流。刻意**不做**「不在 dot 后」排除——语义层 `.if`
+  同样判 keyword（isKeyword 无上下文），排除了会偏离 my-scanner 口径。
 - 语义层复用：scanString/scanTemplate/scanNumber/scanPunct/scanRegex/
   isKeyword/decodeIdentEscape 等直接调用（tryComment/scanString/
   scanTemplate 改 pub）；`punctLenW` pub 供 gluePunct 直用。
@@ -185,13 +222,18 @@ regexAllowedBitmap(p):   // p = `/` 的位置，返回 true=正则
 | strings.js 547K | 0.94 | 0.66 | 0.70 | 0.683 | 0.97 |
 | cn-dense.ts 968K | 1.24 | 0.58 | 0.47 | 0.284 | 2.0 |
 
-要点：
-1. **9/11 语料对 EPYC AVX2 版追平或超过**（≥0.95 视为追平）。
-2. 胜负面复刻 oxc_bitmap：token 密度高（minified）与 unicode 密集
-   （CJK/变音）赢；跳跃密集（行注释/字符串墙）输——同族对比的架构
-   性格一致，不是移植劣化。
-3. react.js 在 bench（复用）1.02 vs 无复用 0.35——小文件的位图
-   alloc/memset 占比可达 3 倍，对齐 oxc 的 arena 复用口径后消除。
+要点（跨机口径注记：EPYC 数字来自 2026-09-16 CI，M3 为本地 15 轮
+取最优；两机单核能力不同，绝对值对比按 ~5% 内不计胜负）：
+1. **7/11 语料 ≥0.95 追平或反超**；9/11 在 0.85x 以上——跨机频率差
+   折算后可视为同档。未到 0.85 的两个 minified 语料归因见 §9。
+2. 胜负倾向与 oxc_bitmap 一致（token 密度高/unicode 密集赢、跳跃
+   密集输），但幅度普遍缩水，且 strings.js（oxc 1.25x → 我们 0.70x）、
+   typescript.js（1.64x → 0.95x）两处方向翻转——退化源头是 compress
+   未 SIMD 化与 coalesce 逐事件贪心（oxc 有 pshufb LUT 加速），是
+   已知缺口而非移植噪声，见 §9 未竟事项。
+3. 主表 bitmap 列已是「位图缓冲跨轮复用」口径（对齐 oxc 的 arena
+   复用语义，见 §7）；若每轮重新 alloc/memset 位图（约 1.9×n 字节），
+   小文件的固定开销可达 3 倍（react.js 0.35）。
 
 ## 9. 归因与教训
 
@@ -240,5 +282,5 @@ dispatch），不是指令总量少。NEON 版 classify 的指令数约为 AVX2 
 - inline asm vqtbl1q 封装后重估 classify LUT 方案。
 - `x86_64` 上 bitmap 变体的 AVX2 后端（同构对比消除 ISA 变量）。
 - Rosetta 口径：oxc_bitmap AVX2 经 Rosetta 仅 0.37 GB/s（ts.js），
-  NEON native 1.7x 于它——Rosetta 数字只作底线参照（见
-  `.rosetta-oxc/results.json`）。
+  本机 bitmap 0.60 GB/s 是它的 1.6x——Rosetta 数字只作底线参照，
+  全语料见 `.rosetta-oxc/results.json`。
