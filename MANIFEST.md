@@ -7,8 +7,8 @@
 
 | 文件 | 分组 | 谱系 | 大小 | 来源 | license | sha256 |
 | --- | --- | --- | ---: | --- | --- | --- |
-| `real/typescript.min.js` | real | minified bundle | 2959754 | https://cdn.jsdelivr.net/npm/typescript@5.1.6/lib/typescript.min.js | Apache-2.0 | `51f295f326c1ce74…` |
 | `real/typescript.js` | real | 编译器 bundle（未压缩） | 8207497 | https://cdn.jsdelivr.net/npm/typescript@5.1.6/lib/typescript.js | Apache-2.0 | `804f9c1b6c64568c…` |
+| `real/typescript.min.js` | real | minified bundle | 2959754 | https://cdn.jsdelivr.net/npm/typescript@5.1.6/lib/typescript.min.js | Apache-2.0 | `51f295f326c1ce74…` |
 | `real/checker.ts` | real | 编译器源码 | 3120982 | https://raw.githubusercontent.com/microsoft/TypeScript/v5.9.2/src/compiler/checker.ts | Apache-2.0 | `aa3d9021ee9c6806…` |
 | `real/lib.dom.d.ts` | real | 注释密集 d.ts | 1874901 | https://cdn.jsdelivr.net/npm/typescript@5.9.2/lib/lib.dom.d.ts | Apache-2.0 | `080941d9f9ff9307…` |
 | `real/react.js` | real | 库源码（小文件） | 72141 | https://cdn.jsdelivr.net/npm/react@17.0.2/cjs/react.development.js | MIT | `ec670cc82d2aac81…` |
