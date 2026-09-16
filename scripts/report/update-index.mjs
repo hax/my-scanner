@@ -47,6 +47,16 @@ try {
   for (const f of mf.files ?? []) corpusMeta[f.path] = { name: f.path.split("/").pop(), note: f.note ?? "", group: f.group ?? "", src: parseSource(f.source) };
 } catch { /* 缺清单则回退为原始路径 */ }
 
+// 每文件大小/tokens:取自最近一个含该文件的 run(runs 已按日期升序,后者覆盖前者);
+// tokens 以 baseline(yuku_old 固定快照)计数——外部参照,不随我方 token 化口径漂移
+const fileStats = {};
+for (const r of runs) {
+  for (const f of r.files ?? []) {
+    const tk = f.results?.yuku_old?.tokens ?? f.results?.two_phase?.tokens ?? null;
+    fileStats[f.file] = { bytes: f.bytes ?? null, tokens: tk };
+  }
+}
+
 // index.json:运行列表 + 每文件每实现的 vs 锚点 与 GB/s 序列。
 // 基线 = yuku_old(v0.10.1 固定快照;yuku-main 跟踪上游会漂,不做基线)。
 // ratio 一律由 best_ns 重算(历史 data.json 的 vs_anchor 是旧锚口径,不可用);
@@ -62,6 +72,7 @@ const index = {
   // 基线溯源(bench.zig 自 prepare-baselines 版本标记带入):取最近一个带该字段的 run
   baselines: (() => { for (let i = runs.length - 1; i >= 0; i--) if (runs[i].baselines) return runs[i].baselines; return null; })(),
   corpus: corpusMeta,
+  corpusStats: fileStats,
   runs: runs.map((r) => ({ sha: r.sha, date: r.date, subject: r.subject, runner: r.runner, channel: r.channel ?? "ci", label: r.label ?? null })),
   series: {},
 };
@@ -146,6 +157,7 @@ two_phase→oxc_bitmap，&gt;1 即我方更快），衡量各族自身成熟度�
 <table id="machines"></table>
 <p class="meta" id="runinfo"></p>
 <h2>语料</h2>
+<p class="meta">大小与 tokens 取自最近一次 run；tokens 以 baseline（yuku v0.10.1 固定快照）计数。</p>
 <table id="corpus"></table>
 <h2>当前对比 · vs baseline</h2>
 <p class="meta" id="bars-meta"></p>
@@ -227,12 +239,13 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
     "<tr><td><b>" + m[0] + "</b></td><td>" + m[1] + "</td></tr>"
   ).join("");
 
-  // ---- 语料说明(图标题只留文件名,分组/出处/来源版本与链接集中在此) ----
+  // ---- 语料说明(图标题只留文件名,分组/大小/tokens/出处/来源版本与链接集中在此) ----
   document.getElementById("corpus").innerHTML = Object.keys(idx.series).map(file => {
     const c = idx.corpus?.[file];
+    const s = idx.corpusStats?.[file];
     const src = c?.src;
     const srcHtml = src ? (src.url ? '<a href="' + src.url + '">' + src.text + "</a>" : src.text) : "";
-    return "<tr><td><code>" + (c?.name ?? file) + "</code></td><td>" + (c?.group ?? "") + "</td><td>" + (c?.note ?? "") + "</td><td>" + srcHtml + "</td></tr>";
+    return "<tr><td><code>" + (c?.name ?? file) + "</code></td><td>" + (c?.group ?? "") + "</td><td>" + (s?.bytes != null ? (s.bytes / 1e6).toFixed(2) + " MB" : "") + "</td><td>" + (s?.tokens != null ? s.tokens.toLocaleString("en-US") : "") + "</td><td>" + (c?.note ?? "") + "</td><td>" + srcHtml + "</td></tr>";
   }).join("");
 
   const pvalOf = p => mode === "peer" ? p.pratio : p.ratio;
@@ -393,7 +406,7 @@ const readme = `# my-scanner 架构矩阵基准报告
 
 在线图表页（GitHub Pages，源 = 本分支）：<https://johnhax.net/my-scanner/>
 
-- [index.html](index.html) — ECharts 图表页：顶部为比对者说明（链接到各 git 仓，yuku 基线版本溯源）、机器配置（CI runner 与本机，基线同为 yuku v0.10.1 固定快照）与语料说明（出处、来源版本与链接/构造场景，图上只留文件名）；柱状图为最近一次 CI 与本机 run 的「vs baseline」倍数对比（每语料一张 370px 定宽卡片、随页宽并排；label 45° 斜排；左 CI 右本机、同色本机半透明，架构族间留空槽分组，baseline 两柱恒 1.0、与 y=1 虚线互证基线对齐），下方为趋势折线（vs baseline / vs 同族参照两种口径；实线 CI、虚线本机按机器分组、同机相连；基线固定，相对值跨 run、跨机可比）。图表依赖 [vendor/echarts.min.js](vendor/echarts.min.js)（tools/package.json 固定版本）
+- [index.html](index.html) — ECharts 图表页：顶部为比对者说明（链接到各 git 仓，yuku 基线版本溯源）、机器配置（CI runner 与本机，基线同为 yuku v0.10.1 固定快照）与语料说明（大小与 tokens（baseline 计数）、出处、来源版本与链接/构造场景，图上只留文件名）；柱状图为最近一次 CI 与本机 run 的「vs baseline」倍数对比（每语料一张 370px 定宽卡片、随页宽并排；label 45° 斜排；左 CI 右本机、同色本机半透明，架构族间留空槽分组，baseline 两柱恒 1.0、与 y=1 虚线互证基线对齐），下方为趋势折线（vs baseline / vs 同族参照两种口径；实线 CI、虚线本机按机器分组、同机相连；基线固定，相对值跨 run、跨机可比）。图表依赖 [vendor/echarts.min.js](vendor/echarts.min.js)（tools/package.json 固定版本）
 - [reports/](reports/) — 每次 run 的 \`<sha>.md\`（人读报告）与 \`<sha>.json\`（原始数据）；本地提交（bench.sh --submit）为 \`<sha>.local.*\`（机器名不入产物），与 CI 同图并绘
 
 对比口径与架构族谱见仓库 docs/architecture.md。

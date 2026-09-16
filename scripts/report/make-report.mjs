@@ -149,12 +149,13 @@ lines.push("");
 // 语料谱系(real 真实语料 / synthetic 构造极端语料,后者供 microbench 压力用)
 lines.push("## 语料谱系");
 lines.push("");
-lines.push("| 文件 | 分组 | 谱系 | 大小 | tok/KB |");
-lines.push("| --- | --- | --- | ---: | ---: |");
+lines.push("| 文件 | 分组 | 谱系 | 大小 | tokens | tok/KB |");
+lines.push("| --- | --- | --- | ---: | ---: | ---: |");
 for (const fr of fileRuns) {
-  const tk = fr.results.two_phase?.tokens ?? Object.values(fr.results)[0]?.tokens;
+  // token 计数以 baseline(yuku_old 固定快照) 为准:外部参照,不随我方 token 化口径漂移
+  const tk = fr.results[ANCHOR]?.tokens ?? fr.results.two_phase?.tokens ?? Object.values(fr.results)[0]?.tokens;
   const tokb = tk != null && fr.bytes > 0 ? (tk / (fr.bytes / 1024)).toFixed(0) : "—";
-  lines.push(`| \`${short(fr.file)}\` | ${fr.group} | ${fr.tag} | ${(fr.bytes / 1e6).toFixed(2)} MB | ${tokb} |`);
+  lines.push(`| \`${short(fr.file)}\` | ${fr.group} | ${fr.tag} | ${(fr.bytes / 1e6).toFixed(2)} MB | ${tk != null ? tk.toLocaleString("en-US") : "—"} | ${tokb} |`);
 }
 lines.push("");
 
