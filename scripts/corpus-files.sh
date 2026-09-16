@@ -2,7 +2,7 @@
 # (顺序即报告展示顺序)。用法: source scripts/corpus-files.sh
 CORPUS_FILES=(
   corpus/real/typescript.min.js corpus/real/typescript.js corpus/real/checker.ts
-  corpus/real/lib.dom.d.ts corpus/real/react.js
+  corpus/real/lib.dom.d.ts corpus/real/react.js corpus/real/react.min.js
   corpus/real/hanzi-chai.ts corpus/real/mon-entreprise.ts
   corpus/synthetic/line-comments.js corpus/synthetic/strings.js corpus/synthetic/cn-dense.ts
 )

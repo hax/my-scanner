@@ -14,7 +14,7 @@
    验证抓回的分支各有专属用例）。
 2. **tsc 差分**：[compare-tsc.mjs](../tools/compare-tsc.mjs) 把 tsc 的
    scanner 当参考实现做 token 级差分——切分（字节偏移）对齐为主、
-   语义分类从宽。**十个语料**（real 7 + synthetic 3）全部对齐、
+   语义分类从宽。**十一个语料**（real 8 + synthetic 3）全部对齐、
    零分类硬差异：
 
    | 文件 | tokens | 特征 |
@@ -24,6 +24,7 @@
    | real/checker.ts | 343,905 | 编译器源码（v5.9.2） |
    | real/lib.dom.d.ts | 116,895 | 注释密集 d.ts |
    | real/react.js | 8,411 | 库源码（小文件） |
+   | real/react.min.js | 2,543 | minified 库（小文件，404 tok/KB） |
    | real/hanzi-chai.ts | 46,744 | CJK 标识符密集（真实） |
    | real/mon-entreprise.ts | 15,658 | 拉丁变音标识符（真实） |
    | synthetic/cn-dense.ts | 88,002 | CJK 标识符极端（构造） |

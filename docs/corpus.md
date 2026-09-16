@@ -28,16 +28,17 @@ bench/差分语料分两类，分列存放：
 
 | 文件 | 分组 | 谱系 | 大小 | tok/KB | 非 ASCII 字节 | ident 非 ASCII |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
-| typescript.min.js | real | minified bundle | 2.90 MB | 197 | 0% | 0% |
-| typescript.js | real | 编译器 bundle（未压缩） | 8.01 MB | 140 | 0% | 0% |
+| typescript.min.js | real | minified bundle | 2.89 MB | 363 | 0% | 0% |
+| typescript.js | real | 编译器 bundle（未压缩） | 8.02 MB | 140 | 0% | 0% |
 | checker.ts | real | 编译器源码 | 3.05 MB | 113 | 0% | 0% |
 | lib.dom.d.ts | real | 注释密集 d.ts | 1.83 MB | 64 | 0% | 0% |
 | react.js | real | 库源码（小文件） | 0.07 MB | 119 | 0% | 0% |
+| react.min.js | real | minified 库（小文件） | 0.01 MB | 404 | 0% | 0% |
 | hanzi-chai.ts | real | CJK 标识符密集 | 0.25 MB | 188 | 43.0% | 48.9%（54.7% 的 ident 含中文） |
 | mon-entreprise.ts | real | 拉丁变音标识符 | 0.10 MB | 154 | 3.8% | 2.7%（20.5% 的 ident 含变音） |
 | line-comments.js | synthetic | 行注释密集（构造） | 1.64 MB | 55 | 0% | 0% |
-| strings.js | synthetic | 字符串密集（构造） | 0.54 MB | 157 | 0% | 0% |
-| cn-dense.ts | synthetic | CJK 标识符极端（构造） | 0.95 MB | 93 | 62.4% | 65.8% |
+| strings.js | synthetic | 字符串密集（构造） | 0.53 MB | 157 | 0% | 0% |
+| cn-dense.ts | synthetic | CJK 标识符极端（构造） | 0.94 MB | 93 | 62.4% | 65.8% |
 
 ## 逐文件来源（provenance）
 
@@ -50,6 +51,7 @@ bench/差分语料分两类，分列存放：
 | checker.ts | `microsoft/TypeScript@v5.9.2 src/compiler/checker.ts` | Apache-2.0 |
 | lib.dom.d.ts | npm `typescript@5.9.2/lib/lib.dom.d.ts`（对拍确认） | Apache-2.0 |
 | react.js | npm `react@17.0.2/cjs/react.development.js`（对拍确认） | MIT |
+| react.min.js | npm `react@17.0.2/cjs/react.production.min.js`（对拍确认） | MIT |
 | hanzi-chai.ts | [hanzi-chai/hanzi-chai.github.io](https://github.com/hanzi-chai/hanzi-chai.github.io) @ `00f4f1b9`，`packages/hanzi-chai/src/` 19 个 .ts 按路径序拼接（`\n` 分隔） | **GPL-3.0**（仅 corpus 分支逐字分发，附 LICENSE 全文） |
 | mon-entreprise.ts | [betagouv/mon-entreprise](https://github.com/betagouv/mon-entreprise) @ `f0c4db9b`，`site/source/**/domaine/**/*.ts` 75 个（除 `*.test.ts`/`*.spec.ts`）按路径序拼接 | MIT |
 
