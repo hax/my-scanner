@@ -44,7 +44,7 @@ const parseSource = (src) => { // 来源串 → {text, url}:GitHub 仓 @ sha、n
 const corpusMeta = {};
 try {
   const mf = JSON.parse(readFileSync(new URL("../../tools/corpus-manifest.json", import.meta.url), "utf8"));
-  for (const f of mf.files ?? []) corpusMeta[f.path] = { name: f.path.split("/").pop(), note: f.note ?? "", group: f.group ?? "", src: parseSource(f.source) };
+  for (const [i, f] of (mf.files ?? []).entries()) corpusMeta[f.path] = { name: f.path.split("/").pop(), note: f.note ?? "", group: f.group ?? "", src: parseSource(f.source), order: i };
 } catch { /* 缺清单则回退为原始路径 */ }
 
 // 每文件大小/tokens:取自最近一个含该文件的 run(runs 已按日期升序,后者覆盖前者);
@@ -76,8 +76,9 @@ const index = {
   runs: runs.map((r) => ({ sha: r.sha, date: r.date, subject: r.subject, runner: r.runner, channel: r.channel ?? "ci", label: r.label ?? null })),
   series: {},
 };
-const fileNames = new Set();
-for (const r of runs) for (const f of r.files ?? []) fileNames.add(f.file);
+const fileNames = [...new Set(runs.flatMap(r => (r.files ?? []).map(f => f.file)))];
+// 展示顺序以 manifest 为单一来源(清单外旧 key 排最后,保持首见序)
+fileNames.sort((a, b) => (corpusMeta[a]?.order ?? 1e9) - (corpusMeta[b]?.order ?? 1e9));
 for (const file of fileNames) {
   const series = {};
   for (const impl of index.impls) series[impl] = [];
@@ -100,7 +101,7 @@ for (const file of fileNames) {
   index.series[file] = series;
 }
 writeFileSync(join(reportsDir, "index.json"), JSON.stringify(index));
-console.log(`index.json: ${runs.length} runs, ${fileNames.size} files`);
+console.log(`index.json: ${runs.length} runs, ${fileNames.length} files`);
 
 // ---- vendor echarts(tools/node_modules → 发布目录) ----
 const echartsSrc = fileURLToPath(new URL("../../tools/node_modules/echarts/dist/echarts.min.js", import.meta.url));
@@ -135,9 +136,9 @@ const html = `<!doctype html>
   .mode button.on { background: #4b7bec; border-color: #4b7bec; color: #fff; }
   .chart { width: 100%; height: 300px; }
   #bars { display: flex; flex-wrap: wrap; gap: .2rem 1.2rem; }
-  .bar-item { flex: 0 0 auto; width: 370px; }
+  .bar-item { flex: 0 0 auto; width: 555px; }
   .bar-item h3 { margin: .5rem 0 0; }
-  .bar { width: 100%; height: 200px; }
+  .bar { width: 100%; height: 300px; }
   code { background: color-mix(in srgb, currentColor 8%, transparent); padding: 0 .3rem; border-radius: 4px; }
   a { color: #4b7bec; }
 </style>
@@ -147,7 +148,7 @@ const html = `<!doctype html>
 <p class="intro">每次 push 跑一轮全变体差分门禁 + 架构矩阵基准，本页汇总 CI 与本机 run。
 纵轴统一为 <code>vs baseline</code> 倍数（yuku v0.10.1 固定快照，&gt;1 即更快）——基线固定不漂，
 由同进程同文件实测带入，CI 与各本机的基线一致，相对倍数跨 run、跨机器均可比
-（绝对吞吐 GB/s 只有同机同 run 内可比，数值见 tooltip）。柱状图左 CI 右本机（同色，本机半透明），
+（绝对吞吐 GB/s 只有同机同 run 内可比，数值见 tooltip）。柱状图左 CI 右本机（同色，本机半透明；纵轴固定 0–2，超出画到图外），
 趋势图实线 CI、虚线本机（同机相连，按机器分组）。
 「同族参照」= 自有实现 / 同架构族第三方对照（scalar→baseline、jump_vec→yuku-main、
 two_phase→oxc_bitmap，&gt;1 即我方更快），衡量各族自身成熟度。</p>
@@ -182,15 +183,24 @@ const DESCR  = {
   oxc_bitmap: "第三方 · oxc_lexer 多位图流水线（孵化实验，歧义自决 + spans 门禁；计时含 value lanes；仅 x86_64 SIMD）"
 };
 // 柱状图按架构族分组(baseline 两柱恒为 1.0,与 y=1 虚线互证基线对齐):
-// oxc/swc 与 jump_vec 同族(单阶段+SIMD 长跳跃/字节搜索),故并入 jump_vec 组;
-// 组间插一个空槽位作间隔
+// oxc/swc 与 jump_vec 同族(单阶段+SIMD 长跳跃/字节搜索),故并入 jump_vec 组。
+// 布局以柱宽为 1 单位手工排布(value 轴 + custom series):CI/local 对内间距 0.1、
+// 同组相邻对照间距 0.25、架构族分组间距 0.5
 const BAR_GROUPS = [["scalar", "yuku_old"], ["jump_vec", "yuku_main", "oxc", "swc"], ["two_phase", "oxc_bitmap"]];
-const BAR_CATS = [];    // x 轴类目(含组间空槽)
-const BAR_IMPL_AT = []; // 类目序号 → 实现(空槽为 null)
-BAR_GROUPS.forEach((g, gi) => {
-  if (gi > 0) { BAR_CATS.push(""); BAR_IMPL_AT.push(null); }
-  g.forEach(impl => { BAR_CATS.push(SHORT[impl]); BAR_IMPL_AT.push(impl); });
-});
+const PAIR_GAP = 0.1, IMPL_GAP = 0.25, GROUP_GAP = 0.5, PAIR_SPAN = 2 + PAIR_GAP;
+const IMPL_X = {};  // 实现 → 柱对中心横坐标
+let BAR_XMAX = 0;   // 最右柱对右缘
+{
+  let x = 0; // 下一柱对左缘
+  BAR_GROUPS.forEach((g, gi) => {
+    if (gi > 0) x += GROUP_GAP - IMPL_GAP; // 组间净距补足到 0.5(循环末已含一个 IMPL_GAP)
+    g.forEach(impl => { IMPL_X[impl] = x + PAIR_SPAN / 2; x += PAIR_SPAN + IMPL_GAP; });
+  });
+  BAR_XMAX = x - IMPL_GAP; // 去掉末尾多算的组内间距
+}
+const BAR_CENTERS = BAR_GROUPS.flat().map(impl => IMPL_X[impl]);
+const BAR_LABEL = {}; // 横坐标(去浮点尾差) → 短名
+for (const g of BAR_GROUPS) for (const impl of g) BAR_LABEL[Math.round(IMPL_X[impl] * 1e6) / 1e6] = SHORT[impl];
 const theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : null;
 let mode = "ratio";
 const trendCharts = [];
@@ -217,7 +227,7 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
 
   // ---- run 分堆:CI 序列 + 本机按 label 分组 ----
   const cpuOf = r => (r.runner?.cpu ?? "").split("\\n").pop().split(":").pop().trim();
-  const machOf = r => (r.runner?.os ?? "") + (cpuOf(r) ? " / " + cpuOf(r) : "") + (r.runner?.zig ? " / zig " + r.runner.zig : "");
+  const machOf = r => (r.runner?.os ?? "") + (cpuOf(r) ? " / " + cpuOf(r) : "") + (r.runner?.zig ? " / zig " + r.runner.zig : "") + (r.runner?.rust ? " / rustc " + r.runner.rust : "");
   const ciIdx = [];
   const localByLabel = new Map(); // label → [run index](按时间序)
   idx.runs.forEach((r, i) => {
@@ -256,14 +266,14 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
     root.appendChild(h);
   };
 
-  // ---- 柱状图:每语料一组,最近 CI 与本机 run 的基线倍数,左 CI 右本机 ----
+  // ---- 柱状图:每语料一组,最近 CI 与本机 run 的基线倍数,左 CI 右本机;纵轴固定 0–2,超出画到图外 ----
   const barPairs = [];
   if (lastCi != null) barPairs.push({ name: "CI", ri: lastCi, local: false });
   if (lastLocal != null) barPairs.push({ name: localName(idx.runs[lastLocal].label ?? "?"), ri: lastLocal, local: true });
   document.getElementById("bars-meta").textContent = barPairs.map(bp => {
     const r = idx.runs[bp.ri];
     return bp.name + "：" + r.sha.slice(0, 10) + " · " + r.date.slice(0, 16).replace("T", " ") + "Z · " + machOf(r);
-  }).join(" ｜ ") + " · 左 CI 右本机，柱高 = vs baseline 倍数";
+  }).join(" ｜ ") + " · 左 CI 右本机，柱高 = vs baseline 倍数（纵轴固定 0–2）";
   const barRoot = document.getElementById("bars");
   for (const [file, series] of Object.entries(idx.series)) {
     const item = document.createElement("div"); item.className = "bar-item";
@@ -272,46 +282,46 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
     barRoot.appendChild(item);
     const chart = echarts.init(div, theme);
     allCharts.push(chart);
+    const barData = BAR_GROUPS.flat().flatMap(impl => barPairs.flatMap(bp => {
+      const p = (series[impl] || [])[bp.ri];
+      if (!p || p.ratio == null) return [];
+      const cx = IMPL_X[impl] + (bp.local ? 1 : -1) * (PAIR_GAP / 2 + 0.5);
+      return [{ value: [cx, p.ratio], impl, pair: bp.name, ratio: p.ratio, gbps: p.gbps, color: COLORS[impl], opacity: bp.local ? 0.5 : 1 }];
+    }));
     chart.setOption({
       backgroundColor: "transparent",
-      grid: { left: 44, right: 6, top: 20, bottom: 56 },
+      grid: { left: 50, right: 10, top: 24, bottom: 78 },
       xAxis: {
-        type: "category",
-        data: BAR_CATS,
-        axisLabel: { interval: 0, rotate: 45, fontSize: 11 },
-        axisTick: { alignWithLabel: true },
-        axisLine: { show: false }
+        type: "value", min: -0.4, max: BAR_XMAX + 0.4,
+        axisLabel: { customValues: BAR_CENTERS, formatter: v => BAR_LABEL[Math.round(v * 1e6) / 1e6] ?? "", rotate: 45, fontSize: 11 },
+        axisTick: { show: false }, axisLine: { show: false }, splitLine: { show: false }
       },
-      yAxis: { type: "value", name: "vs baseline", nameTextStyle: { fontSize: 11 }, max: v => Math.ceil(Math.max(v.max * 1.05, 1.15) * 10) / 10 },
+      yAxis: { type: "value", name: "vs baseline", nameTextStyle: { fontSize: 11 }, min: 0, max: 2 },
       tooltip: {
-        trigger: "axis", axisPointer: { type: "shadow" },
-        formatter: prs => {
-          const impl = prs.length ? BAR_IMPL_AT[prs[0].dataIndex] : null;
-          if (!impl) return "";
-          let s = NAMES[impl];
-          for (const pr of prs) {
-            const bp = barPairs[pr.seriesIndex];
-            const p = (series[impl] || [])[bp.ri];
-            if (p && p.ratio != null) s += "<br/>" + bp.name + "：" + p.ratio.toFixed(2) + "x（" + p.gbps.toFixed(2) + " GB/s）";
-          }
-          return s;
+        trigger: "item",
+        formatter: pr => {
+          const d = pr.data;
+          return NAMES[d.impl] + "<br/>" + d.pair + "：" + d.ratio.toFixed(2) + "x（" + d.gbps.toFixed(2) + " GB/s）";
         }
       },
-      series: barPairs.map((bp, bi) => ({
-        name: bp.name, type: "bar",
-        barWidth: "45%", barGap: "10%", barCategoryGap: "25%",
-        data: BAR_IMPL_AT.map(impl => {
-          if (!impl) return null;
-          const p = (series[impl] || [])[bp.ri];
-          return p && p.ratio != null ? { value: p.ratio, itemStyle: { color: COLORS[impl], opacity: bp.local ? 0.5 : 1 } } : null;
-        }),
-        markLine: bi === 0 ? {
+      series: [{
+        type: "custom",
+        clip: false, // 超出纵轴范围的柱画到图外
+        renderItem: (params, api) => {
+          const d = barData[params.dataIndex];
+          const top = api.coord([api.value(0), api.value(1)]);
+          const base = api.coord([api.value(0), 0]);
+          const w = api.size([1, 0])[0];
+          return { type: "rect", shape: { x: top[0] - w / 2, y: top[1], width: w, height: base[1] - top[1] }, style: { fill: d.color, opacity: d.opacity } };
+        },
+        data: barData,
+        markLine: {
           silent: true, symbol: "none",
           data: [{ yAxis: 1 }],
           lineStyle: { color: COLORS[idx.anchor], type: "dashed", opacity: .7 },
           label: { show: true, formatter: "baseline", position: "insideEndTop", fontSize: 10 }
-        } : undefined
-      }))
+        }
+      }]
     });
   }
 
@@ -406,7 +416,7 @@ const readme = `# my-scanner 架构矩阵基准报告
 
 在线图表页（GitHub Pages，源 = 本分支）：<https://johnhax.net/my-scanner/>
 
-- [index.html](index.html) — ECharts 图表页：顶部为比对者说明（链接到各 git 仓，yuku 基线版本溯源）、机器配置（CI runner 与本机，基线同为 yuku v0.10.1 固定快照）与语料说明（大小与 tokens（baseline 计数）、出处、来源版本与链接/构造场景，图上只留文件名）；柱状图为最近一次 CI 与本机 run 的「vs baseline」倍数对比（每语料一张 370px 定宽卡片、随页宽并排；label 45° 斜排；左 CI 右本机、同色本机半透明，架构族间留空槽分组，baseline 两柱恒 1.0、与 y=1 虚线互证基线对齐），下方为趋势折线（vs baseline / vs 同族参照两种口径；实线 CI、虚线本机按机器分组、同机相连；基线固定，相对值跨 run、跨机可比）。图表依赖 [vendor/echarts.min.js](vendor/echarts.min.js)（tools/package.json 固定版本）
+- [index.html](index.html) — ECharts 图表页：顶部为比对者说明（链接到各 git 仓，yuku 基线版本溯源）、机器配置（CI runner 与本机，基线同为 yuku v0.10.1 固定快照）与语料说明（大小与 tokens（baseline 计数）、出处、来源版本与链接/构造场景，图上只留文件名）；柱状图为最近一次 CI 与本机 run 的「vs baseline」倍数对比（每语料一张 555px 定宽卡片、随页宽并排；label 45° 斜排；左 CI 右本机、同色本机半透明；纵轴固定 0–2、超出画到图外；柱距 CI/local 0.1、组内对照 0.25、架构族组间 0.5 柱宽，baseline 两柱恒 1.0、与 y=1 虚线互证基线对齐），下方为趋势折线（vs baseline / vs 同族参照两种口径；实线 CI、虚线本机按机器分组、同机相连；基线固定，相对值跨 run、跨机可比）。图表依赖 [vendor/echarts.min.js](vendor/echarts.min.js)（tools/package.json 固定版本）
 - [reports/](reports/) — 每次 run 的 \`<sha>.md\`（人读报告）与 \`<sha>.json\`（原始数据）；本地提交（bench.sh --submit）为 \`<sha>.local.*\`（机器名不入产物），与 CI 同图并绘
 
 对比口径与架构族谱见仓库 docs/architecture.md。

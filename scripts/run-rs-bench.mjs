@@ -61,13 +61,13 @@ function dirFingerprint(dir) {
 }
 
 // 工具指纹:依赖固定版本(Cargo.lock)+ 编译器 + vendored oxc 内容 + RUSTFLAGS
-// (x86_64 的 avx2/bmi2 开关改变产物,见 ci-bench.sh)
+// (x86_64 的 avx2/bmi2 开关改变产物,见 ci-bench.sh)。
+// rustc 版本同时戳进 rs.json:报告溯源实际编译对照组的工具链
+const RUSTC = (() => { try { return execFileSync("rustc", ["--version"], { encoding: "utf8" }).trim(); } catch { return "unknown"; } })();
 function toolFingerprint() {
-  let rustc = "unknown";
-  try { rustc = execFileSync("rustc", ["--version"], { encoding: "utf8" }).trim(); } catch { /* PATH 外 */ }
   const h = createHash("sha256");
   h.update(readFileSync(LOCK_PATH));
-  h.update(rustc);
+  h.update(RUSTC);
   h.update(process.env.RUSTFLAGS ?? "");
   h.update(dirFingerprint(OXC_DIR));
   h.update(dirFingerprint(OXC_LEXER_DIR));
@@ -102,6 +102,6 @@ const runs = files.map((f) => ({
   bytes: statSync(f).size,
   results: cache.entries[keyOf(f)],
 }));
-writeFileSync(`${jsonOut}.tmp`, JSON.stringify({ runs }) + "\n");
+writeFileSync(`${jsonOut}.tmp`, JSON.stringify({ rust: RUSTC, runs }) + "\n");
 renameSync(`${jsonOut}.tmp`, jsonOut);
 console.log(`rs.json: ${files.length} 个语料(${files.length - miss.length} 个来自缓存,${miss.length} 个实测)`);

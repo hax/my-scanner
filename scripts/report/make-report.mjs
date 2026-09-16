@@ -74,10 +74,12 @@ const metaByPath = new Map(manifest.files.map((f, i) => [f.path, { ...f, order: 
 // 合并 zig + rust 的 runs(按 file 对齐;rust 缺失的文件不补)
 const files = new Map(); // file -> {bytes, results: Map}
 let baselines = null; // zig.json 的基线溯源(prepare-baselines 版本标记),透传给 data.json
+let rsRust = null; // rs.json 的 rustc 版本戳(run-rs-bench 写入):实际编译 swc/oxc/oxc_bitmap 的工具链
 for (const path of [zigJsonPath, opt("--rs")]) {
   if (!path || !existsSync(path)) continue;
   const data = JSON.parse(readFileSync(path, "utf8"));
   baselines ??= data.baselines ?? null;
+  rsRust ??= data.rust ?? null;
   for (const run of data.runs) {
     let f = files.get(run.file);
     if (!f) { f = { bytes: run.bytes, results: new Map() }; files.set(run.file, f); }
@@ -109,6 +111,11 @@ const fileRuns = [...files.entries()].map(([file, f]) => {
 });
 fileRuns.sort((a, b) => a.order - b.order);
 
+// rust 版本进 runner(与 zig 并列):优先 rs.json 戳(同 run 实测对照组的工具链),
+// 回退本机探测;只留版本号,与 zig 粒度一致
+const rustV = (s) => s?.match(/\d+\.\d+\.\d+/)?.[0] ?? "";
+runner.rust = rustV(rsRust) || rustV(env("rustc", ["--version"])) || null;
+
 // ---- data.json ----
 const dataJson = {
   sha, date: new Date().toISOString(), subject, repeats: Number(repeats) || null, runner,
@@ -125,7 +132,7 @@ lines.push("");
 lines.push(`- 提交：${subject}`);
 lines.push(`- 日期：${dataJson.date}`);
 lines.push(`- 轮数：每实现 ${repeats} 轮取最优；同进程、同文件、token 产出后丢弃`);
-lines.push(`- 环境：${runner.os}${runner.cpu ? ` / ${runner.cpu}` : ""}${runner.zig ? ` / zig ${runner.zig}` : ""}`);
+lines.push(`- 环境：${runner.os}${runner.cpu ? ` / ${runner.cpu}` : ""}${runner.zig ? ` / zig ${runner.zig}` : ""}${runner.rust ? ` / rustc ${runner.rust}` : ""}`);
 lines.push(`- 通道：${channel}${channel === "local" ? `（第三方对照计时可能来自本地缓存，与 CI 主线分机型呈现）` : ""}`);
 lines.push(`- 基线：baseline（yuku v0.10.1 固定快照，跨 run 可比；各实现 / 基线，>1 即更快）`);
 if (baselines) {
