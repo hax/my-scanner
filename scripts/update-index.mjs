@@ -106,9 +106,9 @@ const html = `<!doctype html>
   h3 .note { font-weight: 400; font-size: .82rem; color: gray; }
   .intro { font-size: 1rem; }
   .meta { color: gray; font-size: .85rem; }
-  #impls { border-collapse: collapse; font-size: .92rem; margin: .4rem 0 0; }
-  #impls td { padding: .14rem .9rem .14rem 0; vertical-align: top; }
-  #impls td:first-child { white-space: nowrap; }
+  #impls, #machines { border-collapse: collapse; font-size: .92rem; margin: .4rem 0 0; }
+  #impls td, #machines td { padding: .14rem .9rem .14rem 0; vertical-align: top; }
+  #impls td:first-child, #machines td:first-child { white-space: nowrap; }
   .mode { margin: .2rem 0 .6rem; }
   .mode button { cursor: pointer; padding: .2rem .7rem; margin-right: .3rem; border-radius: 6px; border: 1px solid currentColor; background: transparent; color: inherit; }
   .mode button.on { background: #4b7bec; border-color: #4b7bec; color: #fff; }
@@ -123,23 +123,27 @@ const html = `<!doctype html>
 </head>
 <body>
 <h1>my-scanner 架构矩阵基准</h1>
-<p class="intro">每次 push 跑一轮全变体差分门禁 + 架构矩阵基准,本页汇总结果。
-相对值锚点为 <code>yuku-old</code>(v0.10.1 钉版快照,>1 即更快)——锚点固定不漂,
-相对倍数跨 run、跨 runner 代际均可比;绝对吞吐(GB/s)只有同 run 内可比。
-「同族参照」= 自有实现 / 同架构族第三方对照(scalar→yuku-old、jump_vec→yuku-main,
-&gt;1 即我方更快),衡量各族自身成熟度。</p>
+<p class="intro">每次 push 跑一轮全变体差分门禁 + 架构矩阵基准,本页汇总 CI 与本机 run。
+纵轴统一为 <code>vs yuku-old</code> 倍数(v0.10.1 钉版快照,&gt;1 即更快)——锚点钉版不漂,
+由同进程同文件实测带入,CI 与各本机基线对齐,相对倍数跨 run、跨机器均可比
+(绝对吞吐 GB/s 只有同机同 run 内可比,数值见 tooltip)。柱状图左 CI 右本机(同色,本机半透明),
+趋势图实线 CI、虚线本机(同机相连,按机器分组)。
+「同族参照」= 自有实现 / 同架构族第三方对照(scalar→yuku-old、jump_vec→yuku-main、
+two_phase→oxc_bitmap,&gt;1 即我方更快),衡量各族自身成熟度。</p>
 <table id="impls"></table>
+<h2>机器配置</h2>
+<p class="meta">锚点 yuku-old 钉版 v0.10.1(版本溯源见上表),CI 与各本机基线一致,倍数口径跨机可比。</p>
+<table id="machines"></table>
 <p class="meta" id="runinfo"></p>
-<h2>当前对比 · 吞吐 (GB/s)</h2>
+<h2>当前对比 · vs yuku-0.10.1</h2>
 <p class="meta" id="bars-meta"></p>
 <div id="bars"></div>
 <h2>趋势</h2>
-<p class="mode">口径: <button id="mode-ratio" class="on">vs yuku-0.10.1</button><button id="mode-peer">vs 同族参照</button><button id="mode-gbps">GB/s</button>
-<label class="meta" style="cursor:pointer;margin-left:.6rem"><input type="checkbox" id="show-local"> 叠加本地 run(空心点,不连线,带机器标识)</label></p>
+<p class="mode">口径: <button id="mode-ratio" class="on">vs yuku-0.10.1</button><button id="mode-peer">vs 同族参照</button></p>
 <div id="files"></div>
 <script>
-// 直接参照同色系:自有实现饱和色,其同族直接参照同色系浅色;swc/oxc 保留异色身份
-const COLORS = { scalar:"#e67e22", jump_vec:"#27ae60", two_phase:"#e74c3c", yuku_old:"#f0b27a", yuku_main:"#82e0aa", swc:"#9b59b6", oxc:"#1abc9c", oxc_bitmap:"#f1948a" };
+// 每实现一个区分色(对照组不再保持同色系);CI/本机以 实心/半透明(柱)、实线/虚线空心点(趋势) 区分
+const COLORS = { scalar:"#e67e22", jump_vec:"#27ae60", two_phase:"#e74c3c", yuku_old:"#95a5a6", yuku_main:"#2980b9", swc:"#9b59b6", oxc:"#1abc9c", oxc_bitmap:"#d4ac0d" };
 const NAMES  = { scalar:"scalar(全标量)", jump_vec:"jump_vec(单阶段+SIMD跳跃)", two_phase:"two_phase(两阶段)", yuku_old:"yuku-old", yuku_main:"yuku-main", swc:"swc(决策注入)", oxc:"oxc(决策注入)", oxc_bitmap:"oxc-bitmap(位图流水线)" };
 const SHORT  = { scalar:"scalar", jump_vec:"jump_vec", two_phase:"two_phase", yuku_old:"yuku-old", yuku_main:"yuku-main", swc:"swc", oxc:"oxc", oxc_bitmap:"oxc-bitmap" };
 const DESCR  = {
@@ -152,17 +156,14 @@ const DESCR  = {
   oxc: "第三方 · oxc lexer,决策注入驱动(同上)",
   oxc_bitmap: "第三方 · oxc_lexer 多位图流水线(孵化实验,歧义自决+spans 门禁;计时含 value lanes;仅 x86_64 SIMD)"
 };
-// 柱状图按架构族分组:swc/oxc 与 jump_vec 同族(单阶段+SIMD 长跳跃/字节搜索),
-// 故并入 jump_vec 组;直接参照同色系浅色,同族其他实现(swc/oxc)保留异色身份。
-// 细柱紧凑布局:柱宽钉 16px、槽位 ~25px(间距≈半柱宽),组身份由 markArea
-// 浅底带承担(不再占空档槽位)
-const BAR_GROUPS = [["scalar", "yuku_old"], ["jump_vec", "yuku_main", "swc", "oxc"], ["two_phase", "oxc_bitmap"]];
+// 柱状图按架构族分组(锚点 yuku-old 不进图,由 y=1 虚线代表):swc/oxc 与 jump_vec
+// 同族(单阶段+SIMD 长跳跃/字节搜索),故并入 jump_vec 组;组身份由 markArea 浅底带承担
+const BAR_GROUPS = [["scalar"], ["jump_vec", "yuku_main", "swc", "oxc"], ["two_phase", "oxc_bitmap"]];
 const BAR_IMPLS = BAR_GROUPS.flat();
 const BANDS = []; // 组带范围(隔组填浅底):category 轴带宽坐标,组边界在 x.5
 { let s = 0; BAR_GROUPS.forEach((g, gi) => { if (gi % 2 === 1) BANDS.push([{ xAxis: s - 0.5 }, { xAxis: s + g.length - 0.5 }]); s += g.length; }); }
 const theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : null;
 let mode = "ratio";
-let showLocal = false;
 const trendCharts = [];
 const allCharts = [];
 
@@ -185,15 +186,31 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
     + SHORT[impl] + "</code></td><td>" + (DESCR[impl] ?? impl) + " " + blText(impl) + "</td></tr>"
   ).join("");
 
+  // ---- run 分堆:CI 序列 + 本机按 label 分组 ----
+  const cpuOf = r => (r.runner?.cpu ?? "").split("\\n").pop().split(":").pop().trim();
+  const machOf = r => (r.runner?.os ?? "") + (cpuOf(r) ? " / " + cpuOf(r) : "") + (r.runner?.zig ? " / zig " + r.runner.zig : "");
   const ciIdx = [];
-  idx.runs.forEach((r, i) => { if (r.channel !== "local") ciIdx.push(i); });
-  // 柱状图固定取最近一次 CI run(同机同轮可比;本地 run 机器各异,见趋势图叠加)
-  const lastCi = ciIdx.length ? ciIdx[ciIdx.length - 1] : idx.runs.length - 1;
-  const lastRun = idx.runs[lastCi];
-  document.getElementById("bars-meta").textContent = "最近一次 CI run: " + lastRun.sha.slice(0, 10) + " · " + lastRun.date.slice(0, 16).replace("T", " ") + "Z · " + (lastRun.runner?.os ?? "") + " / " + (lastRun.runner?.cpu ?? "").split("\\n").pop().split(":").pop().trim();
+  const localByLabel = new Map(); // label → [run index](按时间序)
+  idx.runs.forEach((r, i) => {
+    if (r.channel === "local") {
+      const l = r.label ?? "unknown";
+      if (!localByLabel.has(l)) localByLabel.set(l, []);
+      localByLabel.get(l).push(i);
+    } else ciIdx.push(i);
+  });
+  const lastCi = ciIdx.length ? ciIdx[ciIdx.length - 1] : null;
+  const lastLocal = localByLabel.size ? Math.max(...[...localByLabel.values()].flat()) : null;
 
-  const pvalOf = p => mode === "gbps" ? p.gbps : mode === "peer" ? p.pratio : p.ratio;
-  const shownImpl = impl => mode !== "peer" || idx.peers[impl]; // 同族口径只画有第三方参照的实现
+  // ---- 机器配置表:CI runner 与各本机(各取最近一次 run 的环境) ----
+  const machRows = [];
+  if (lastCi != null) machRows.push(["CI", machOf(idx.runs[lastCi])]);
+  localByLabel.forEach((ridx, label) => machRows.push(["本机 " + label, machOf(idx.runs[ridx[ridx.length - 1]])]));
+  document.getElementById("machines").innerHTML = machRows.map(m =>
+    "<tr><td><b>" + m[0] + "</b></td><td>" + m[1] + "</td></tr>"
+  ).join("");
+
+  const pvalOf = p => mode === "peer" ? p.pratio : p.ratio;
+  const shownImpl = impl => impl !== idx.anchor && (mode !== "peer" || idx.peers[impl]); // 锚点不进图(y=1 虚线代表);同族口径只画有第三方参照的实现
   const addH3 = (root, file) => {
     const h = document.createElement("h3");
     const c = idx.corpus?.[file];
@@ -207,7 +224,14 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
     root.appendChild(h);
   };
 
-  // ---- 柱状图:每语料一组,最近一次 CI run 的各实现吞吐 ----
+  // ---- 柱状图:每语料一组,最近 CI 与本机 run 的锚点倍数,左 CI 右本机 ----
+  const barPairs = [];
+  if (lastCi != null) barPairs.push({ name: "CI", ri: lastCi, local: false });
+  if (lastLocal != null) barPairs.push({ name: "本机 " + (idx.runs[lastLocal].label ?? "?"), ri: lastLocal, local: true });
+  document.getElementById("bars-meta").textContent = barPairs.map(bp => {
+    const r = idx.runs[bp.ri];
+    return bp.name + ": " + r.sha.slice(0, 10) + " · " + r.date.slice(0, 16).replace("T", " ") + "Z · " + machOf(r);
+  }).join(" ｜ ") + " · 左 CI 右本机,柱高 = vs yuku-0.10.1 倍数";
   const barRoot = document.getElementById("bars");
   for (const [file, series] of Object.entries(idx.series)) {
     const item = document.createElement("div"); item.className = "bar-item";
@@ -216,7 +240,6 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
     barRoot.appendChild(item);
     const chart = echarts.init(div, theme);
     allCharts.push(chart);
-    const anchorGbps = series[idx.anchor]?.[lastCi]?.gbps ?? null;
     chart.setOption({
       backgroundColor: "transparent",
       grid: { left: 40, right: 6, top: 20, bottom: 64 },
@@ -227,38 +250,39 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
         axisTick: { alignWithLabel: true },
         axisLine: { show: false }
       },
-      yAxis: { type: "value", name: "GB/s", nameTextStyle: { fontSize: 10 } },
+      yAxis: { type: "value", name: "vs yuku-0.10.1", nameTextStyle: { fontSize: 10 }, max: v => Math.ceil(Math.max(v.max * 1.05, 1.15) * 10) / 10 },
       tooltip: {
-        formatter: pr => {
-          const impl = BAR_IMPLS[pr.dataIndex];
-          const p = (series[impl] || [])[lastCi];
-          if (!p) return NAMES[impl] + ": 无数据";
-          let s = NAMES[impl] + "<br/>" + p.gbps.toFixed(2) + " GB/s<br/>vs yuku-0.10.1: " + p.ratio.toFixed(2) + "x";
-          if (p.pratio != null) s += "<br/>vs 同族参照: " + p.pratio.toFixed(2) + "x";
+        trigger: "axis", axisPointer: { type: "shadow" },
+        formatter: prs => {
+          const impl = BAR_IMPLS[prs[0].dataIndex];
+          let s = NAMES[impl];
+          for (const pr of prs) {
+            const bp = barPairs[pr.seriesIndex];
+            const p = (series[impl] || [])[bp.ri];
+            if (p && p.ratio != null) s += "<br/>" + bp.name + ": " + p.ratio.toFixed(2) + "x (" + p.gbps.toFixed(2) + " GB/s)";
+          }
           return s;
         }
       },
-      series: [{
-        type: "bar",
-        // 柱宽钉死像素,卡片宽度跟着走(槽位 ~25px → 间距 ~9px≈半柱宽);
-        // 竖排 label 横向只占 12px,窄槽位不重叠
-        barWidth: 16,
+      series: barPairs.map((bp, bi) => ({
+        name: bp.name, type: "bar",
+        barWidth: "30%", barGap: "10%", barCategoryGap: "35%",
         data: BAR_IMPLS.map(impl => {
-          const p = (series[impl] || [])[lastCi];
-          return p ? { value: p.gbps, itemStyle: { color: COLORS[impl] } } : null;
+          const p = (series[impl] || [])[bp.ri];
+          return p && p.ratio != null ? { value: p.ratio, itemStyle: { color: COLORS[impl], opacity: bp.local ? 0.5 : 1 } } : null;
         }),
-        markArea: { silent: true, itemStyle: { color: "rgba(127,127,127,0.07)" }, data: BANDS },
-        markLine: anchorGbps == null ? undefined : {
+        markArea: bi === 0 ? { silent: true, itemStyle: { color: "rgba(127,127,127,0.07)" }, data: BANDS } : undefined,
+        markLine: bi === 0 ? {
           silent: true, symbol: "none",
-          data: [{ yAxis: anchorGbps }],
+          data: [{ yAxis: 1 }],
           lineStyle: { color: COLORS[idx.anchor], type: "dashed", opacity: .7 },
           label: { show: true, formatter: "yuku-0.10.1", position: "insideEndTop", fontSize: 10 }
-        }
-      }]
+        } : undefined
+      }))
     });
   }
 
-  // ---- 趋势图:每语料一张折线,口径切换 + 本地 run 空心点叠加 ----
+  // ---- 趋势图:每语料一张折线,口径切换;实线 CI,虚线本机(同机相连) ----
   const trendOption = series => {
     const sers = [];
     for (const impl of idx.impls) {
@@ -267,39 +291,29 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
         name: NAMES[impl], type: "line",
         symbolSize: 6,
         itemStyle: { color: COLORS[impl] },
-        data: series[impl].map((p, i) => (idx.runs[i].channel === "local" || !p || pvalOf(p) == null) ? null : pvalOf(p)),
-        connectNulls: false
+        lineStyle: { color: COLORS[impl] },
+        data: series[impl].map((p, i) => (idx.runs[i].channel !== "local" && p && pvalOf(p) != null) ? pvalOf(p) : null),
+        connectNulls: true // 跨过本机 run 的 x 槽位,CI 主线保持连续
       };
-      if (sers.length === 0 && mode !== "gbps") {
+      if (sers.length === 0) {
         opt.markLine = { silent: true, symbol: "none", data: [{ yAxis: 1 }], lineStyle: { color: "#4b7bec", type: "dashed", opacity: .6 }, label: { show: false } };
       }
       sers.push(opt);
-      if (showLocal) {
-        const pts = [];
-        series[impl].forEach((p, i) => {
-          if (idx.runs[i].channel === "local" && p && pvalOf(p) != null) pts.push([i, pvalOf(p)]);
-        });
+      localByLabel.forEach((ridx, label) => {
         sers.push({
-          name: NAMES[impl] + "(本地)", type: "scatter",
-          symbolSize: 9,
+          name: NAMES[impl] + "(本机 " + label + ")", type: "line",
+          symbolSize: 7,
+          lineStyle: { color: COLORS[impl], type: "dashed", opacity: .85 },
           itemStyle: { color: "transparent", borderColor: COLORS[impl], borderWidth: 2 },
-          data: pts,
-          tooltip: {
-            formatter: pr => {
-              const r = idx.runs[pr.data[0]];
-              const p = series[impl][pr.data[0]];
-              let s = "[本地 " + (r.label ?? "?") + "] " + NAMES[impl] + "<br/>" + pvalOf(p).toFixed(2) + (mode === "gbps" ? " GB/s" : "x");
-              s += "<br/>" + p.sha + " · " + p.date.slice(0, 10);
-              return s;
-            }
-          }
+          data: series[impl].map((p, i) => (idx.runs[i].channel === "local" && (idx.runs[i].label ?? "unknown") === label && p && pvalOf(p) != null) ? pvalOf(p) : null),
+          connectNulls: true // 同机相连(跨过 CI 与其他机器的槽位)
         });
-      }
+      });
     }
     return {
       backgroundColor: "transparent",
       grid: { left: 55, right: 20, top: 40, bottom: 45 },
-      legend: { type: "scroll", data: idx.impls.filter(shownImpl).map(i => NAMES[i]) },
+      legend: { type: "scroll", data: sers.map(s => s.name) },
       xAxis: {
         type: "category",
         data: idx.runs.map(r => r.date.slice(5, 10) + " " + r.sha.slice(0, 7)),
@@ -307,13 +321,13 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
       },
       yAxis: {
         type: "value",
-        name: mode === "gbps" ? "GB/s" : mode === "peer" ? "vs 同族参照" : "vs yuku-0.10.1",
-        max: mode === "gbps" ? null : v => Math.max(v.max * 1.05, 1.15)
+        name: mode === "peer" ? "vs 同族参照" : "vs yuku-0.10.1",
+        max: v => Math.ceil(Math.max(v.max * 1.05, 1.15) * 10) / 10
       },
       dataZoom: [{ type: "inside" }],
       tooltip: {
         trigger: "axis",
-        valueFormatter: v => v == null ? "-" : mode === "gbps" ? v.toFixed(2) + " GB/s" : v.toFixed(2) + "x"
+        valueFormatter: v => v == null ? "-" : v.toFixed(2) + "x"
       },
       series: sers
     };
@@ -327,7 +341,7 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
     trendCharts.push({ chart, series });
     allCharts.push(chart);
   }
-  // 口径切换/本地叠加的真正重绘:趋势 option 依赖闭包内的 idx 与 mode
+  // 口径切换的真正重绘:趋势 option 依赖闭包内的 idx 与 mode
   redraw = () => trendCharts.forEach(tc => tc.chart.setOption(trendOption(tc.series), true));
 }).catch(e => { document.getElementById("files").textContent = "index.json 加载失败: " + e; });
 
@@ -336,13 +350,10 @@ const setMode = m => {
   mode = m;
   document.getElementById("mode-ratio").classList.toggle("on", m === "ratio");
   document.getElementById("mode-peer").classList.toggle("on", m === "peer");
-  document.getElementById("mode-gbps").classList.toggle("on", m === "gbps");
   redraw();
 };
 document.getElementById("mode-ratio").onclick = () => setMode("ratio");
 document.getElementById("mode-peer").onclick = () => setMode("peer");
-document.getElementById("mode-gbps").onclick = () => setMode("gbps");
-document.getElementById("show-local").onchange = e => { showLocal = e.target.checked; redraw(); };
 addEventListener("resize", () => allCharts.forEach(c => c.resize()));
 </script>
 </body>
@@ -362,7 +373,7 @@ const readme = `# my-scanner 架构矩阵基准报告
 
 在线图表页(GitHub Pages,源 = 本分支): <https://johnhax.net/my-scanner/>
 
-- [index.html](index.html) — ECharts 图表页:顶部为比对者说明(yuku 基线版本溯源)与最近一次 CI run 的吞吐柱状对比(每语料一张 246px 定宽卡片、随页宽并排;柱宽 16px、间距半柱宽、竖排 label,架构族由浅底组带区分),下方为趋势折线(vs yuku-0.10.1 锚点 / vs 同族参照 / GB/s 三种口径;锚点钉版,相对值跨 run 可比;本地 run 默认不画,可勾选叠加空心点)。图表依赖 [vendor/echarts.min.js](vendor/echarts.min.js)(tools/package.json 钉版)
+- [index.html](index.html) — ECharts 图表页:顶部为比对者说明(yuku 基线版本溯源)与机器配置(CI runner 与各本机,锚点 yuku-old 钉版对齐);柱状图为最近一次 CI 与本机 run 的「vs yuku-0.10.1」倍数对比(每语料一张 246px 定宽卡片、随页宽并排;竖排 label;左 CI 右本机、同色本机半透明,架构族由浅底组带区分,锚点由 y=1 虚线代表),下方为趋势折线(vs yuku-0.10.1 锚点 / vs 同族参照两种口径;实线 CI、虚线本机按机器分组、同机相连;锚点钉版,相对值跨 run、跨机可比)。图表依赖 [vendor/echarts.min.js](vendor/echarts.min.js)(tools/package.json 钉版)
 - [reports/](reports/) — 每次 run 的 \`<sha>.md\`(人读报告)与 \`<sha>.json\`(原始数据);本地提交(bench.sh --submit)为 \`<sha>.local-<机器名>.*\`,带机器标识与 CI 主线分层
 
 对比口径与架构族谱见仓库 docs/architecture.md。

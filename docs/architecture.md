@@ -74,16 +74,18 @@ GitHub Pages 源，图表页在线看： <https://johnhax.net/my-scanner/>
 `vendor/echarts.min.js` 由 tools/package.json 钉版、发布时从
 tools/node_modules 拷入）。页面顶部为比对者说明（yuku 基线版本溯源：
 sha 与上游 commit 日期由 `prepare-baselines.sh` 的 `.date` 标记经
-bench.zig → data.json 带入）与最近一次 CI run 的吞吐**柱状对比**
-（每语料一张 246px 定宽卡片、flex 随页宽并排；柱宽 16px、
-间距半柱宽、竖排 label，架构族身份由浅底组带承担——scalar|yuku-old、
-jump_vec 族四柱
-（swc/oxc 同族，保留异色身份）、two_phase|oxc-bitmap；同机同轮的
-绝对值可直接比较）；下方**趋势折线**以"vs yuku-0.10.1 倍数"为主口径——
-锚点是钉版快照、固定不漂，相对倍数跨 run、跨 runner 代际均可比
-（2026-09-16 自 yuku-main 切换，历史点由 data.json 的 best_ns 全量
-重算，序列无断档）；绝对吞吐（GB/s）仍仅同 run 内可比。另有
-"vs 同族参照"口径衡量各族自身成熟度：
+bench.zig → data.json 带入）与**机器配置**表（CI runner 与各本机的
+os/CPU/zig 版本，各取最近一次 run；锚点 yuku-old 钉版，各机基线
+对齐）。**柱状对比**为最近一次 CI 与本机 run 的 "vs yuku-0.10.1"
+倍数（每语料一张 246px 定宽卡片、flex 随页宽并排、竖排 label；
+左 CI 右本机、同色本机半透明，锚点 yuku-old 不进图、由 y=1 虚线
+代表，架构族身份由浅底组带承担——scalar、jump_vec 族四柱
+（swc/oxc 同族）、two_phase|oxc-bitmap）；下方**趋势折线**纵轴统一为
+相对锚点的倍数——锚点钉版不漂，且由同进程同文件实测带入，相对倍数
+跨 run、跨 runner 代际、跨机器均可比（2026-09-16 自 yuku-main 切换，
+历史点由 data.json 的 best_ns 全量重算，序列无断档）；实线 CI、虚线
+本机（按机器分组、同机相连），绝对吞吐（GB/s）仅同机同 run 内可比，
+只在 tooltip 出现。另有 "vs 同族参照"口径衡量各族自身成熟度：
 scalar 对 yuku-old、jump_vec 对 yuku-main、two_phase 对 oxc_bitmap
 （>1 即我方更快；oxc_bitmap 口径注记见其专节与报告头），report.md
 含同口径的分组几何平均表。
@@ -111,9 +113,10 @@ scalar 对 yuku-old、jump_vec 对 yuku-main、two_phase 对 oxc_bitmap
 （默认全 10 语料）+ swc/oxc/oxc_bitmap 对照 → 汇总 → 发布到 bench-reports
 分支（凭据缺省回退 `gh auth token` 与 origin remote）。本地 run 的
 data.json 记 `channel=local` 与机器标识（默认 hostname），文件名
-`<sha>.local-<机器名>.*` 不与 CI 同 sha 互撞；趋势页默认只画 CI
-主线，勾选「叠加本地 run」后本地点以空心圆叠加（不连线，tooltip
-带机器名）——不同机器的本地结果与 CI 趋势分层，互不混淆。
+`<sha>.local-<机器名>.*` 不与 CI 同 sha 互撞；图表页上本机与 CI 同图
+并绘——柱状图左 CI 右本机（同色、本机半透明），趋势图实线 CI、虚线
+本机（按机器分组、同机相连）——纵轴统一为 vs yuku-old 锚点倍数，
+基线钉版对齐，跨机可比。
 
 ## two_phase：两阶段
 
