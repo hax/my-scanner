@@ -19,8 +19,8 @@
 
    | 文件 | tokens | 特征 |
    | --- | --- | --- |
-   | real/typescript.min.js | 1,048,547 | minified bundle（197 tok/KB） |
    | real/typescript.js | 1,122,439 | 编译器 bundle（未压缩） |
+   | real/typescript.min.js | 1,048,547 | minified bundle（363 tok/KB） |
    | real/checker.ts | 343,905 | 编译器源码（v5.9.2） |
    | real/lib.dom.d.ts | 116,895 | 注释密集 d.ts |
    | real/react.js | 8,411 | 库源码（小文件） |

@@ -28,8 +28,8 @@ bench/差分语料分两类，分列存放：
 
 | 文件 | 分组 | 谱系 | 大小 | tok/KB | 非 ASCII 字节 | ident 非 ASCII |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
-| typescript.min.js | real | minified bundle | 2.89 MB | 363 | 0% | 0% |
 | typescript.js | real | 编译器 bundle（未压缩） | 8.02 MB | 140 | 0% | 0% |
+| typescript.min.js | real | minified bundle | 2.89 MB | 363 | 0% | 0% |
 | checker.ts | real | 编译器源码 | 3.05 MB | 113 | 0% | 0% |
 | lib.dom.d.ts | real | 注释密集 d.ts | 1.83 MB | 64 | 0% | 0% |
 | react.js | real | 库源码（小文件） | 0.07 MB | 119 | 0% | 0% |
@@ -46,8 +46,8 @@ bench/差分语料分两类，分列存放：
 
 | 文件 | 来源 | license |
 | --- | --- | --- |
-| typescript.min.js | jsdelivr minified `typescript@5.1.6/lib/typescript.js`（与 typescript.js 同版配对：min 2.9MB vs unmin 8.2MB） | Apache-2.0 |
 | typescript.js | npm `typescript@5.1.6/lib/typescript.js`（sha256 逐字节对拍确认） | Apache-2.0 |
+| typescript.min.js | jsdelivr minified `typescript@5.1.6/lib/typescript.js`（与 typescript.js 同版配对：min 2.9MB vs unmin 8.2MB） | Apache-2.0 |
 | checker.ts | `microsoft/TypeScript@v5.9.2 src/compiler/checker.ts` | Apache-2.0 |
 | lib.dom.d.ts | npm `typescript@5.9.2/lib/lib.dom.d.ts`（对拍确认） | Apache-2.0 |
 | react.js | npm `react@17.0.2/cjs/react.development.js`（对拍确认） | MIT |
