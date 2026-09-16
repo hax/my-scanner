@@ -18,12 +18,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
 
       # 语料在 corpus 分支(只含语料不含源码),检出到 corpus/ 目录
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: corpus
           path: corpus
@@ -33,7 +33,7 @@ jobs:
         with:
           version: 0.16.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
 
@@ -56,7 +56,7 @@ jobs:
         run: node scripts/publish-report.mjs --dir build/bench
 
       - name: 上传原始产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: bench-${{ github.sha }}
           path: build/bench/
