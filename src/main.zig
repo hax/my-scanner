@@ -16,6 +16,7 @@ const usage_text =
     \\  --keep-comments  输出注释 token（默认视为 trivia 跳过）
     \\  --variant=NAME   架构变体: two_phase（默认）| scalar | jump_vec
     \\  --bench=N        额外扫描 N 轮，报告 best/avg 耗时与吞吐
+    \\  --emit-regex-starts  只输出正则起点决策集（每行一个偏移，含模板内）
     \\  -h, --help       显示本帮助
     \\
 ;
@@ -32,6 +33,7 @@ pub fn main(init: std.process.Init) !void {
     var options: my_scanner.Options = .{};
     var dump = false;
     var bench: usize = 0;
+    var emit_regex_starts = false;
     var files: std.ArrayList([]const u8) = .empty;
 
     for (args[1..]) |arg| {
@@ -53,6 +55,8 @@ pub fn main(init: std.process.Init) !void {
             };
         } else if (std.mem.startsWith(u8, arg, "--bench=")) {
             bench = std.fmt.parseInt(usize, arg["--bench=".len..], 10) catch 0;
+        } else if (std.mem.eql(u8, arg, "--emit-regex-starts")) {
+            emit_regex_starts = true;
         } else if (std.mem.startsWith(u8, arg, "-")) {
             try out.print("未知参数: {s}\n\n", .{arg});
             try out.writeAll(usage_text);
@@ -71,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
 
     var had_error = false;
     for (files.items) |path| {
-        had_error = try scanFile(arena, init.io, out, path, variant, options, dump, bench) or had_error;
+        had_error = try scanFile(arena, init.io, out, path, variant, options, dump, bench, emit_regex_starts) or had_error;
     }
     try out.flush();
     if (had_error) std.process.exit(1);
@@ -104,13 +108,29 @@ fn scanFile(
     options: my_scanner.Options,
     dump: bool,
     bench: usize,
+    emit_regex_starts: bool,
 ) !bool {
     const src = std.Io.Dir.readFileAlloc(.cwd(), io, path, arena, .limited(1 << 32)) catch |err| {
         try out.print("{s}: 读取失败: {s}\n", .{ path, @errorName(err) });
         return true;
     };
 
-    var result = try variant.scan(arena, src, options);
+    // 决策导出：挂 regex_starts 旁路收集（主流与模板内的正则起点全入列）
+    var opts = options;
+    var regex_list: std.ArrayList(u32) = .empty;
+    if (emit_regex_starts) opts.regex_starts = &regex_list;
+
+    var result = try variant.scan(arena, src, opts);
+
+    if (emit_regex_starts) {
+        std.mem.sort(u32, regex_list.items, {}, std.sort.asc(u32));
+        var prev: ?u32 = null;
+        for (regex_list.items) |s| {
+            if (prev != s) try out.print("{d}\n", .{s});
+            prev = s;
+        }
+        return false;
+    }
 
     if (dump) {
         // TSV：start \t end \t kind \t 转义后的文本（\n 等控制字符转成 \x 序列）\t 行号

@@ -1,13 +1,14 @@
-//! swc / oxc lexer 计时 harness。
+//! swc / oxc lexer 计时 harness（raw 独立迭代模式）。
 //!
 //! 与 my-scanner 的 bench 同一口径：读文件（不计入）、N 轮取最优、
 //! 产出的每个 token 交给 black_box 消耗、按各自 token 数计吞吐。
 //! 输出 JSON 与 zig bench 的 --json 同构，由 scripts/make-report.mjs 汇总。
 //!
 //! 口径差异说明（与 zig 侧 yuku 对拍不同，这两个是独立进程）：
-//! swc/oxc 的 lexer 由各自 parser 驱动时的正则/除号上下文无法在独立
-//! 迭代里复刻，`/` 一律按除号产 token——与 tsc/yuku 纯 scanner 同款
-//! 保守设计，token 数差异 <1%，不影响吞吐对比结论。
+//! 本 raw 模式下 `/` 一律按除号产 token、模板 `${` 续段无人 re-lex，
+//! 遇到真正则/模板字面量类型的语料会级联塌方提前 Eof——仅供对照；
+//! 决策注入驱动版见 src/bin/drive.rs（全语料可扫完，机制见
+//! docs/architecture.md 的「swc/oxc 决策注入」一节）。
 
 use std::time::Instant;
 

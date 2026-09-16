@@ -61,9 +61,9 @@ zig build -Doptimize=ReleaseFast bench -- --repeats="$REPEATS" --json="$OUT/zig.
 
 echo
 echo "==== 汇总报告 ===="
-# swc/oxc 的 lexbench 数据暂不接入:独立 lexer 无法注入正则/除号决策,
-# minified 语料上会误判吞并(见 docs/architecture.md TODO)。接入条件:
-# 给 swc/oxc 写决策注入驱动(等价 yuku 的 reScanAsRegex 对拍)。
+# swc/oxc 的 lexbench 数据暂不接入 CI:决策注入驱动已打通(见
+# docs/architecture.md 的「swc/oxc 决策注入」),调度链(决策生成 →
+# drive --json → 本脚本汇总)待接。
 node scripts/make-report.mjs "$OUT/zig.json" --out "$OUT" --repeats "$REPEATS"
 
 echo

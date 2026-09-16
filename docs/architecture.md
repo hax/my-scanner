@@ -66,9 +66,13 @@ sha256 校验；谱系、provenance 与更新流程（publish-corpus）见
 `.github/workflows/bench.yml`：push 到 main 触发，报告贴进 run
 summary + artifact，并归档到 **bench-reports 分支**
 （`scripts/publish-report.mjs` → `reports/<sha>.{md,json}`，
-`scripts/update-index.mjs` 重建 `index.html` 趋势页）。趋势页以
-"vs yuku-main 倍数"为主口径——绝对吞吐跨 runner 代际不可比，
-同 run 内相对值始终有效，每条架构线一条独立曲线，随提交演化。
+`scripts/update-index.mjs` 重建 `index.html` 趋势页）。该分支即
+GitHub Pages 源，趋势页在线看： <https://johnhax.net/my-scanner/>
+（`.nojekyll` 静态直出）。趋势页以"vs yuku-main 倍数"为主口径——
+绝对吞吐跨 runner 代际不可比，同 run 内相对值始终有效，每条架构线
+一条独立曲线，随提交演化。另有"vs 同族参照"口径衡量各族自身成熟度：
+scalar 对 yuku-old、jump_vec 对 yuku-main（>1 即我方更快，two_phase
+无第三方参照），report.md 含同口径的分组几何平均表。
 
 ## two_phase：两阶段
 
@@ -246,25 +250,63 @@ token 完成"发现起点 → 扫到终点"。关键特性是**每个字节只�
 （单阶段的优点），起点跳跃靠 SIMD 位图（两阶段的优点）。这是下一个
 架构级候选，需从头设计块间的 carry 与上下文传递。
 
-## TODO（接入 swc/oxc 的前置条件）
+## swc/oxc 决策注入（2026-09-16 打通）
 
-`tools/lexbench-rs` 已能编译计时（oxc 经 `benchmarking` feature 的
-`Lexer::new_for_benchmarks`，swc 经 `unstable` Iterator），**但未接入
-CI 对比**。根因：公平对比的前提是**歧义点决策可控**——第三方 lexer
-必须能像 yuku 那样被指示"此 `/` 按正则重扫"（等价 `reScanAsRegex`
-对拍）。实测坑（2026-09，lexbench-rs 0.1）：
+`tools/lexbench-rs` 早年记录的"接入阻塞"经源码级复查（swc 45.1.3 /
+oxc 0.150.0，registry vendored 源码）全部定位为**歧义点无外部驱动
+的级联塌方**，并已被决策注入实证解决。旧归因修正：
 
-- swc 独立 Iterator 内置"表达式位置 `/` 判正则"启发式，minified
-  语料误判后吞并大段代码（typescript.js 仅产出 ~13 万 token，应为
-  112 万）；词法错误返回 None 直接终止。
-- oxc 同样在 `/^#!.*/` 处判正则失败后中途终止（~11% 处，23 个 error）。
-- 正则中性化语料（`tools/prepare-lexbench.mjs`，等长替换）只治
-  `/` 一症，lib.dom.d.ts 零正则仍提前终止——还有别的歧义/错误路径。
+- swc 独立 Iterator 并非"内置正则启发式"——`read_slash` 恒产除号；
+  真正则 pattern 体内的引号/反引号引起字符串/模板错位，最终某个
+  未闭合 token 吞到 EOF（typescript.min.js @2024937 提前 Eof）。
+- oxc 同因（`/` 恒 Slash）。lib.dom.d.ts 零正则仍塌方的根因是
+  **模板续扫**：两家独立 lexer 遇 `` ` `` 只产 TemplateHead（到
+  `${`），`}` 后的模板续段需外部发起 re-lex——`type X = ` ${T}` ``
+  的续段文本塌方成代码（等价 tsc 的 reScanTemplateContinuation；
+  my-scanner 模板整体一个 token，无此问题）。
 
-接入路径（择一）：
-1. 给两者写决策注入驱动：my-scanner 预扫产出歧义决策集 → 驱动
-   lexer 在决策点重扫（swc 需 `state.next_regexp` 类入口，oxc 需
-   暴露 re-lex；不排除 fork patch）；
-2. 或退一档：只在他们能完整扫完的语料子集上对比，报告标注口径。
+注入点（drive.rs 实证可用，全 10 语料 0 错误扫至 EOF）：
 
-在做到歧义点可控之前，swc/oxc 的吞吐数字没有进入矩阵的意义。
+- **swc 零 patch**：公开 trait `swc_ecma_parser::input::Tokens`，裸
+  Lexer 即实现——`set_next_regexp(Some(pos))`（等价 reScanAsRegex；
+  消费点 read_next_token，用完须手动清 None）、
+  `rescan_template_token(pos, false)`（等价 reScanTemplateContinuation）。
+  `${}` 内表达式用花括号平衡栈跟踪（与 yuku bench 同款驱动）。
+  JSX 的 `scan_jsx_token` 系列也在该 trait 上（本次未用）。
+- **oxc 两处 `pub(crate)` → `pub`**：`next_regex(kind)`（当前
+  Slash/SlashEq 原地重扫，无需 rewind）、
+  `next_template_substitution_tail()`（当前 `}` 重扫）。vendored 副本
+  `.bench-deps/oxc_parser-0.150.0`（gitignore），经
+  `[patch.crates-io]` 接入，版本升级需重贴这 2 行。
+- **决策集**：my-scanner `--emit-regex-starts`（regex_starts 旁路
+  全集，主流 + 模板内正则起点），与 yuku bench 的决策对齐同源。
+
+实证数字（tools/lexbench-rs `drive --repeats=5`，M2 同机，GB/s best；
+my-scanner/yuku 列为 bench.sh x10 同 session 数字）：
+
+| 语料 | my-scanner 最佳 | oxc-driven | swc-driven | yuku-main |
+| --- | --- | --- | --- | --- |
+| typescript.min.js | 0.38 (jump_vec) | 0.32 | 0.23 | 0.35 |
+| typescript.js | 0.68 (jump_vec) | 0.54 | 0.41 | 0.63 |
+| checker.ts | 0.80 (jump_vec) | 0.62 | 0.50 | 0.75 |
+| react.js | 1.13 (two_phase) | 0.33 | 0.21 | 1.15 |
+| lib.dom.d.ts | 1.75 (jump_vec) | 1.72 | 0.99 | 1.57 |
+
+token 数三家差 <0.5%（模板分片 vs 整体的口径差），不作三方差分。
+my-scanner 在 real 语料全面 ≥ oxc-driven（react 小文件 3.4x，
+lib.dom.d.ts 打平）；oxc-driven 全面快于 swc-driven（1.5-2.5x）。
+
+正式接入待办与口径边界：
+
+1. bench.sh/ci-bench.sh 调度链：`--emit-regex-starts` 生成决策 →
+   `drive --json` → make-report.mjs 汇总进矩阵。
+2. drive 吞吐含驱动开销（决策集 HashSet + 模板栈 + 正则重扫），与
+   yuku bench 的驱动开销对称；lib.dom.d.ts（零正则零模板决策）的
+   oxc 1.72 GB/s ≈ 其官方 bench 水平，说明驱动开销占比可忽略。
+3. 决策集是 my-scanner 的歧义口径（tradeoff T1 启发式）——对比的是
+   "同一决策集下的字节吞吐"，不与 swc/oxc 自家 parser 的 token 流对拍。
+4. JSX 当前"恒非 JSX"双方一致（react.js 双方均扫完）；如需 JSX 决策
+   注入，swc 入口已公开，oxc 需再 patch `next_jsx_child`。
+5. `A<<T>>` 嵌套泛型在当前语料未出现（`<<` 均为位移）；如需，oxc 要
+   再 patch `re_lex_as_typescript_l_angle`，swc 无对应 lexer 侧入口
+   （parser 内部拆分），届时另议。
