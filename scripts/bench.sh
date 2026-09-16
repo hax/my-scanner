@@ -36,7 +36,7 @@ if [ "$SUBMIT" = 0 ]; then
     ARGS+=("${DEFAULT_FILES[@]}")
   fi
   echo "==> zig build bench（ReleaseFast）"
-  exec zig build -Doptimize=ReleaseFast bench -- "${ARGS[@]}"
+  exec zig build -Doptimize=ReleaseFast bench -- ${ARGS[@]+"${ARGS[@]}"}
 fi
 
 # ---- --submit：完整矩阵 + 汇总发布到 bench-reports（本机 run）----
@@ -44,14 +44,14 @@ if [ ${#FILES[@]} -eq 0 ]; then
   FILES=("${CORPUS_FILES[@]}")
 fi
 REPEATS=10
-for a in "${ARGS[@]}"; do
+for a in ${ARGS[@]+"${ARGS[@]}"}; do
   case "$a" in --repeats=*) REPEATS="${a#--repeats=}" ;; esac
 done
 OUT=build/bench
 mkdir -p "$OUT"
 
 echo "==> [1/3] 架构矩阵基准（x${REPEATS} 取最优）"
-zig build -Doptimize=ReleaseFast bench -- "${ARGS[@]}" --json="$OUT/zig.json" "${FILES[@]}"
+zig build -Doptimize=ReleaseFast bench -- ${ARGS[@]+"${ARGS[@]}"} --json="$OUT/zig.json" "${FILES[@]}"
 
 echo
 echo "==> [2/3] swc/oxc/oxc_bitmap 对照（lexbench-rs 驱动，走本地缓存）"
