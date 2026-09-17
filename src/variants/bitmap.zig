@@ -12,7 +12,8 @@
 //!    位图现场重建）。
 //! 2. NEON 没有 movemask/pshufb 等价单指令（Zig/LLVM 也不合成 vqtbl），
 //!    位图提取走 LLVM 对 `@bitCast(bool vector → int)` 的 zip+addv
-//!    lowering；分类不用 LUT 而用比较链。
+//!    lowering；classify 的 nibble LUT 查表用 inline asm vqtbl1q 补齐
+//!    （仅 aarch64——其它架构回退到比较链 classify，见 classify 分流）。
 //! 3. 位图 6 张：word/st/opch/numch(digit|dot)/misc/nl。ws 不落盘（st
 //!    构造后即弃）；nl（\n、\r + miscPass 补 U+2028/29）服务交付口径的
 //!    newline_before flag（trivia 不落盘，换行压成 1 bit 挂到下一个显著
@@ -33,6 +34,7 @@
 //! bm_clear_range 是 inclusive [from, to]，移植时调用点统一 +1。
 
 const std = @import("std");
+const builtin = @import("builtin");
 const lexeme_mod = @import("../lexeme.zig");
 const scanner = @import("../scanner.zig");
 const simd = @import("../simd.zig");
@@ -248,12 +250,15 @@ fn bmNext0(bm: []const u64, i: usize) usize {
 }
 
 // ---------------------------------------------------------------------------
-// classify：nibble LUT（tbl）产 5 张位图 + kind 数组
-//
-// 查表结构对齐 oxc tables.rs 的 build_merged_luts：每张 16B 表按「低
-// nibble 平面位并 / 高 nibble 行位并」分解 256 项集合，两表 AND 即精确
-// 成员判定（构造需无 nibble 冲突，comptime selfCheck 兜底）。比逐谓词
-// 比较链省 ~30% 指令，且补上 Zig 无法自动合成 vqtbl 的缺口（inline asm）。
+// classify：产 6 张位图（word/st/opch/numch/misc/nl）+ kind 数组，两种实现：
+// - aarch64：nibble LUT（tbl1 inline asm）。查表结构对齐 oxc tables.rs 的
+//   build_merged_luts：每张 16B 表按「低 nibble 平面位并 / 高 nibble 行位并」
+//   分解 256 项集合，两表 AND 即精确成员判定（构造需无 nibble 冲突，
+//   comptime selfCheck 兜底）。比逐谓词比较链省 ~30% 指令，且补上 Zig 无法
+//   自动合成 vqtbl 的缺口（inline asm）。
+// - 其它架构：比较链回退（语义逐位一致，指令数略多）。分流见 classify；
+//   comptime arch 裁剪 + Zig 惰性分析保证非 aarch64 目标 codegen 完全
+//   看不到 NEON asm（tbl1/V16/wb_lut 等仅在 NEON 路径被引用）。
 // ---------------------------------------------------------------------------
 
 /// 平面位定义（wb 表）：bit0-5 word 分解、bit6 ws、bit7 space；digit=bit1
@@ -310,7 +315,8 @@ const wb_lut = buildNibbleLut(WB_PLANES);
 const mrg_lut = buildNibbleLut(MRG_PLANES);
 
 // ---------------------------------------------------------------------------
-// classify（tbl LUT 版）
+// 比较链分类原语：非 aarch64 的 classifyGeneric 回退使用（aarch64 上不被
+// 引用，Zig 惰性分析零成本）。各谓词与 wb/mrg LUT 平面定义逐位等价。
 // ---------------------------------------------------------------------------
 
 inline fn wsBool(c: Chunk) @Vector(32, bool) {
@@ -351,7 +357,18 @@ inline fn loadPad(src: []const u8, i: usize) Chunk {
     return buf;
 }
 
+/// classify 分流：aarch64 走 NEON tbl LUT（classifyNeon），其它架构回退
+/// 比较链（classifyGeneric）。comptime arch 裁剪后另一实现不被引用，
+/// 非 aarch64 目标 codegen 完全看不到 NEON asm。
 pub fn classify(bm: *Bitmaps, src: []const u8) void {
+    if (comptime builtin.target.cpu.arch == .aarch64) {
+        classifyNeon(bm, src);
+    } else {
+        classifyGeneric(bm, src);
+    }
+}
+
+fn classifyNeon(bm: *Bitmaps, src: []const u8) void {
     const n = src.len;
     const nb = (n + 63) / 64;
     var cw: u64 = 0;
@@ -436,6 +453,78 @@ pub fn classify(bm: *Bitmaps, src: []const u8) void {
         bm.misc[last] &= m;
         bm.nl[last] &= m;
     }
+}
+
+/// 比较链版 classify（非 aarch64 回退）：与 classifyNeon 逐位同产出
+/// （6 张位图 + kind 数组；谓词定义与 LUT 平面一一对应）。
+fn classifyGeneric(bm: *Bitmaps, src: []const u8) void {
+    const n = src.len;
+    const nb = (n + 63) / 64;
+    var cw: u64 = 0;
+    var cs: u64 = 0;
+    var b: usize = 0;
+    while (b < nb) : (b += 1) {
+        const base = b * 64;
+        const c0 = loadPad(src, base);
+        const c1 = loadPad(src, base + 32);
+
+        const w0: Mask = @bitCast(wordBool(c0));
+        const w1: Mask = @bitCast(wordBool(c1));
+        const s0: Mask = @bitCast(wsBool(c0));
+        const s1: Mask = @bitCast(wsBool(c1));
+        const d0: Mask = @bitCast((c0 >= splat('0')) & (c0 <= splat('9')));
+        const d1: Mask = @bitCast((c1 >= splat('0')) & (c1 <= splat('9')));
+        const t0: Mask = @bitCast(c0 == splat('.'));
+        const t1: Mask = @bitCast(c1 == splat('.'));
+        const o0: Mask = @bitCast(opchBool(c0));
+        const o1: Mask = @bitCast(opchBool(c1));
+        const m0: Mask = @bitCast(miscBool(c0));
+        const m1: Mask = @bitCast(miscBool(c1));
+        const l0: Mask = @bitCast((c0 == splat('\n')) | (c0 == splat('\r')));
+        const l1: Mask = @bitCast((c1 == splat('\n')) | (c1 == splat('\r')));
+
+        const wordm = @as(u64, w1) << 32 | w0;
+        const wsm = @as(u64, s1) << 32 | s0;
+        bm.word[b] = wordm;
+        bm.numch[b] = (@as(u64, d1) << 32 | d0) | (@as(u64, t1) << 32 | t0);
+        bm.opch[b] = @as(u64, o1) << 32 | o0;
+        bm.misc[b] = @as(u64, m1) << 32 | m0;
+        bm.nl[b] = @as(u64, l1) << 32 | l0;
+
+        const wprev = (wordm << 1) | cw;
+        const sprev = (wsm << 1) | cs;
+        cw = wordm >> 63;
+        cs = wsm >> 63;
+        bm.st[b] = (wsm & ~sprev) | (wordm & ~wprev) | (~wsm & ~wordm);
+
+        bm.kind[base..][0..32].* = kindVecGeneric(c0);
+        bm.kind[base + 32 ..][0..32].* = kindVecGeneric(c1);
+    }
+    // 尾块越读位清零（pad 0x7f 同上：st=1 幻影必须 mask 掉）
+    const rem = n & 63;
+    if (rem != 0) {
+        const last = nb - 1;
+        const m = (@as(u64, 1) << @intCast(rem)) - 1;
+        bm.word[last] &= m;
+        bm.st[last] &= m;
+        bm.opch[last] &= m;
+        bm.numch[last] &= m;
+        bm.misc[last] &= m;
+        bm.nl[last] &= m;
+    }
+}
+
+/// kind 覆盖序（从底到顶，与 classifyNeon 内联版一致）：punct →
+/// word(identifier) → digit(number) → `\`(illegal) → ws(whitespace)。
+/// `#` 恒单字节 punct（新口径，私有名合法性留 parser），不单独标 kind。
+inline fn kindVecGeneric(c: Chunk) @Vector(32, u8) {
+    const V = @Vector(32, u8);
+    var k: V = @splat(@intFromEnum(Kind.punct));
+    k = @select(u8, wordBool(c), @as(V, @splat(@intFromEnum(Kind.identifier))), k);
+    k = @select(u8, (c >= splat('0')) & (c <= splat('9')), @as(V, @splat(@intFromEnum(Kind.number))), k);
+    k = @select(u8, c == splat('\\'), @as(V, @splat(@intFromEnum(Kind.illegal))), k);
+    k = @select(u8, wsBool(c), @as(V, @splat(@intFromEnum(Kind.whitespace))), k);
+    return k;
 }
 
 // ---------------------------------------------------------------------------
@@ -866,6 +955,13 @@ pub fn coalesce(bm: *Bitmaps, src: []const u8) void {
             ev &= ev - 1;
             const p = (w << 6) + bit;
             if (p < cursor) continue;
+            // ev 是进入本 word 前的 st 快照：前序事件（gluePunct/glueNumber）
+            // 已消费的字节 st 被清，其事件是陈旧的，必须跳过——否则 `...`
+            // 末字节的 numev 会越界触发 glueNumber 把后续数字并入 punct
+            // （`[...191` 并成一个 lexeme）。注意 p == cursor 不能一并排除：
+            // `a?.5:b` 的 `.` 按单字节 punct 消费（st 未清），其事件要照常
+            // 触发 glueNumber 粘出 `.5` 数字。
+            if (!bmGet(bm.st, p)) continue;
             if (simd.isDigit(src[p]) or
                 (src[p] == '.' and p + 1 < n and simd.isDigit(src[p + 1])))
             {
@@ -1106,6 +1202,14 @@ test "bitmap 与两阶段 scanner 交叉验证" {
     try expectSame("v = v / 2 / 3; w = v++ / 2;");
     try expectSame("`a${`b${c}d`}e`");
     try expectSame("a===b; c!==d; e>>>=f; g<<=h;");
+    // 防回归：coalesce 陈旧事件（st 快照在被 gluePunct 消费的字节上残留）——
+    // `...` 末字节的 numev 事件（dot 在 numch 位图）曾越界触发 glueNumber，
+    // 把 `...`+数字并成一个 punct（typescript.min.js 实测 `[...191===`）
+    try expectSame("[...191===t");
+    try expectSame("f(...5)");
+    // 反例必须保持绿：`?` 后 `.` 按单字节 punct 消费（st 未清），其 numev
+    // 事件触发 glueNumber 粘出 `.5`——st 复核放行该路径
+    try expectSame("a?.5:b");
     try expectSame("if\\u0041 = 1; // \\u 转义并入词（新口径）");
     try expectSame("a\\u0042c = 1; // ASCII 词中转义并词");
     try expectSame("3\\u0042c = 1; // 数字后转义是新词起点");

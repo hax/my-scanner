@@ -50,7 +50,7 @@ zig build
 echo
 echo "==== [3/5] 差分门禁:全部架构变体 vs tsc ===="
 if [ "${SKIP_DIFF:-0}" != "1" ]; then
-  for v in two_phase scalar jump_vec; do
+  for v in two_phase scalar jump_vec bitmap; do
     echo "---- variant: $v ----"
     node tools/compare-tsc.mjs --variant="$v" corpus/real/*.js corpus/real/*.ts corpus/synthetic/*.js corpus/synthetic/*.ts
   done
