@@ -371,3 +371,29 @@ compress 的 cvtepu8/vpermd 在 NEON 需多指令展开）。
   （10/11 ≥，1 个 0.95）。
 - 在**基线倍数口径**下：未达成（2/11），剩余差距有明确的指令级
   归因（见 §9 未竟事项 + §10.5），构成下一轮的量化目标。
+
+### 10.7 32B 步长实验：**否决**（NEON vs AVX2 的结构性差异实证）
+
+为收窄跳跃密集语料（line-comments/strings）的倍数差，把
+scan_line_comment/scan_block_comment 从 16B 双向量 32B 化（对齐 AVX2
+步幅）：line-comments 1.045→0.976、strings 0.652→0.620、**lib.dom
+1.119→0.910（-19%）**——全面负优化，已回退（patch 文件始终保持
+16B 版本）。
+
+根因：AVX2 的 32B 步长近乎免费（vmovemask 1 条指令/32B），NEON 的
+movemask 是合成序列（~9 条/16B），翻倍步长 = 翻倍 movemask 成本 +
+额外跨界向量组，超过循环开销的节省。**NEON 上模拟 AVX2 的宽步长
+模式是负收益；NEON 的收益路径在减少 pass 数与 tbl 密集的分类/压缩，
+不在拉宽扫描步长。**
+
+### 10.8 第二轮交付清单
+
+- `tools/lexbench-rs/oxc-lexer-neon-aarch64.patch`：oxc_lexer 的
+  aarch64 后端（classify/find/scan/compress 四趟 + cfg 接线，
+  765 行 patch，AVX2 分支原样保留，CI 与 M3 同代码）
+- `scripts/prepare-lexbench.sh`：拉取后自动应用 patch（幂等，
+  失效报错）
+- Zig 线：`tbl1` inline asm 封装 + classify nibble LUT（+14% 单
+  pass），防回归于 `src/variants/bitmap.zig`
+- 主仓库 `.bench-deps/oxc` 曾被失败 patch 的绝对路径头污染，已删除
+  （下次 prepare 幂等重拉干净版，实证确认无 aarch64 残留）
