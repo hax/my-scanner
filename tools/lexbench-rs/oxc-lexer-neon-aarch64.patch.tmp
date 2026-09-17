@@ -1,0 +1,162 @@
+diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/lib.rs ./src/lib.rs
+--- /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/lib.rs	2026-09-17 09:00:29
++++ ./src/lib.rs	2026-09-16 16:48:43
+@@ -27,8 +27,7 @@
+ /// `true` if the SIMD core is compiled in, `false` if the scalar fallback is.
+ /// Used by CI to ensure it's testing the implementation it thinks it is.
+ pub const IS_SIMD: bool =
+-    cfg!(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"))
+-        || cfg!(all(target_arch = "aarch64", target_feature = "neon"));
++    cfg!(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"));
+ 
+ thread_local! {
+     static SCRATCH: RefCell<Lexer> = RefCell::new(Lexer::new());
+diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/chunk.rs ./src/pipeline/chunk.rs
+--- /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/chunk.rs	2026-09-17 09:00:29
++++ ./src/pipeline/chunk.rs	2026-09-16 16:48:43
+@@ -36,40 +36,6 @@
+     }
+ }
+ 
+-
+-#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+-mod primitives_neon {
+-    /// NEON intrinsics are `#[target_feature]` and thus unsafe; the helpers
+-    /// below are pure register ops with no memory safety preconditions, so
+-    /// each wraps itself in an `unsafe` block.
+-    mod raw {
+-        use core::arch::aarch64::*;
+-        pub unsafe fn load128(src: *const u8, i: usize) -> uint8x16_t {
+-            vld1q_u8(src.add(i))
+-        }
+-        pub fn veq(v: uint8x16_t, c: u8) -> uint8x16_t {
+-            unsafe { vceqq_u8(v, vdupq_n_u8(c)) }
+-        }
+-        pub fn mm(v: uint8x16_t) -> u16 {
+-            // Input bytes are 0x00/0xFF. The low/high 64-bit halves go
+-            // through GPR SWAR multiplies independently (bits 0-7 / 8-15);
+-            // byte order within each half maps directly to bit order, so no
+-            // deinterleave is needed.
+-            unsafe {
+-                let halves = vreinterpretq_u64_u8(v);
+-                let lo64: u64 = vgetq_lane_u64(halves, 0);
+-                let hi64: u64 = vgetq_lane_u64(halves, 1);
+-                const SWAR: u64 = 0x0102_0408_1020_4080;
+-                const ONES: u64 = 0x0101_0101_0101_0101;
+-                let lo = ((lo64 & ONES).wrapping_mul(SWAR)) >> 56;
+-                let hi = ((hi64 & ONES).wrapping_mul(SWAR)) >> 56;
+-                (lo as u16) | ((hi as u16) << 8)
+-            }
+-        }
+-    }
+-    pub use raw::*;
+-}
+-
+ #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
+ mod primitives {
+     use core::ptr;
+@@ -102,9 +68,4 @@
+     }
+ }
+ 
+-#[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"))]
+ pub(super) use primitives::*;
+-#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+-pub(super) use primitives_neon::*;
+-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
+-pub(super) use primitives::{eqm, load64};
+diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/classify/mod.rs ./src/pipeline/classify/mod.rs
+--- /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/classify/mod.rs	2026-09-17 09:00:29
++++ ./src/pipeline/classify/mod.rs	2026-09-16 16:48:43
+@@ -3,23 +3,7 @@
+ #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"))]
+ pub use avx2::classify;
+ 
+-#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+-mod aarch64;
+-
+-#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+-pub use aarch64::classify;
+-
+-#[cfg(not(any(
+-    all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"),
+-    all(target_arch = "aarch64", target_feature = "neon")
+-)))]
++#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
+ mod generic;
+-#[cfg(test)]
+-mod generic_test_import {
+-    include!("generic.rs");
+-}
+-#[cfg(not(any(
+-    all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"),
+-    all(target_arch = "aarch64", target_feature = "neon")
+-)))]
++#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
+ pub use generic::classify;
+diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/compress/mod.rs ./src/pipeline/compress/mod.rs
+--- /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/compress/mod.rs	2026-09-17 09:00:29
++++ ./src/pipeline/compress/mod.rs	2026-09-16 16:48:43
+@@ -11,15 +11,9 @@
+ #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"))]
+ use avx2::{build_spans, compress_blocks, lanes_post};
+ 
+-#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+-mod aarch64;
+-
+-#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+-use aarch64::{build_spans, compress_blocks, lanes_post};
+-
+-#[cfg(not(any(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"), all(target_arch = "aarch64", target_feature = "neon"))))]
++#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
+ mod generic;
+-#[cfg(not(any(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"), all(target_arch = "aarch64", target_feature = "neon"))))]
++#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
+ use generic::{build_spans, compress_blocks, lanes_post};
+ 
+ mod common;
+diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/find/mod.rs ./src/pipeline/find/mod.rs
+--- /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/find/mod.rs	2026-09-17 09:00:29
++++ ./src/pipeline/find/mod.rs	2026-09-16 16:48:43
+@@ -5,18 +5,11 @@
+ #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"))]
+ pub(super) use avx2::{find1, find2, find3, find4};
+ 
+-#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+-mod aarch64;
+-#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+-use aarch64::define_find_function;
+-#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+-pub(super) use aarch64::{find1, find2, find3, find4};
+-
+-#[cfg(not(any(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"), all(target_arch = "aarch64", target_feature = "neon"))))]
++#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
+ mod generic;
+-#[cfg(not(any(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"), all(target_arch = "aarch64", target_feature = "neon"))))]
++#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
+ use generic::define_find_function;
+-#[cfg(not(any(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"), all(target_arch = "aarch64", target_feature = "neon"))))]
++#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
+ pub(super) use generic::{find1, find2, find3, find4};
+ 
+ mod common;
+diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/scan/mod.rs ./src/pipeline/scan/mod.rs
+--- /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/scan/mod.rs	2026-09-17 09:00:29
++++ ./src/pipeline/scan/mod.rs	2026-09-16 16:48:43
+@@ -3,14 +3,9 @@
+ #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"))]
+ pub(super) use avx2::{scan_block_comment, scan_line_comment};
+ 
+-#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+-mod aarch64;
+-#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+-pub(super) use aarch64::{scan_block_comment, scan_line_comment};
+-
+-#[cfg(not(any(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"), all(target_arch = "aarch64", target_feature = "neon"))))]
++#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
+ mod generic;
+-#[cfg(not(any(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"), all(target_arch = "aarch64", target_feature = "neon"))))]
++#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
+ pub(super) use generic::{scan_block_comment, scan_line_comment};
+ 
+ mod common;
