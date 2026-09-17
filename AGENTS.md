@@ -15,7 +15,11 @@ scripts/ci-bench.sh  # CI 同款全链路（正确性校验 + 矩阵基准 + 报
 zig build test       # 仅单元测试，不等于正确性校验
 ```
 
-`check.sh` 首次运行需要 `cd tools && npm i`（tsc 对照依赖）；`bench.sh`
+`check.sh` 首次运行需要 `cd tools && npm i`（tsc 对照依赖）。**注意本机
+`~/.npmrc` 指向公司镜像：`npm i` 会把镜像 URL 写进 package-lock.json 的
+`resolved`，GitHub runner 解析不了（CI npm ci 直接红）——依赖变动后检查
+lock 里的 `resolved` 必须是 `registry.npmjs.org`，或改用
+`npm i --registry=https://registry.npmjs.org`**；`bench.sh`
 首次运行由 `scripts/prepare-baselines.sh` 备第三方基线到 `.bench-deps/`
 （已 gitignore）：yuku-old 钉 v0.10.1、yuku-main 跟踪上游（移动才重
 clone）；swc/oxc 由 `scripts/prepare-lexbench.sh` 自动跟踪 crates.io 最新
