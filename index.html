@@ -107,9 +107,23 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
     if (b.sha) bits.push('<a href="' + LINKS[impl] + "/commit/" + b.sha + '">sha ' + b.sha.slice(0, 10) + "</a>");
     return bits.length ? "（" + bits.join("，") + "）" : "";
   };
+  // 第三方版本溯源(rs.json deps 戳:swc/oxc 链 crates.io 精确版本,oxc_bitmap
+  // 链 oxc 仓 rev 的 crate 目录;oxc_lexer 不上 crates.io,只能链 git)
+  const dep = idx.deps ?? {};
+  const depText = (impl) => {
+    const rev = dep.oxc_rev;
+    if (impl === "swc" && dep.swc_ecma_parser)
+      return '（<a href="https://crates.io/crates/swc_ecma_parser/' + dep.swc_ecma_parser + '">swc_ecma_parser ' + dep.swc_ecma_parser + "</a>）";
+    if (impl === "oxc" && dep.oxc_parser)
+      return '（<a href="https://crates.io/crates/oxc_parser/' + dep.oxc_parser + '">oxc_parser ' + dep.oxc_parser + "</a>，vendored 2 行 patch）";
+    if (impl === "oxc_bitmap" && dep.oxc_lexer)
+      return "（" + (rev ? '<a href="' + LINKS.oxc_bitmap + "/tree/" + rev + '/crates/oxc_lexer">oxc_lexer ' + dep.oxc_lexer + "</a>" : "oxc_lexer " + dep.oxc_lexer)
+        + (rev ? ' @ <a href="' + LINKS.oxc_bitmap + "/commit/" + rev + '">' + rev.slice(0, 10) + "</a>" : "") + "，+NEON patch）";
+    return "";
+  };
   document.getElementById("impls").innerHTML = idx.impls.map(impl =>
     "<tr><td><svg width='10' height='10'><rect width='10' height='10' rx='2' fill='" + COLORS[impl] + "'/></svg> <a href='" + LINKS[impl] + "'><code>"
-    + SHORT[impl] + "</code></a></td><td>" + (DESCR[impl] ?? impl) + " " + blText(impl) + "</td></tr>"
+    + SHORT[impl] + "</code></a></td><td>" + (DESCR[impl] ?? impl) + " " + blText(impl) + depText(impl) + "</td></tr>"
   ).join("");
 
   // ---- run 分堆:CI 序列 + 本机按 label 分组 ----
