@@ -4,10 +4,10 @@
 //! 产出的每个 token 交给 black_box 消耗、按各自 token 数计吞吐。
 //! 输出 JSON 与 zig bench 的 --json 同构，由 scripts/report/make-report.mjs 汇总。
 //!
-//! 口径差异说明（与 zig 侧 yuku 对拍不同，这两个是独立进程）：
+//! 口径差异说明（与 zig 侧 yuku 对照不同，这两个是独立进程）：
 //! 本 raw 模式下 `/` 一律按除号产 token、模板 `${` 续段无人 re-lex，
-//! 遇到真正则/模板字面量类型的语料会级联塌方提前 Eof——仅供对照；
-//! 决策注入驱动版见 src/bin/drive.rs（全语料可扫完，机制见
+//! 遇到真正则/模板字面量类型的样本会级联塌方提前 Eof——仅供对照；
+//! 决策注入驱动版见 src/bin/drive.rs（全样本可扫完，机制见
 //! docs/architecture.md 的「swc/oxc 决策注入」一节）。
 
 use std::time::Instant;

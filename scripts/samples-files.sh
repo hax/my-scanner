@@ -1,8 +1,8 @@
-# 语料清单的单一来源:差分门禁外的基准矩阵与 swc/oxc 对照共用
-# (顺序即报告展示顺序)。用法: source scripts/corpus-files.sh
-CORPUS_FILES=(
-  corpus/real/typescript.js corpus/real/typescript.min.js corpus/real/checker.ts
-  corpus/real/lib.dom.d.ts corpus/real/react.js corpus/real/react.min.js
-  corpus/real/hanzi-chai.ts corpus/real/mon-entreprise.ts
-  corpus/synthetic/line-comments.js corpus/synthetic/strings.js corpus/synthetic/cn-dense.ts
+# 样本清单的单一来源:正确性校验外的基准矩阵与 swc/oxc 对照共用
+# (顺序即报告展示顺序)。用法: source scripts/samples-files.sh
+SAMPLES_FILES=(
+  samples/real/typescript.js samples/real/typescript.min.js samples/real/checker.ts
+  samples/real/lib.dom.d.ts samples/real/react.js samples/real/react.min.js
+  samples/real/hanzi-chai.ts samples/real/mon-entreprise.ts
+  samples/synthetic/line-comments.js samples/synthetic/strings.js samples/synthetic/cn-dense.ts
 )

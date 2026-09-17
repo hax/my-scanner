@@ -301,7 +301,7 @@ pub fn classifyTokenStarts(
         // （码点内部保持 ID 连接）。码点本身不排除出候选——统一由
         // 阶段 2 在 lead 处产 whitespace kind 并入空白 run（跨块码点的
         // 尾部字节会被消费后的 pos 越过，无需排除）。
-        // 纯 ASCII 块（且前块末尾无悬挂）整体跳过——corpus 大多是这种。
+        // 纯 ASCII 块（且前块末尾无悬挂）整体跳过——样本大多是这种。
         var brk_marked: u32 = 0;
         if (high != 0 or (i >= 1 and src[i - 1] >= 0x80) or (i >= 2 and src[i - 2] >= 0x80)) {
             // 跨块悬挂：lead 在前块、末字节在本块开头，清其 id_after
@@ -358,7 +358,7 @@ pub fn classifyTokenStarts(
 
         // U+2028/U+2029：块内完整（E2 80 A8/A9），位标记在末字节。
         // 中文密集块（E4-E9）大多无 E2：先用一个 eq 探 E2，命中才做
-        // m80/a8a9 的两个 eq——cn-dense 类语料省两条
+        // m80/a8a9 的两个 eq——cn-dense 类样本省两条
         if (high != 0 and (eqMask(chunk, 0xE2) & valid) != 0) {
             const e2 = eqMask(chunk, 0xE2);
             const m80 = eqMask(chunk, 0x80);

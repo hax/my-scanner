@@ -1,20 +1,20 @@
 # 正确性验证与已知差距
 
 正确性以 tsc 的 scanner（`ts.createScanner`）为参考实现做 lexeme 级
-差分。与 spec 的**有意偏差**（近似判定、容错取舍）不在本文展开，
+差分测试。与 spec 的**有意偏差**（近似判定、容错取舍）不在本文展开，
 登记在 [tradeoff.md](tradeoff.md)（政策见 [goals.md](goals.md)）；
 本文只谈验证机制与口径。
 
 ## 四层防线
 
-`scripts/check.sh` 一键跑前两层（全部架构变体 × 全部语料）：
+`scripts/check.sh` 一键跑前两层（全部架构变体 × 全部样本）：
 
 1. **单元测试**（~50 个）：词法化各路径 + SIMD 块边界 + Unicode 边界
    （跨块码点、悬挂尾部、CRLF、U+2028）+ 防回归用例（历史上被随机
    验证抓回的分支各有专属用例）。
-2. **tsc 差分**：[compare-tsc.mjs](../tools/compare-tsc.mjs) 把 tsc 的
-   scanner 当参考实现做 lexeme 级差分——切分（字节偏移）对齐为主、
-   语义分类从宽（trivia 滤除后比对显著流）。**十一个语料**
+2. **tsc 差分测试**：[compare-tsc.mjs](../tools/compare-tsc.mjs) 把 tsc 的
+   scanner 当参考实现做 lexeme 级差分测试——切分（字节偏移）对齐为主、
+   语义分类从宽（trivia 滤除后比对显著流）。**十一个样本**
    （real 8 + synthetic 3）全部对齐、零分类硬差异：
 
    | 文件 | 显著 lexemes | 特征 |
@@ -33,9 +33,21 @@
 
    ```sh
    cd tools && npm i && cd ..
-   scripts/prepare-corpus.sh   # 语料在 corpus 分支，缺失时自动拉取
-   node tools/compare-tsc.mjs corpus/real/*.js corpus/real/*.ts corpus/synthetic/*.js corpus/synthetic/*.ts   # 加 --variant=NAME 可指定变体
+   scripts/prepare-samples.sh   # 样本在 samples 分支，缺失时自动拉取
+   node tools/compare-tsc.mjs samples/real/*.js samples/real/*.ts samples/synthetic/*.js samples/synthetic/*.ts   # 加 --variant=NAME 可指定变体
    ```
+
+   **歧义决策真相冻结在样本侧**（2026-09 起）：`/` 是正则还是除号、
+   模板续片从哪个 `}` 开始，由发布期 `scripts/gen-derived.mjs` 用 tsc
+   parser 生成一次，落在 `samples/decisions/**`（每个决策点记 byte/CU
+   span；全样本 261 正则 + 5084 模板续片）；非 ASCII 样本另有
+   `samples/offsets/**`（字节 ↔ UTF-16 code unit 稀疏修正表，每个非
+   ASCII 字符一条）。运行期差分只跑 tsc scanner：到达决策点按冻结真相
+   重扫（不再由我方输出触发），并**双向断言**我方与真相一致——每个决策
+   点上我方的类别与 span 必须全中（「该判正则判成除号」，T1），我方判出
+   的正则/模板续片也必须在真相里（「多判」，吞噬同步抓不到）；不一致即
+   打印决策分歧并失败。头里的 tsc 版本 / 样本 sha256 与现场不符即硬报错
+   （升 tsc 或改样本后须重新生成派生文件）。
 3. **标量随机交叉验证**：`classifyTokenStartsScalar`（逐码点状态机）与
    SIMD 版在 200 轮确定性随机字节流上**逐位一致**（masks/line_breaks/
    newlines）。曾抓出 SIMD 版三个跨块边界 bug 与一次清理误删的分支。
@@ -44,20 +56,23 @@
 
 ## 与 tsc 的口径差异（设计分歧，非谁对谁错）
 
-以下差异源于「tsc 把重扫推迟给 parser」的设计，差分对比时按下述口径
+以下差异源于「tsc 把重扫推迟给 parser」的设计，差分测试时按下述口径
 归一（compare-tsc.mjs 内置同款驱动）：
 
 - tsc 按 UTF-16 code unit 计偏移，my-scanner 按字节计；源文件按
-  UTF-8 读入，预建「字节偏移 ↔ code unit」双向映射统一坐标系
-  （旧实现按 latin1 喂 tsc，UTF-8 续字节 0xA0 恰是 NBSP 被 tsc 当
-  空白跳过，unicode 标识符语料上必然错位）。
+  UTF-8 读入，tsc 侧 token 坐标经样本侧修正表 `samples/offsets/**`
+  换算成字节偏移后比较（旧实现按 latin1 喂 tsc，UTF-8 续字节 0xA0
+  恰是 NBSP 被 tsc 当空白跳过，unicode 标识符样本上必然错位；更早的
+  实现在运行期预建全量映射表，19.8 MB 样本实测 451 ms / 峰值 156 MB）。
 - tsc 永不合并 `>` 家族（`>>` `>=` `>>>=`），由 parser
   `reScanGreaterToken` 合并——泛型 `A<B<C>>` 的需要。
 - tsc 对 `/` 保守判除号，由 parser `reScanSlashToken` 重扫为正则
-  （正则体内相邻的 `//` 在保守路径会被当成行注释）。
-- 模板续段：tsc 在花括号平衡归零的 `}` 处由 parser
-  `reScanTemplateToken(false)` 重扫为 TemplateMiddle/Tail——与
-  my-scanner 的模板栈同构，两边都拆 Head/Middle/Tail 片后 1:1 对齐。
+  （正则体内相邻的 `//` 在保守路径会被当成行注释；重扫点取自样本侧
+  决策真相，不再由我方输出推断）。
+- 模板续段：tsc scanner 自身没有模板上下文（`}` 恒为 CloseBraceToken），
+  由 parser 在模板续片起始的 `}` 处 `reScanTemplateToken(false)` 重扫为
+  TemplateMiddle/Tail（重扫点同上来自决策真相）——两边都拆
+  Head/Middle/Tail 片后 1:1 对齐。
 - 私有名 `#foo`：tsc 是单个 PrivateIdentifier，my-scanner 拆 `#` +
   identifier 两个 lexeme（粗流不留 private_name 类别）——吞噬同步。
 - 关键字：粗流一律归 identifier（含 `\u0069f` 这类转义关键字，tsc
@@ -95,5 +110,6 @@
 正确性 TODO：
 
 - `}` 之后的正则/除法歧义，花括号栈精确判定（当前为单 lexeme 回看
-  启发式，见 T1）
+  启发式，见 T1；该形态一旦进入样本，决策真相断言会直接红灯——差距
+  可见、未修）
 - 对齐 Test262 / 真实大型 JS 代码库的模糊正确性验证

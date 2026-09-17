@@ -1,4 +1,4 @@
-//! 诊断：swc/oxc 独立 lexer 在语料上的终止位置与错误形态。
+//! 诊断：swc/oxc 独立 lexer 在样本上的终止位置与错误形态。
 use std::time::Instant;
 
 fn main() {

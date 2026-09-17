@@ -5,13 +5,13 @@
 目标：**在 Apple Silicon（NEON）上达到 oxc_lexer（x86_64 AVX2+BMI2）相同的速度**。
 
 **结论速览**：新变体 `bitmap`（`src/variants/bitmap.zig`，oxc 六趟位图
-流水线 × my-scanner 语义层）check.sh 44/44 全绿（4 变体 × 11 语料
-差分）；vs 本机 jump_vec 6 胜 5 负——胜负倾向与 oxc_bitmap 一致，
+流水线 × my-scanner 语义层）check.sh 44/44 全绿（4 变体 × 11 样本
+差分测试）；vs 本机 jump_vec 6 胜 5 负——胜负倾向与 oxc_bitmap 一致，
 幅度普遍缩水。
 名词：oxc_lexer 是 oxc 主仓孵化的位图流水线实验 crate（bench 矩阵列
 名 oxc_bitmap，口径见 architecture.md「oxc_bitmap」节）；jump_vec 是
 本仓库现有最快的单阶段 SIMD 变体；scalar 是标量基线。「架构性格」
-指语料谱系上的胜负倾向。
+指样本谱系上的胜负倾向。
 
 **第二轮口径纠正（2026-09-17 晚，详见 §10）**：第一轮的「M3 vs CI
 EPYC 绝对值对照」属跨机绝对值比较，不能作主要结论；「LUT 在
@@ -24,7 +24,7 @@ Zig+NEON 不可用」已被推翻——inline asm `%[name]` 可封装 vqtbl
 CI（EPYC x86_64，AVX2+BMI2）上 oxc_bitmap（oxc_lexer 六趟位图流水线）与
 自家 jump_vec 的吞吐差距（2026-09-16 报告，GB/s）：
 
-| 语料 | jump_vec | oxc_bitmap | bm/jv |
+| 样本 | jump_vec | oxc_bitmap | bm/jv |
 | --- | --- | --- | --- |
 | typescript.js | 0.416 | 0.681 | 1.64 |
 | typescript.min.js | 0.199 | 0.564 | 2.84 |
@@ -38,9 +38,9 @@ CI（EPYC x86_64，AVX2+BMI2）上 oxc_bitmap（oxc_lexer 六趟位图流水线�
 | strings.js | 0.547 | 0.683 | 1.25 |
 | cn-dense.ts | 0.594 | 0.284 | 0.48 |
 
-高 token 密度（minified）语料差距最大（2.8-3.4x）——per-token 固定成本
+高 token 密度（minified）样本差距最大（2.8-3.4x）——per-token 固定成本
 占主导时，oxc 的批量流水线碾压逐 token 主循环；低 token 密度（注释/中文）
-语料 jump_vec 反超——跳跃主导时单阶段更便宜。
+样本 jump_vec 反超——跳跃主导时单阶段更便宜。
 
 本机（M3 Pro）oxc_bitmap 只有 generic fallback（SIMD 核心仅 x86_64），
 整体慢于 jump_vec。**它的速度完全来自没被移植到 arm64 的 SIMD 核心**。
@@ -68,7 +68,7 @@ classify → misc_pre → carve → coalesce → misc_post → compress
    用 LUT（`pair_luts`）+ `pshufb` 一次抽 8 个位置，**不用 pext**。
    build_spans 相邻 pos 配对 + trivia 过滤（QCOMPACT/BCOMPACT LUT）。
 5. **每 token 的路径极轻**：普通 token 从「主循环 dispatch + emit +
-   append」变成「位图上的一位 + compress 批量搬运」。minified 语料
+   append」变成「位图上的一位 + compress 批量搬运」。minified 样本
    （token 密度 ~350 tok/KB）收益最大。
 
 关键工程事实：
@@ -85,11 +85,11 @@ classify → misc_pre → carve → coalesce → misc_post → compress
 ## 2. 移植策略：oxc 架构 × my-scanner 语义
 
 新变体 `bitmap`（`src/variants/bitmap.zig`）。**架构**复刻 oxc 六趟流水线；
-**语义**（token 切分口径）复用 my-scanner 已过 tsc 差分的语义层，这样：
+**语义**（token 切分口径）复用 my-scanner 已过 tsc 差分测试的语义层，这样：
 
-- check.sh 门禁直接可用（变体 vs tsc 差分）；
+- check.sh 校验直接可用（变体 vs tsc 差分测试）；
 - bench 矩阵 token 数与 jump_vec 一致，吞吐可直接比；
-- 与 oxc_bitmap 的对比通过其 spans 门禁思路对齐（真实语料上两者
+- 与 oxc_bitmap 的对比通过其 spans 校验思路对齐（真实样本上两者
   token 边界已验证一致）。
 
 语义层复用清单（`scanner.zig`）：
@@ -125,7 +125,7 @@ regexAllowedBitmap(p):   // p = `/` 的位置，返回 true=正则
      - kind[p0]==punct 且字节 '+'/'-' 且 src[p0+1]==同字节 且中间全 trivia
        → false（`++ /` 空格隔开场景）
      - 其他 punct 字节：`)`/`]` → false；否则 true
-  已知偏差：`+++ /` 判正则（与贪心配对语义可能不一致）；真实语料
+  已知偏差：`+++ /` 判正则（与贪心配对语义可能不一致）；真实样本
   出现率≈0，check.sh 全绿不构成对此路径的验证（如启用需登记
   tradeoff.md）。
 ```
@@ -235,7 +235,7 @@ flag + 模板拆片 + `#` 恒单字节 punct + `/` 双回看判别），bitmap �
 
 ## 8. 最终数字（M3 Pro native，GB/s，15 轮取最优，2026-09-17）
 
-| 语料 | jump_vec | bitmap | bm/jv | EPYC oxc_bitmap(AVX2) | bm vs EPYC-oxc |
+| 样本 | jump_vec | bitmap | bm/jv | EPYC oxc_bitmap(AVX2) | bm vs EPYC-oxc |
 |---|---|---|---|---|---|
 | react.js 72K | 0.38 | 1.02 | 2.68 | 1.068 | 0.95 |
 | react.min.js 6.4K | 0.46 | 0.58 | 1.26 | 0.761 | 0.76 |
@@ -251,8 +251,8 @@ flag + 模板拆片 + `#` 恒单字节 punct + `/` 双回看判别），bitmap �
 
 要点（跨机口径注记：EPYC 数字来自 2026-09-16 CI，M3 为本地 15 轮
 取最优；两机单核能力不同，绝对值对比按 ~5% 内不计胜负）：
-1. **7/11 语料 ≥0.95 追平或反超**；9/11 在 0.85x 以上——跨机频率差
-   折算后可视为同档。未到 0.85 的两个 minified 语料归因见 §9。
+1. **7/11 样本 ≥0.95 追平或反超**；9/11 在 0.85x 以上——跨机频率差
+   折算后可视为同档。未到 0.85 的两个 minified 样本归因见 §9。
 2. 胜负倾向与 oxc_bitmap 一致（token 密度高/unicode 密集赢、跳跃
    密集输），但幅度普遍缩水，且 strings.js（oxc 1.25x → 我们 0.70x）、
    typescript.js（1.64x → 0.95x）两处方向翻转——退化源头是 compress
@@ -292,7 +292,7 @@ dispatch），不是指令总量少。NEON 版 classify 的指令数约为 AVX2 
   bmAny）、ctz 先消费后取位（compress 少产首 token）、复用缓冲的
   sentinel word 残留（phantom tokens）、stage 哨兵越界（batch 满时）
   ——位图代码每个 shift 都要问「64 会怎样」。
-- **正确性门禁先行**：23 个单测用例（含 `3in4`、`if\u0041`、`#x\u41`、
+- **正确性校验先行**：23 个单测用例（含 `3in4`、`if\u0041`、`#x\u41`、
   LS/NBSP）快速闭环，check.sh 44/44 兜底；每轮优化必须全绿。
 - **语义对齐要逐条验证而不是想当然**：`if\u0041` 是两个 token
   （ASCII 词遇 `\` 断词）而非一个；`3in4` 的 `in4` 被吞不产 token
@@ -310,7 +310,7 @@ dispatch），不是指令总量少。NEON 版 classify 的指令数约为 AVX2 
 - `x86_64` 上 bitmap 变体的 AVX2 后端（同构对比消除 ISA 变量）。
 - Rosetta 口径：oxc_bitmap AVX2 经 Rosetta 仅 0.37 GB/s（ts.js），
   本机 bitmap 0.60 GB/s 是它的 1.6x——Rosetta 数字只作底线参照，
-  全语料见 `.rosetta-oxc/results.json`。
+  全样本见 `.rosetta-oxc/results.json`。
 
 ## 10. 第二轮：口径纠正与 Rust NEON 后端（2026-09-17 晚）
 
@@ -348,7 +348,7 @@ disambiguate/lanes/诊断、同一测试套（test262 级）。
   （pair_luts + VQTBL 位置展开 + vmovl widen）、build_spans/lanes_post
   （与 generic 同构）；cfg 接线保持 AVX2 分支不动，CI/M3 同代码；
 - 正确性：oxc_lexer 全部测试通过（160 lib + 45 + 5，含歧义/诊断/
-  TS 关键字）；开发期用「NEON vs scalar/generic 位图级对拍 test」
+  TS 关键字）；开发期用「NEON vs scalar/generic 位图级对照 test」
   抓出四 bug——movemask 位序（even/odd 折叠未交错，改低/高 64 位
   独立 SWAR）、mrg 位面掩码（0x1f → 0x3c/0x80/0x03）、VBSL 按位
   blend 被 h<<3 杂散位污染（VPBLENDV 只看字节 MSB，NEON 需展开
@@ -356,7 +356,7 @@ disambiguate/lanes/诊断、同一测试套（test262 级）。
 
 ### 10.4 第二轮数字（M3 native，25 轮取最优，GB/s）
 
-| 语料 | generic(M3) | **NEON(M3)** | NEON/generic | EPYC AVX2 | NEON ≥ EPYC？ |
+| 样本 | generic(M3) | **NEON(M3)** | NEON/generic | EPYC AVX2 | NEON ≥ EPYC？ |
 |---|---|---|---|---|---|
 | react.js | 0.820 | **1.066** | 1.30x | 1.068 | ≈持平 |
 | react.min.js | 0.573 | **0.819** | 1.43x | 0.761 | ✓ |
@@ -372,7 +372,7 @@ disambiguate/lanes/诊断、同一测试套（test262 级）。
 
 上表「NEON ≥ EPYC？」一列是**跨机绝对值对照**（M3 vs CI EPYC，
 单核不同），按 §10.1 口径只能作参照、不能作结论：NEON（M3）在
-10/11 语料不低于 EPYC AVX2（唯一差口 strings.js，0.95）。同机矩阵
+10/11 样本不低于 EPYC AVX2（唯一差口 strings.js，0.95）。同机矩阵
 内的合法读数是 NEON/generic 列：aarch64 后端比同代码 generic 后端
 快 1.09-1.43x。跨机的结论性判定见 §10.5 基线倍数。
 
@@ -383,7 +383,7 @@ disambiguate/lanes/诊断、同一测试套（test262 级）。
 （中位数），所以「相同速度」在倍数口径下要求 NEON 版跑出 EPYC
 1.5 倍的绝对速度。
 
-| 语料 | NEON(M3) | jump_vec(M3) | bm/jv M3 | bm/jv CI | 达成？ |
+| 样本 | NEON(M3) | jump_vec(M3) | bm/jv M3 | bm/jv CI | 达成？ |
 |---|---|---|---|---|---|
 | react.js | 1.066 | 0.38* | 2.81 | 1.54 | 表面 ✓ |
 | react.min.js | 0.819 | 0.22~0.46* | 1.78-3.72* | 3.37 | 不可判定（小文件噪声） |
@@ -399,15 +399,15 @@ disambiguate/lanes/诊断、同一测试套（test262 级）。
 
 *jump_vec 取自第二轮前后的本机 bench（15 轮，§8 同源）；react.min
 （6.4KB）单轮仅数十微秒，jump_vec 两轮测量 0.22-0.46 波动近一倍，
-该语料的倍数判定不可靠。
+该样本的倍数判定不可靠。
 
-**结论：基线倍数口径未达成**（严格 0/11。逐语料计数：表面 ✓ 1/11
+**结论：基线倍数口径未达成**（严格 0/11。逐样本计数：表面 ✓ 1/11
 ——react.js 的 M3 jump_vec 异常偏弱 0.38 vs CI 0.693，2.81 是分母
 红利不是分子优势；不可判定 1/11——react.min.js 小文件噪声；明确
-✗ 9/11。~1.5x 是中位数，逐语料基线强度 0.55x-2.26x 不等，倍数消除
-的是总体主频差，逐语料仍有基线特异性残余）。差口来源：①基线红利 ×1.5 需要
+✗ 9/11。~1.5x 是中位数，逐样本基线强度 0.55x-2.26x 不等，倍数消除
+的是总体主频差，逐样本仍有基线特异性残余）。差口来源：①基线红利 ×1.5 需要
 NEON 版跑出 EPYC 1.5 倍绝对速度；②NEON 版相对退化幅度比 AVX2 版大
-——跳跃密集语料尤甚（AVX2 后端 32B/步 vs NEON 16B/步、compress 的
+——跳跃密集样本尤甚（AVX2 后端 32B/步 vs NEON 16B/步、compress 的
 cvtepu8/permutevar8x32 在 NEON 需多指令展开；注：32B 化已实证负收
 益，见 §10.7，修复路径不在拉宽步长）。
 
@@ -419,13 +419,13 @@ cvtepu8/permutevar8x32 在 NEON 需多指令展开；注：32B 化已实证负�
   EPYC AVX2，说明交付物对齐后 M3 单核不落后于 CI 单核，但不是
   结论性判据。
 - 在**基线倍数口径**下：未达成（严格 0/11——唯一的表面 ✓ 是分母
-  红利假象，另 1/11 不可判定，逐语料计数同 §10.5），剩余差距有
+  红利假象，另 1/11 不可判定，逐样本计数同 §10.5），剩余差距有
   明确的指令级归因（见 §9 未竟事项 + §10.5），构成下一轮的量化
   目标。
 
 ### 10.7 32B 步长实验：**否决**（NEON vs AVX2 的结构性差异实证）
 
-为收窄跳跃密集语料（line-comments/strings）的倍数差，把
+为收窄跳跃密集样本（line-comments/strings）的倍数差，把
 scan_line_comment/scan_block_comment 从 16B 双向量 32B 化（对齐 AVX2
 步幅）：line-comments 1.045→0.976、strings 0.652→0.620、**lib.dom
 1.119→0.910（-19%）**——全面负优化，已回退（patch 文件始终保持

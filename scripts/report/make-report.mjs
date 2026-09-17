@@ -9,8 +9,8 @@
 //   <dir>/report.md   — 人读报告(CI step summary / bench-reports 分支归档)
 //   <dir>/data.json   — 单 run 结构化数据(趋势页 index 累积用)
 //
-// 语料的分组(real/synthetic)与谱系标签读 tools/corpus-manifest.json
-// (单一来源);报告含语料谱系表、变体 × 语料矩阵、分组几何平均。
+// 样本的分组(real/synthetic)与谱系标签读 tools/samples-manifest.json
+// (单一来源);报告含样本谱系表、变体 × 样本矩阵、分组几何平均。
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -67,9 +67,9 @@ const runner = {
   zig: env("zig", ["version"]),
 };
 
-// 语料清单:分组/谱系标签的单一来源(数组顺序即报告展示顺序)
+// 样本清单:分组/谱系标签的单一来源(数组顺序即报告展示顺序)
 let manifest = { files: [] };
-try { manifest = JSON.parse(readFileSync(new URL("../../tools/corpus-manifest.json", import.meta.url), "utf8")); } catch { /* 缺清单也能出报告 */ }
+try { manifest = JSON.parse(readFileSync(new URL("../../tools/samples-manifest.json", import.meta.url), "utf8")); } catch { /* 缺清单也能出报告 */ }
 const metaByPath = new Map(manifest.files.map((f, i) => [f.path, { ...f, order: i }]));
 
 // 合并 zig + rust 的 runs(按 file 对齐;rust 缺失的文件不补)
@@ -128,7 +128,7 @@ const dataJson = {
 writeFileSync(join(outDir, "data.json"), JSON.stringify(dataJson, null, 1) + "\n");
 
 // ---- report.md ----
-const short = (p) => p.replace(/^corpus\//, "");
+const short = (p) => p.replace(/^samples\//, "");
 const lines = [];
 lines.push(`# 架构矩阵基准 — \`${sha.slice(0, 10)}\``);
 lines.push("");
@@ -144,8 +144,8 @@ if (baselines) {
 }
 lines.push(`- 同族参照：scalar vs baseline、jump_vec vs yuku-main、two_phase/bitmap vs oxc_bitmap（自有实现 / 同族第三方，>1 即我方更快）`);
 if (opt("--rs")) {
-  lines.push(`- swc/oxc：lexbench-rs 决策注入驱动（同一 my-scanner 正则决策集 + 模板花括号栈重扫，与 yuku 对拍同口径），独立进程`);
-  lines.push(`- oxc_bitmap：oxc_lexer 多位图流水线（孵化实验 crate，rev 随 oxc main 跟踪，见下条第三方版本行）；歧义内部自决、经全语料 spans 门禁验证；计时含 value lanes（字符串 cooked、数字解析、atoms、注释元数据，比别家多做工）；TS 泛型侧不融合 \`>\`，token 数略多；SIMD 形态覆盖 x86_64+AVX2/BMI2 与 aarch64+NEON（本仓库 NEON 后端 patch），其余平台 generic fallback（仅 smoke）`);
+  lines.push(`- swc/oxc：lexbench-rs 决策注入驱动（同一 my-scanner 正则决策集 + 模板花括号栈重扫，与 yuku 对照同口径），独立进程`);
+  lines.push(`- oxc_bitmap：oxc_lexer 多位图流水线（孵化实验 crate，rev 随 oxc main 跟踪，见下条第三方版本行）；歧义内部自决、经全样本 spans 校验；计时含 value lanes（字符串 cooked、数字解析、atoms、注释元数据，比别家多做工）；TS 泛型侧不融合 \`>\`，token 数略多；SIMD 形态覆盖 x86_64+AVX2/BMI2 与 aarch64+NEON（本仓库 NEON 后端 patch），其余平台 generic fallback（仅 smoke）`);
   if (rsDeps) {
     // 版本戳来自 rs.json(run-rs-bench 自 Cargo.lock + .bench-deps/oxc.sha 解析)
     const crate = (name, ver) => (ver ? `[${name} ${ver}](https://crates.io/crates/${name}/${ver})` : `${name} ?`);
@@ -164,8 +164,8 @@ for (const name of IMPL_ORDER) {
 }
 lines.push("");
 
-// 语料谱系(real 真实语料 / synthetic 构造极端语料,后者供 microbench 压力用)
-lines.push("## 语料谱系");
+// 样本谱系(real 真实样本 / synthetic 构造极端样本,后者供 microbench 压力用)
+lines.push("## 样本谱系");
 lines.push("");
 lines.push("| 文件 | 分组 | 谱系 | 大小 | tokens | tok/KB |");
 lines.push("| --- | --- | --- | ---: | ---: | ---: |");
@@ -190,10 +190,10 @@ for (const fr of fileRuns) {
   lines.push("");
 }
 
-// 变体 × 语料矩阵:一眼看清哪个架构在哪类语料上赢(混合策略的证据底座)
-lines.push(`## 变体 × 语料（vs ${ANCHOR_LABEL}；每行最快加粗）`);
+// 变体 × 样本矩阵:一眼看清哪个架构在哪类样本上赢(混合策略的证据底座)
+lines.push(`## 变体 × 样本（vs ${ANCHOR_LABEL}；每行最快加粗）`);
 lines.push("");
-lines.push(`| 语料 | 谱系 | ${OWN.map((x) => `\`${x}\``).join(" | ")} |`);
+lines.push(`| 样本 | 谱系 | ${OWN.map((x) => `\`${x}\``).join(" | ")} |`);
 lines.push(`| --- | --- |${" ---: |".repeat(OWN.length)}`);
 for (const fr of fileRuns) {
   let best = -1;
@@ -208,14 +208,14 @@ for (const fr of fileRuns) {
 }
 lines.push("");
 
-// 分组几何平均(vs 基线)——真实/构造分开,防止构造语料稀释真实结论;
+// 分组几何平均(vs 基线)——真实/构造分开,防止构造样本稀释真实结论;
 // 全体一行保持与旧报告口径连续
 lines.push(`## 几何平均（vs ${ANCHOR_LABEL}）`);
 lines.push("");
 const geoImpls = IMPL_ORDER.filter((name) => fileRuns.some((fr) => fr.results[name]?.vs_anchor != null));
 lines.push(`| 范围 | ${geoImpls.map((x) => `\`${disp(x)}\``).join(" | ")} |`);
 lines.push(`| --- |${" ---: |".repeat(geoImpls.length)}`);
-for (const [g, label] of [[null, "全体"], ["real", "真实语料"], ["synthetic", "构造语料"]]) {
+for (const [g, label] of [[null, "全体"], ["real", "真实样本"], ["synthetic", "构造样本"]]) {
   const subset = g ? fileRuns.filter((fr) => fr.group === g) : fileRuns;
   if (subset.length === 0) continue;
   const cells = geoImpls.map((name) => {
@@ -236,7 +236,7 @@ lines.push("");
 const peerImpls = Object.keys(PEER).filter((name) => fileRuns.some((fr) => fr.results[name]?.vs_peer != null));
 lines.push(`| 范围 | ${peerImpls.map((x) => `\`${x}\` vs \`${disp(PEER[x])}\``).join(" | ")} |`);
 lines.push(`| --- |${" ---: |".repeat(peerImpls.length)}`);
-for (const [g, label] of [[null, "全体"], ["real", "真实语料"], ["synthetic", "构造语料"]]) {
+for (const [g, label] of [[null, "全体"], ["real", "真实样本"], ["synthetic", "构造样本"]]) {
   const subset = g ? fileRuns.filter((fr) => fr.group === g) : fileRuns;
   if (subset.length === 0) continue;
   const cells = peerImpls.map((name) => {

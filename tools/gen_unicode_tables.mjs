@@ -10,7 +10,7 @@
 // 表结构（unicode-ident 方案）：码点按 512 个分块，root[cp>>9]（u8）
 // 映射到去重后的叶；每叶 512 bit = 8×u64。一次查询 = root 一次 load +
 // 叶一次 load，O(1)，替代此前的范围表二分（~10 次比较）——中文标识符
-// 密集语料上每个字符都要查，值得。
+// 密集样本上每个字符都要查，值得。
 // 生成时自检：位图与范围表在全码点空间（0..0x10FFFF）逐点一致。
 
 import { readFileSync, writeFileSync } from "node:fs";

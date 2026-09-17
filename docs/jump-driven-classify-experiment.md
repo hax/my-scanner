@@ -29,8 +29,8 @@
 3. 回滚写回 masks 但主循环内层用的是块入口拷贝——恢复不可见；寄存器
    迭代 + 恢复时重载，或原地迭代（后者引入 store-load 依赖，慢）。
 
-**正确性达成**：七个语料（含 cn-dense / line-comments / strings 盲区语料）
-与 tsc 的 token 级差分全部一致。
+**正确性达成**：七个样本（含 cn-dense / line-comments / strings 盲区样本）
+与 tsc 的 token 级差分测试全部一致。
 
 ## 性能结论（否决）
 
@@ -61,7 +61,7 @@ L1 驻留位图的两阶段分离更快）。要吃下这个收益，需要的�
 
 ## 遗产
 
-- 正确性基础设施：盲区语料（cn-dense / line-comments / strings）、
+- 正确性基础设施：盲区样本（cn-dense / line-comments / strings）、
   随机交叉验证（曾抓出 danglingUnicodeWs 缺失分支的真 bug）、
   lineEnd / scanTemplateSubstitution 的向量化与 dangle 修复均已
   保留在主干。

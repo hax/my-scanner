@@ -2,7 +2,7 @@
 zig-out/
 .zcode/
 .DS_Store
-corpus/
+samples/
 node_modules/
 .bench-deps/
 docs/node_modules

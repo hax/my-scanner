@@ -9,7 +9,7 @@
 
 | 对象 | 版本 | 源码位置 | 本仓角色 |
 | --- | --- | --- | --- |
-| TypeScript tsc scanner | tools 依赖 | `tools/node_modules/typescript/lib/typescript.js`（下文 ts.js）与 `typescript.d.ts`（下文 d.ts） | 差分门禁基准 |
+| TypeScript tsc scanner | tools 依赖 | `tools/node_modules/typescript/lib/typescript.js`（下文 ts.js）与 `typescript.d.ts`（下文 d.ts） | 正确性校验基准 |
 | yuku | v0.10.1（钉）/ main（跟踪），两版 `src/parser/token.zig` 字节级相同 | `.bench-deps/yuku/src/parser/`（下文 token.zig / lexer.zig / parser.zig / ast.zig） | 速度基线（scalar / jump_vec 同族参照） |
 | swc | swc_ecma_parser（`unstable` feature；版本自动跟踪 crates.io 最新版） | cargo registry，下文 `$REG/` = `~/.cargo/registry/src/index.crates.io-*/` | jump_vec 族第三方参照 |
 | oxc fused lexer | oxc_parser（版本自动跟踪；本文引用写于 0.150.0） | `.bench-deps/oxc_parser/src/`（下文 kind.rs、token.rs、lexer/*.rs 等） | jump_vec 族第三方参照 |
@@ -393,8 +393,8 @@ kind 值的是分类/优先级这类静态属性，不是 per-token 状态）。
 六家的 span 全部是 u32 偏移对，分歧在坐标系：
 
 - **UTF-8 字节偏移、文件内相对**：yuku、oxc 两家、my-scanner。
-- **UTF-16 code unit 下标**：tsc（JS 实现的天然坐标；本项目对拍时在
-  compare-tsc.mjs 预建字节↔code unit 双向映射换算）。
+- **UTF-16 code unit 下标**：tsc（JS 实现的天然坐标；本项目对照时经样本侧
+  稀疏修正表 `samples/offsets/**` 换算，见 [samples.md](samples.md)）。
 - **SourceMap 全局绝对偏移**：swc 的 `BytePos` 跨文件唯一，消费方须
   自管 base。
 

@@ -3,7 +3,7 @@ name: bench
 on:
   push:
     branches: [main]
-    # 纯文档与报告页改动不跑差分+基准（workflow_dispatch 手动触发不受限）
+    # 纯文档与报告页改动不跑正确性校验+基准（workflow_dispatch 手动触发不受限）
     paths-ignore:
       - 'docs/**'
       - '**.md'
@@ -23,11 +23,11 @@ jobs:
         with:
           fetch-depth: 1
 
-      # 语料在 corpus 分支(只含语料不含源码),检出到 corpus/ 目录
+      # 样本在 samples 分支(只含样本不含源码),检出到 samples/ 目录
       - uses: actions/checkout@v5
         with:
-          ref: corpus
-          path: corpus
+          ref: samples
+          path: samples
           fetch-depth: 1
 
       - uses: mlugg/setup-zig@v2
@@ -45,11 +45,11 @@ jobs:
         with:
           workspaces: tools/lexbench-rs
 
-      - name: 安装对拍依赖(tsc)
+      - name: 安装对照依赖(tsc)
         working-directory: tools
         run: npm ci
 
-      - name: 差分门禁 + 架构矩阵基准 + 报告
+      - name: 正确性校验 + 架构矩阵基准 + 报告
         env:
           BENCH_REPEATS: "25"
         run: ./scripts/ci-bench.sh

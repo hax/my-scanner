@@ -13,7 +13,7 @@ const usage_text =
     \\
     \\选项:
     \\  --dump           打印每个 lexeme（偏移、类别、文本）
-    \\  --variant=NAME   架构变体: two_phase（默认）| scalar | jump_vec
+    \\  --variant=NAME   架构变体: two_phase（默认）| scalar | jump_vec | bitmap
     \\  --bench=N        额外扫描 N 轮，报告 best/avg 耗时与吞吐
     \\  --emit-regex-starts  只输出正则起点决策集（每行一个偏移，含模板内）
     \\  -h, --help       显示本帮助
@@ -44,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--variant=")) {
             const name = arg["--variant=".len..];
             variant = std.meta.stringToEnum(my_scanner.Variant, name) orelse {
-                try out.print("未知变体: {s}（可选 two_phase | scalar | jump_vec）\n\n", .{name});
+                try out.print("未知变体: {s}（可选 two_phase | scalar | jump_vec | bitmap）\n\n", .{name});
                 try out.writeAll(usage_text);
                 try out.flush();
                 std.process.exit(2);

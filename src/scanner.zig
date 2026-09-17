@@ -293,7 +293,7 @@ fn consume(
     for (starts.masks, 0..) |mask, bi| {
         // 整块已被上一个 lexeme 覆盖（如长块注释/长字符串的后续块）：
         // 直接跳过整块，避免逐假候选迭代（lib.dom.d.ts 这类 JSDoc 密集
-        // 语料里，块注释内的 `*` `/` 全是假候选，这里是主要成本）
+        // 样本里，块注释内的 `*` `/` 全是假候选，这里是主要成本）
         if (bi * simd.block_size + simd.block_size <= pos) continue;
         // 一块最多 32 个候选 → 每 lexeme 的容量检查摊薄为每块一次
         try tokens.ensureUnusedCapacity(allocator, simd.block_size);
@@ -581,7 +581,7 @@ pub fn scanIdentifier(src: []const u8, start: usize) Scan {
 
 /// 非 ASCII 起始标识符的扫描：首字符已由 scanNonAscii decode 并验证
 /// ID_Start（直接复用，不再二次 decode）。入口固定成本是 CJK
-/// 标识符密集语料的吞吐关键（oxc 同款结构：handler 直达 + 单 decode）。
+/// 标识符密集样本的吞吐关键（oxc 同款结构：handler 直达 + 单 decode）。
 fn scanUnicodeIdentifier(src: []const u8, start: usize, first: unicode.Rune) Scan {
     var i = start + first.len;
     while (i < src.len) {

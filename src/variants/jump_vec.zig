@@ -79,7 +79,7 @@ fn consumeDirect(
         prev_text = src[0..s.end];
         try tokens.append(allocator, .{ .kind = .shebang, .start = 0, .end = @intCast(s.end) });
     }
-    // lexeme 密度启发式：真实代码 ≈ 1 lexeme / 6-9 字节（语料实测），按
+    // lexeme 密度启发式：真实代码 ≈ 1 lexeme / 6-9 字节（样本实测），按
     // src.len/8 一次性预留，之后每 lexeme 只留一条内联容量检查——
     // ensureUnusedCapacity 是独立函数，逐 lexeme 调用的开销实测占 12%
     try tokens.ensureUnusedCapacity(allocator, src.len / 8 + 1);
@@ -94,7 +94,7 @@ fn consumeDirect(
             continue;
         }
         // 注释快跳（不构造 lexeme 直接跳，对齐 yuku 的
-        // skipWsAndComments——行注释语料上省掉每注释一次的构造与分发）。
+        // skipWsAndComments——行注释样本上省掉每注释一次的构造与分发）。
         // 块注释的换行检测融合进 findBlockCommentEnd 同一趟扫描；
         // 未闭合块注释落到统一落盘路径产 illegal（错误可见）
         if (code & scanner.Dispatch.slash != 0 and pos + 1 < src.len) {

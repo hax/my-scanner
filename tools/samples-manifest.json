@@ -1,8 +1,8 @@
 {
-  "comment": "语料清单单一来源：make-report.mjs 用 group/tag 渲染报告，update-index.mjs 用 group/note/source 渲染趋势页语料表，publish-corpus.mjs 用 source/license 渲染分支 MANIFEST.md。新增/调整语料须 hax 审批（见 AGENTS.md）。数组顺序即报告展示顺序（real 在前，synthetic 在后）。",
+  "comment": "样本清单单一来源：make-report.mjs 用 group/tag 渲染报告，update-index.mjs 用 group/note/source 渲染趋势页样本表，publish-samples.mjs 用 source/license 渲染分支 MANIFEST.md。新增/调整样本须 hax 审批（见 AGENTS.md）。数组顺序即报告展示顺序（real 在前，synthetic 在后）。",
   "files": [
     {
-      "path": "corpus/real/typescript.js",
+      "path": "samples/real/typescript.js",
       "group": "real",
       "tag": "编译器 bundle（未压缩）",
       "note": "tsc 编译器打包文件",
@@ -10,7 +10,7 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "corpus/real/typescript.min.js",
+      "path": "samples/real/typescript.min.js",
       "group": "real",
       "tag": "minified bundle",
       "note": "tsc 编译器 minified（与 typescript.js 同版配对）",
@@ -18,7 +18,7 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "corpus/real/checker.ts",
+      "path": "samples/real/checker.ts",
       "group": "real",
       "tag": "编译器源码",
       "note": "TypeScript checker 源码（2026-09 由不可考快照重钉到此 tag）",
@@ -26,7 +26,7 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "corpus/real/lib.dom.d.ts",
+      "path": "samples/real/lib.dom.d.ts",
       "group": "real",
       "tag": "注释密集 d.ts",
       "note": "DOM 声明文件，块注释密集",
@@ -34,7 +34,7 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "corpus/real/react.js",
+      "path": "samples/real/react.js",
       "group": "real",
       "tag": "库源码（小文件）",
       "note": "React development 构建（cjs 版）",
@@ -42,7 +42,7 @@
       "license": "MIT"
     },
     {
-      "path": "corpus/real/react.min.js",
+      "path": "samples/real/react.min.js",
       "group": "real",
       "tag": "minified 库（小文件）",
       "note": "React production 构建 minified（cjs 版，与 react.js 同版配对）",
@@ -50,15 +50,15 @@
       "license": "MIT"
     },
     {
-      "path": "corpus/real/hanzi-chai.ts",
+      "path": "samples/real/hanzi-chai.ts",
       "group": "real",
       "tag": "CJK 标识符密集",
       "note": "汉字自动拆分系统，packages/hanzi-chai/src 19 个 .ts 按路径序拼接",
       "source": "https://github.com/hanzi-chai/hanzi-chai.github.io @ 00f4f1b9d652b2db0868f30050d7d5608c35334c",
-      "license": "GPL-3.0（仅 corpus 分支逐字分发，附 LICENSE 全文）"
+      "license": "GPL-3.0（仅 samples 分支逐字分发，附 LICENSE 全文）"
     },
     {
-      "path": "corpus/real/mon-entreprise.ts",
+      "path": "samples/real/mon-entreprise.ts",
       "group": "real",
       "tag": "拉丁变音标识符（偶发 unicode）",
       "note": "法国政府项目，site/source/**/domaine/**/*.ts 75 个（除 *.test/*.spec）按路径序拼接",
@@ -66,7 +66,7 @@
       "license": "MIT"
     },
     {
-      "path": "corpus/synthetic/line-comments.js",
+      "path": "samples/synthetic/line-comments.js",
       "group": "synthetic",
       "tag": "行注释密集（构造）",
       "note": "构造极端样本：行注释占绝对多数",
@@ -74,7 +74,7 @@
       "license": "本项目"
     },
     {
-      "path": "corpus/synthetic/strings.js",
+      "path": "samples/synthetic/strings.js",
       "group": "synthetic",
       "tag": "字符串密集（构造）",
       "note": "构造极端样本：字符串字面量占绝对多数",
@@ -82,7 +82,7 @@
       "license": "本项目"
     },
     {
-      "path": "corpus/synthetic/cn-dense.ts",
+      "path": "samples/synthetic/cn-dense.ts",
       "group": "synthetic",
       "tag": "CJK 标识符极端（构造）",
       "note": "构造极端样本：中文标识符/注释模板化重复",

@@ -19,7 +19,7 @@ const AUDIT_ASSUMPTIONS = [
   'TypeScript leading union/intersection separators are recoverable and may be dropped',
 ];
 
-const CORPUS = [
+const SAMPLES = [
   // Plain JS expressions. Several examples deliberately put a unary
   // expression or regexp immediately after a binary operator.
   'let a=1,b=2; a+b; a-b; a*b; a/b; a%b; a&b; a|b; a^b;',
@@ -210,7 +210,7 @@ function printAudit(
   for (const char of candidates) {
     const examples = auditAddition(side, char, outSet, inSet, boundaries);
     if (!examples.length) {
-      console.log(`  ${JSON.stringify(char)}: no counterexample in corpus`);
+      console.log(`  ${JSON.stringify(char)}: no counterexample in samples`);
       continue;
     }
 
@@ -235,7 +235,7 @@ function main() {
   const enabledModes = selectedModes();
   const observedBoundaries = [];
 
-  for (const source of CORPUS) {
+  for (const source of SAMPLES) {
     for (const mode of enabledModes) {
       observedBoundaries.push(...parseInMode(source, mode, MODES[mode]));
     }
@@ -292,7 +292,7 @@ function main() {
   );
 
   console.log(
-    '\nThis is a corpus-based counterexample search, not a grammar proof. '
+    '\nThis is a samples-based counterexample search, not a grammar proof. '
     + 'A character with no reported counterexample still needs review before '
     + 'being added.',
   );

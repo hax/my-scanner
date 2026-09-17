@@ -4,7 +4,7 @@
 //!
 //! oxc_bitmap（oxc_lexer 多位图流水线实验 crate）不接受注入：正则/除号由
 //! 内部 disambiguate pass 自决，「决策一致」改由 tools/compare-oxc-bitmap.mjs
-//! 的全语料 spans 对拍验证（进矩阵的前置门禁，见 ci-bench.sh）。
+//! 的全样本 spans 对照验证（进矩阵的前置校验，见 ci-bench.sh）。
 //! 其交付物比别家重（value lanes：字符串 cooked、数字解析、atoms、注释元数据，
 //! 流水线内生不可关），计时含这部分工作，报告有口径注记。
 //!
@@ -245,7 +245,7 @@ fn drive_swc(src: &str, repeats: u32, re_set: &HashSet<u32>) -> Timed {
 fn drive_oxc_bitmap(src: &str, path: &str, repeats: u32) -> Timed {
     use oxc_lexer::{Arena, LexOptions, lex_utf8_arena, PAD};
 
-    // 与 bitmap_dump.rs 同款 options（两边必须一致，否则 spans 门禁失真）：
+    // 与 bitmap_dump.rs 同款 options（两边必须一致，否则 spans 校验失真）：
     // 全部按 module 计；.ts/.mts/.cts 开 ts 关键字集；.tsx/.jsx 开 jsx。
     let mut options = LexOptions { source_type_module: true, ..Default::default() };
     options.ts = path.ends_with(".ts") || path.ends_with(".mts") || path.ends_with(".cts");

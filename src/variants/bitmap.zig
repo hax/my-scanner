@@ -6,7 +6,7 @@
 //! 字节，最后 compress 从位图批量搬运 lexeme。与 oxc 版的关键差异：
 //!
 //! 1. 语义层完全复用 my-scanner（scanString/scanTemplatePart/scanNumber/
-//!    scanPunct/scanRegex/isKeyword——tsc 差分口径），而不是 oxc 的
+//!    scanPunct/scanRegex/isKeyword——tsc 差分测试口径），而不是 oxc 的
 //!    disambiguate 自决体系；正则决策用位图版 regexAllowedAfter（见下，
 //!    对齐 scanner.regexAllowedAfter 的双回看口径，prev/prev2 文本从
 //!    位图现场重建）。

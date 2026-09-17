@@ -28,21 +28,21 @@ inline asm（vqtbl1q nibble LUT）；其它架构经 comptime arch 分流回退�
 语义逐位一致的比较链 classify（非 aarch64 目标 codegen 完全看不到
 NEON asm），其余各 pass 本来就是跨平台 `@Vector` 写法。
 
-规则：任何语义修复/变更必须全变体差分全绿（`scripts/check.sh` 对
-每个变体跑 tsc 差分）；各架构独立优化不许互相拉扯；`jump_vec` 是
+规则：任何语义修复/变更必须全变体校验通过（`scripts/check.sh` 对
+每个变体跑 tsc 差分测试）；各架构独立优化不许互相拉扯；`jump_vec` 是
 第三形态的直接前驱（驱动一致，只差块内候选缓冲）。
 
 ### 当前格局
 
 jump_vec 成熟化 + 行号惰性化后（2026-09-16，M3 Pro / CI 口径
 25 轮取最优，几何平均 vs yuku-main）：two_phase 0.91x、scalar 0.91x、
-**jump_vec 1.08x（真实语料 1.07x 反超 yuku-main）**——8/10 语料
+**jump_vec 1.08x（真实样本 1.07x 反超 yuku-main）**——8/10 样本
 矩阵最快：minified 端 typescript.min.js 1.10x，CJK 端
 cn-dense 1.31x / hanzi-chai 1.16x，注释密集端 lib.dom 0.80x→0.98x、
 line-comments 0.65x→1.08x（cls pass 白工消去 + 注释快跳），
 react.js 0.90x→1.01x、strings.js 0.86x→0.94x（行号惰性化收益
 最大的两端）。剩余洼地：lib.dom/strings 仍微负——前者是 yuku
-向量化收益最高的语料（1.5x），后者 yuku 字符串路径更简。
+向量化收益最高的样本（1.5x），后者 yuku 字符串路径更简。
 行号惰性化前的同配置数字（0.99x/1.00x，含换行 pass 计时）不可
 直接比，见「行号口径」一节。
 
@@ -56,19 +56,19 @@ jump_vec 0.72x → two_phase 0.82x，梯度分离了各层净贡献（跳跃
 `scripts/ci-bench.sh`（本地同样可跑）五步：
 
 1. `zig build test` 单测；
-2. **差分门禁**：3 变体 × 全 corpus 对拍 tsc，任一失败即红；
-3. 架构矩阵基准（同进程 10 语料 × {scalar, jump_vec, two_phase,
-   yuku-old, yuku-main}，N 轮取最优，正则/模板歧义点按同一决策集
-   注入——yuku 走 `reScanAsRegex`/`reScanTemplateContinuation` 对拍）；
+2. **正确性校验**：4 变体 × 全部样本与 tsc 对照，任一失败即红；
+3. 架构矩阵基准（同进程 10 样本 × {scalar, jump_vec, two_phase,
+   bitmap, yuku-old, yuku-main}，N 轮取最优，正则/模板歧义点按同一决策集
+   注入——yuku 走 `reScanAsRegex`/`reScanTemplateContinuation` 对照）；
 4. 第三方对照（lexbench-rs 独立进程：swc/oxc 决策注入驱动 +
-   oxc_bitmap spans 门禁，机制见下「swc/oxc 决策注入」「oxc_bitmap」两节）；
+   oxc_bitmap spans 校验，机制见下「swc/oxc 决策注入」「oxc_bitmap」两节）；
 5. `scripts/report/make-report.mjs` 汇总成 `report.md` + `data.json`
-   （语料谱系表 + 变体 × 语料矩阵 + real/synthetic 分组几何平均）。
+   （样本谱系表 + 变体 × 样本矩阵 + real/synthetic 分组几何平均）。
 
-语料由 **corpus 孤儿分支**提供（只含语料不含源码）：CI 用第二个
-checkout step 显式拉取，本地由 `scripts/prepare-corpus.sh` 幂等拉取 +
-sha256 校验；谱系、provenance 与更新流程（publish-corpus）见
-[corpus.md](corpus.md)。语料分 real（真实代码）与 synthetic（构造极端
+样本由 **samples 孤儿分支**提供（只含样本不含源码）：CI 用第二个
+checkout step 显式拉取，本地由 `scripts/prepare-samples.sh` 幂等拉取 +
+sha256 校验；谱系、provenance 与更新流程（publish-samples）见
+[samples.md](samples.md)。样本分 real（真实代码）与 synthetic（构造极端
 样本，microbench 专用），分组汇总防止构造数据稀释真实结论。
 
 `.github/workflows/bench.yml`：push 到 main 触发（`docs/**`、
@@ -83,9 +83,9 @@ tools/node_modules 拷入）。页面顶部为**比对者一览**（链接到各
 yuku 基线版本溯源：sha 与上游 commit 日期由 `prepare-baselines.sh`
 的 `.date` 标记经 bench.zig → data.json 带入）、**机器配置**表
 （CI runner 与本机的 os/CPU/zig 版本，各取最近一次 run；基线同为
-yuku v0.10.1 固定快照，各机一致）与**语料说明**表（real 出处、来源
+yuku v0.10.1 固定快照，各机一致）与**样本说明**表（real 出处、来源
 版本与链接 / synthetic 构造场景；图上标题只留文件名）。**柱状对比**为最近一次 CI 与
-本机 run 的 "vs baseline" 倍数（每语料一张 370px 定宽卡片、flex
+本机 run 的 "vs baseline" 倍数（每样本一张 370px 定宽卡片、flex
 随页宽并排、label 45° 斜排；左 CI 右本机、同色本机半透明，baseline
 两柱恒 1.0、与 y=1 虚线互证基线对齐，架构族间留空槽分组——
 scalar|baseline、jump_vec 族四柱
@@ -120,14 +120,14 @@ scalar 对 baseline、jump_vec 对 yuku-main、two_phase/bitmap 对 oxc_bitmap
   report.md 与趋势页同源展示；当前版本与链接清单见
   [benchmarks.md](benchmarks.md) 的「第三方版本」。
 - **本地缓存**：第三方计时结果缓存在 `.bench-deps/`，键含基线版本
-  标记、语料 sha256、轮数与编译器版本，任一变动自动失效——本地迭代
+  标记、样本 sha256、轮数与编译器版本，任一变动自动失效——本地迭代
   不为第三方重复付费；`--refresh-baselines`（zig bench）/`--refresh`
   （rs）强制重跑。**CI 总是实跑**（`GITHUB_ACTIONS` 下 ci-bench.sh
   显式加 refresh：runner 代际性能漂移，第三方必须与自家实现同 run
   实测，缓存的绝对值不能跨 run 复用）。
 
 本地 run 可提交趋势页：`scripts/bench.sh --submit` 一键跑完整矩阵
-（默认全 10 语料）+ swc/oxc/oxc_bitmap 对照 → 汇总 → 发布到 bench-reports
+（默认全 10 样本）+ swc/oxc/oxc_bitmap 对照 → 汇总 → 发布到 bench-reports
 分支（凭据缺省回退 `gh auth token` 与 origin remote）。本地 run 的
 data.json 记 `channel=local`（机器名不进入任何产物），文件名
 `<sha>.local.*` 不与 CI 同 sha 互撞；图表页上本机与 CI 同图
@@ -206,7 +206,7 @@ punctuator 是 O(1) 的首字符前缀树，先求正确，等 profile 说话再
 | boundary v2 语义 | 84.2 | ID 连接 + Unicode ws/逻辑换行（-13% 换正确性） |
 | 整块跳过 | ~82* | 长 token 覆盖的块直接 continue |
 
-（*不同语料差异大：minified 端 ~84-96，注释密集端 ~65-83；当时对
+（*不同样本差异大：minified 端 ~84-96，注释密集端 ~65-83；当时对
 yuku-main：minified +6~9%，注释密集 -8~-29%——jump_vec 成熟化前
 的对比。）
 
@@ -244,7 +244,7 @@ switch 里顺路置 1-bit `line_terminator_before` flag（ASI/HTML 注释
 
 此前「yuku 在 advance 循环里逐字符判断、殊途同归」的说法不成立：
 扫描换行（顺带、1-bit）≠ 计算行号（独立一趟全文件 pass、可查询
-索引）——我们曾为一个明显强于对手的交付物付 7-25%（语料谱系
+索引）——我们曾为一个明显强于对手的交付物付 7-25%（样本谱系
 相关）并误认为公平口径。历史方案存档：逐 span 标量补计（早期）、
 classifyLineBreaks 独立 pass 计入计时（成熟化首日）；E3 增量行
 标记实验（react -18%/strings -30%）否决记录见类别码纪要。
@@ -254,7 +254,7 @@ strings/react 端差 ~15-20%）。
 ## scalar：全标量基线
 
 pos 循环逐字节决策、跳跃也纯标量的单阶段。定位是基线而非竞品：
-与 yuku-old（0.10.1，yuku 向量化前快照）同形态对拍，隔离「架构」
+与 yuku-old（0.10.1，yuku 向量化前快照）同形态对照，隔离「架构」
 与「实现」变量；同时充当 SIMD 收益的标量参照。自身不做架构级
 优化投入，语义层修复经共享层自然生效。
 
@@ -280,7 +280,7 @@ token 完成"发现起点 → 扫到终点"。关键特性是**每个字节只�
   （typescript.js，137 tok/KB），注释密集端 cls 占总时间 21-31%
   → -8~29%，由此得出过"token 越密两阶段越划算"的判断；
 - jump_vec 成熟化后（2026-09-16，行号未惰性化）：两阶段仅剩
-  typescript.js 一线微胜，9/10 语料由 jump_vec 领跑——"越密越
+  typescript.js 一线微胜，9/10 样本由 jump_vec 领跑——"越密越
   划算"未守住，"越稀越亏"依旧（cls 白工被单阶段整端消去）；
 - 行号惰性化后（同日）：jump_vec 1.08x 全面反超，两阶段仅剩
   checker.ts 一线（1.09 对 1.07，OOO 重叠优势的最后阵地）。
@@ -299,7 +299,7 @@ token 完成"发现起点 → 扫到终点"。关键特性是**每个字节只�
    与标量互相打断。
 2. **跳跃前移**（字符串/注释终点判定进阶段 1，见
    [跳跃驱动实验](jump-driven-classify-experiment.md)）：正确性做成
-   （7 语料差分全绿），但 line-comments 账本显示 cls +0.27ms / 阶段 2
+   （7 样本校验通过），但 line-comments 账本显示 cls +0.27ms / 阶段 2
    -0.27ms——**工作等量搬迁，零净收益**。yuku 跳跃便宜的本质不是
    跳跃在哪个阶段做，而是单阶段字节只触一次——jump_vec 成熟化
    从正面证实了这一点。
@@ -328,7 +328,7 @@ oxc 0.150.0，registry vendored 源码）全部定位为**歧义点无外部驱�
   的续段文本塌方成代码（等价 tsc 的 reScanTemplateContinuation；
   my-scanner 的模板栈内建于主循环，无此问题）。
 
-注入点（drive.rs 实证可用，全 10 语料 0 错误扫至 EOF）：
+注入点（drive.rs 实证可用，全 10 样本 0 错误扫至 EOF）：
 
 - **swc 零 patch**：公开 trait `swc_ecma_parser::input::Tokens`，裸
   Lexer 即实现——`set_next_regexp(Some(pos))`（等价 reScanAsRegex；
@@ -347,7 +347,7 @@ oxc 0.150.0，registry vendored 源码）全部定位为**歧义点无外部驱�
 实证数字（tools/lexbench-rs `drive --repeats=5`，M2 同机，GB/s best；
 my-scanner/yuku 列为 bench.sh x10 同 session 数字）：
 
-| 语料 | my-scanner 最佳 | oxc-driven | swc-driven | yuku-main |
+| 样本 | my-scanner 最佳 | oxc-driven | swc-driven | yuku-main |
 | --- | --- | --- | --- | --- |
 | typescript.min.js | 0.38 (jump_vec) | 0.32 | 0.23 | 0.35 |
 | typescript.js | 0.68 (jump_vec) | 0.54 | 0.41 | 0.63 |
@@ -355,14 +355,14 @@ my-scanner/yuku 列为 bench.sh x10 同 session 数字）：
 | react.js | 1.13 (two_phase) | 0.33 | 0.21 | 1.15 |
 | lib.dom.d.ts | 1.75 (jump_vec) | 1.72 | 0.99 | 1.57 |
 
-token 数三家差 <0.5%（模板分片 vs 整体的口径差），不作三方差分。
-my-scanner 在 real 语料全面 ≥ oxc-driven（react 小文件 3.4x，
+token 数三家差 <0.5%（模板分片 vs 整体的口径差），不作三方对照。
+my-scanner 在 real 样本全面 ≥ oxc-driven（react 小文件 3.4x，
 lib.dom.d.ts 打平）；oxc-driven 全面快于 swc-driven（1.5-2.5x）。
 
 CI 接入（2026-09-16 完成，ci-bench.sh 第 [5/5] 步）：
 
 `prepare-lexbench.sh` 幂等 vendor oxc（crates.io 官方 .crate + sha256
-校验 + sed 打 2 行 patch）→ 逐语料 `--emit-regex-starts` 生成决策 →
+校验 + sed 打 2 行 patch）→ 逐样本 `--emit-regex-starts` 生成决策 →
 cargo build → `drive --json` → make-report `--rs` 合并；swc/oxc 列进
 报告矩阵与趋势页，rs.json 与 zig.json 同目录归档。workflow 配
 `dtolnay/rust-toolchain@stable`（oxc_parser MSRV 1.96）+ rust-cache。
@@ -373,10 +373,10 @@ cargo build → `drive --json` → make-report `--rs` 合并；swc/oxc 列进
    yuku bench 的驱动开销对称；lib.dom.d.ts（零正则零模板决策）的
    oxc 1.72 GB/s ≈ 其官方 bench 水平，说明驱动开销占比可忽略。
 2. 决策集是 my-scanner 的歧义口径（tradeoff T1 启发式）——对比的是
-   "同一决策集下的字节吞吐"，不与 swc/oxc 自家 parser 的 token 流对拍。
+   "同一决策集下的字节吞吐"，不与 swc/oxc 自家 parser 的 token 流对照。
 3. JSX 当前"恒非 JSX"双方一致（react.js 双方均扫完）；如需 JSX 决策
    注入，swc 入口已公开，oxc 需再 patch `next_jsx_child`。
-4. `A<<T>>` 嵌套泛型在当前语料未出现（`<<` 均为位移）；如需，oxc 要
+4. `A<<T>>` 嵌套泛型在当前样本未出现（`<<` 均为位移）；如需，oxc 要
    再 patch `re_lex_as_typescript_l_angle`，swc 无对应 lexer 侧入口
    （parser 内部拆分），届时另议。
 5. oxc 版本升级：prepare-lexbench.sh 自动跟踪 crates.io 最新稳定版（改
@@ -400,9 +400,9 @@ lexer 并存的双实现；孵化期 publish=false 不上 crates.io，跟踪 oxc
   其流水线分解演示了全物化的代价结构。
 - **歧义内部自决**（disambiguate pass，test262 全过；含 TS type-context
   oracle——TS 泛型嵌套的 `>` run 拆单，tsc 同款哲学），**不接受外部
-  决策注入**。公平性改由 `tools/compare-oxc-bitmap.mjs` 全语料 spans
-  门禁验证：模板片（Head/Middle/Tail）与 `>` 拆分按吞噬同步对齐，
-  10/10 语料一致才进矩阵（ci-bench.sh 第 [5/5] 步内，`SKIP_DIFF` 同控）。
+  决策注入**。公平性改由 `tools/compare-oxc-bitmap.mjs` 全样本 spans
+  校验：模板片（Head/Middle/Tail）与 `>` 拆分按吞噬同步对齐，
+  10/10 样本一致才进矩阵（ci-bench.sh 第 [5/5] 步内，`SKIP_DIFF` 同控）。
 - **交付物更重**：value lanes（字符串 cooked、数字解析 f64、atoms、
   注释元数据、逐字对齐 oxc_parser 的 diagnostics）流水线内生不可关——
   计时含这些别家不做的工作，解读「two_phase vs oxc_bitmap」同族参照

@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # 吞吐基准：my-scanner vs yuku lexer（同进程、同文件、对称口径）。
 #
-#   scripts/bench.sh                          # corpus 全部大文件，默认 10 轮取最优
+#   scripts/bench.sh                          # 全部大样本文件，默认 10 轮取最优
 #   scripts/bench.sh --repeats=30 foo.js      # 自定义轮数与文件
 #   scripts/bench.sh --refresh-baselines      # 强制重跑第三方基线（默认命中本地缓存）
 #   scripts/bench.sh --submit                 # 完整矩阵 + swc/oxc/oxc_bitmap 对照 + 发布到 bench-reports（channel=local）
 #
 # yuku 基线由 scripts/prepare-baselines.sh 准备（yuku_old 钉 v0.10.1，
 # yuku-main 跟踪上游 HEAD）；第三方结果缓存在 .bench-deps/，基线版本、
-# 语料、轮数或 zig 版本变动都会自动失效，仅本地迭代用（CI 总是实跑）。
+# 样本、轮数或 zig 版本变动都会自动失效，仅本地迭代用（CI 总是实跑）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 scripts/prepare-baselines.sh
-source scripts/corpus-files.sh
+source scripts/samples-files.sh
 
-DEFAULT_FILES=(corpus/real/typescript.min.js corpus/real/typescript.js corpus/real/checker.ts corpus/real/react.js corpus/real/lib.dom.d.ts)
+DEFAULT_FILES=(samples/real/typescript.min.js samples/real/typescript.js samples/real/checker.ts samples/real/react.js samples/real/lib.dom.d.ts)
 
-# 分离 flag 与文件；没有文件时用默认 corpus
+# 分离 flag 与文件；没有文件时用默认样本
 SUBMIT=0
 ARGS=()
 FILES=()
@@ -41,7 +41,7 @@ fi
 
 # ---- --submit：完整矩阵 + 汇总发布到 bench-reports（本机 run）----
 if [ ${#FILES[@]} -eq 0 ]; then
-  FILES=("${CORPUS_FILES[@]}")
+  FILES=("${SAMPLES_FILES[@]}")
 fi
 REPEATS=10
 for a in ${ARGS[@]+"${ARGS[@]}"}; do
@@ -61,7 +61,7 @@ if ! command -v cargo >/dev/null 2>&1 && [ -x "$HOME/.cargo/bin/cargo" ]; then
 fi
 zig build # --emit-regex-starts 的 CLI
 scripts/prepare-lexbench.sh
-DEC=build/lexbench-corpus
+DEC=build/lexbench-decisions
 mkdir -p "$DEC"
 for f in "${FILES[@]}"; do
   zig-out/bin/my-scanner --emit-regex-starts "$f" > "$DEC/$(basename "$f").regex"

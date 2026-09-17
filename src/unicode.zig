@@ -1,7 +1,7 @@
 //! Unicode 标识符判定：两级位图直查 + 严格 UTF-8 解码。
 //! 表由 tools/gen_unicode_tables.mjs 从 UCD 生成（见 unicode_tables.zig）：
 //! root[cp >> 9] → 去重叶（512 bit = 8 u64），一次查询 2 次 load，
-//! 替代范围表二分（~10 次比较）——unicode 标识符字符密集语料（如
+//! 替代范围表二分（~10 次比较）——unicode 标识符字符密集样本（如
 //! 中文标识符）每字符都查，常数差异直接体现在吞吐上。
 
 const std = @import("std");

@@ -24,7 +24,7 @@ yuku 在 typescript.min.js 24KB 处把 `\s` 当标识符转义报
 InvalidUnicodeEscape，锚点整行失真）。
 
 **第三方结果本地缓存**（仅本地迭代用）：yuku/swc/oxc 的计时结果缓存在
-`.bench-deps/`，键含基线版本标记、语料 sha256、轮数与编译器版本，任一
+`.bench-deps/`，键含基线版本标记、样本 sha256、轮数与编译器版本，任一
 变动自动失效；`--refresh-baselines`（zig bench）/`--refresh`（rs 链）
 强制重跑。**CI 总是实跑**——runner 代际性能漂移，第三方必须与自家实现
 同 run 实测，缓存的绝对值不能跨 run 复用。
@@ -62,11 +62,11 @@ swc → oxc → oxc_bitmap），runner 频率漂移给后测者 ~3% 量级的系
 劣势（CI 上 yuku_old/yuku_main 恒 ≈0.96-0.98 即由此）；解读第三方
 相互差时留意，同族参照口径（位置相邻）受影响最小。
 
-语料分 **real**（真实代码）与 **synthetic**（构造极端样本，microbench
-专用）两类，唯一权威存储是 corpus 分支（check.sh/ci-bench.sh 自动
-拉取校验）；谱系与 provenance 见 [corpus.md](corpus.md)。报告含
-「变体 × 语料」矩阵与 real/synthetic 分组几何平均——不同架构在不同
-语料上的胜负一眼可见，且构造数据不稀释真实结论。
+样本分 **real**（真实代码）与 **synthetic**（构造极端样本，microbench
+专用）两类，唯一权威存储是 samples 分支（check.sh/ci-bench.sh 自动
+拉取校验）；谱系与 provenance 见 [samples.md](samples.md)。报告含
+「变体 × 样本」矩阵与 real/synthetic 分组几何平均——不同架构在不同
+样本上的胜负一眼可见，且构造数据不稀释真实结论。
 
 ## 对 yuku 的对比（本地 M2 快照）
 
@@ -86,14 +86,14 @@ yuku 主干的向量化覆盖四处：`findAnyPos`（@Vector 16/8 字节找命�
 注释主体用 stars/slashes 双 mask 的 @Vector(16) 窗口搜 `*/`，窗口重叠
 1 字节防跨窗漏检）。收益随注释/字符串密度变化：块注释密集的
 lib.dom.d.ts +44%、react.js +13%，minified 的 typescript.js +3%、
-checker.ts 持平。**lib.dom.d.ts 上 yuku-main 反超**——注释密集语料是
+checker.ts 持平。**lib.dom.d.ts 上 yuku-main 反超**——注释密集样本是
 当时的明确短板，后续「整块跳过」优化已部分收敛（见 roadmap），剩余
 差距的结构性分析见 architecture.md 的「横向权衡」一节。
 
 ## 架构矩阵与 CI
 
-项目已转为多架构变体并行演化（scalar / jump_vec / two_phase），每次
-push 到 main 由 CI 自动跑全变体差分 + 矩阵基准，报告归档到
+项目已转为多架构变体并行演化（scalar / jump_vec / two_phase / bitmap），每次
+push 到 main 由 CI 自动跑全变体正确性校验 + 矩阵基准，报告归档到
 bench-reports 分支并累积图表页（`index.html`，GitHub Pages 在线看：
 <https://johnhax.net/my-scanner/>）。趋势折线以
 「vs baseline 倍数」为主口径——基线（yuku v0.10.1 快照）固定不漂，相对
@@ -161,8 +161,8 @@ GB/s 与「vs 同族参照」口径定义不变。
 `-C target-feature=+avx2,+bmi2`：oxc_bitmap 的 SIMD 核心此前提，
 swc/oxc 两列同步受益——此前 Rust 侧按 baseline SSE2 编（zig 侧
 native，口径不对称），故 swc/oxc 的绝对值与相对值在此**断档跳变
-一次**（方向向上，幅度随语料）。同日起矩阵新增 **oxc_bitmap** 列
+一次**（方向向上，幅度随样本）。同日起矩阵新增 **oxc_bitmap** 列
 （oxc_lexer 多位图流水线实验 crate，two_phase 族第三方参照）：
-歧义内部自决 + 全语料 spans 门禁、计时含 value lanes、仅 x86_64
+歧义内部自决 + 全样本 spans 校验、计时含 value lanes、仅 x86_64
 SIMD 形态（其余平台 generic fallback 仅 smoke）——口径注记见
 architecture.md 的「oxc_bitmap」一节与 report.md 头部。

@@ -2,7 +2,7 @@
 //! （.bench-deps/yuku-main/src/parser/token.zig，MIT License, Copyright (c) 2026 Yuku）。
 //! parser 接口预备：与 yuku 对齐的细分枚举、运算符优先级与标志位布局。
 //! scanner 的实际产出是粗粒度的 Lexeme（见 lexeme.zig）；本文件为纯定义，
-//! 保持与上游字节级一致以便对拍与演进对照。
+//! 保持与上游字节级一致，以便对照与跟踪演进。
 
 const std = @import("std");
 

@@ -7,9 +7,10 @@
 //! 矩阵（架构族 → 自有实现 + 第三方参照）：
 //!   全标量单阶段        → scalar     vs yuku-old（0.10.1 快照）
 //!   单阶段 + SIMD 长跳跃 → jump_vec   vs yuku-main（perf(lexer) 之后）
-//!   两阶段 SIMD         → two_phase
+//!   两阶段 SIMD         → two_phase  vs oxc_bitmap（孵化实验 crate）
+//!   oxc_lexer 位图流水线 → bitmap     vs oxc_bitmap（同族原型）
 //! swc / oxc 由 tools/lexbench-rs 独立计时，报告在 scripts/report/make-report.mjs
-//! 汇总（跨语言进程无法同进程对拍）。
+//! 汇总（跨语言进程无法同进程对照）。
 //!
 //! 注意 yuku 纯 scanner 与 tsc 同款设计：`>` 家族不合并、`/` 保守判除号，
 //! 因此各实现的 token 数不同，吞吐按各自 token 数计，互不影响对比。
@@ -28,7 +29,7 @@ const usage_text =
     \\  bench [--repeats=N] [--json=<path>] [--prim] [--refresh-baselines] <file>...
     \\
     \\yuku 第三方基线结果默认走本地缓存(.bench-deps/bench-cache.json;基线
-    \\版本、语料、轮数、zig 版本任一变动自动失效,仅加速本地迭代;CI 用
+    \\版本、样本、轮数、zig 版本任一变动自动失效,仅加速本地迭代;CI 用
     \\--refresh-baselines 强制同 run 实测)。
     \\
 ;
@@ -45,7 +46,7 @@ const FileRun = struct {
 };
 
 /// yuku 基线结果缓存（仅第三方；自家变体永不缓存）。键含基线版本 sha、
-/// 语料 sha256、轮数与 zig 版本，任一变动自然失效。CI 不用缓存：
+/// 样本 sha256、轮数与 zig 版本，任一变动自然失效。CI 不用缓存：
 /// runner 代际性能漂移，第三方必须与自家实现同 run 实测。
 const CacheEntry = struct { best_ns: i96, tokens: usize, err: ?[]const u8 };
 
@@ -242,7 +243,7 @@ fn benchFile(
 }
 
 /// 把全部 run 写成 JSON（供 scripts/report/make-report.mjs 汇总；路径由 ASCII
-/// 语料名构成，无需转义）。
+/// 样本名构成，无需转义）。
 /// 单个基线的溯源 JSON:`{"sha":"..","date":".."}`(缺失字段省略,皆缺为 null)。
 fn baselineEntry(arena: std.mem.Allocator, sha: ?[]const u8, date: ?[]const u8) ![]const u8 {
     if (sha == null and date == null) return "null";
@@ -323,7 +324,7 @@ fn loadCache(arena: std.mem.Allocator, io: Io) std.StringHashMap(CacheEntry) {
     return map;
 }
 
-/// 写缓存（tmp + rename 原子写）。键成分为 sha hex/语料路径/数字，err 是
+/// 写缓存（tmp + rename 原子写）。键成分为 sha hex/样本路径/数字，err 是
 /// @errorName 标识符，均无需 JSON 转义。
 fn saveCache(arena: std.mem.Allocator, io: Io, map: *std.StringHashMap(CacheEntry)) !void {
     var buf: std.ArrayList(u8) = .empty;

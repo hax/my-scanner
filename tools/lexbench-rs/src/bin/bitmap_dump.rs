@@ -2,7 +2,7 @@
 //! 头行，随后每个显著 token 一行 `start\tend\tcoarse-kind`，末尾补一行
 //! 合成 eof（对齐 my-scanner --dump 的流尾）。
 //! coarse-kind 映射到 my-scanner 的粗类名，供 tools/compare-oxc-bitmap.mjs
-//! 做 spans 级对拍（模板片 TemplateHead/Middle/Tail 由对拍脚本吞噬同步）。
+//! 做 spans 级对照（模板片 TemplateHead/Middle/Tail 由对照脚本吞噬同步）。
 //!
 //! 用法: bitmap_dump <file>...
 
@@ -25,7 +25,7 @@ fn options_for(path: &str) -> LexOptions {
 /// 与 my-scanner lexeme.zig 的 LexemeKind 对齐：关键字不细分（一律
 /// identifier），模板拆 no_substitution/head/middle/tail 四片。
 /// private_name 保留原名（my-scanner 拆成 `#` + identifier 两个 lexeme，
-/// 由对拍脚本的吞噬同步对齐）。
+/// 由对照脚本的吞噬同步对齐）。
 fn coarse(k: TokenKind) -> &'static str {
     if k == TokenKind::Eof {
         return "eof";
@@ -61,7 +61,7 @@ fn coarse(k: TokenKind) -> &'static str {
         return "template_tail";
     }
     if k.is_trivia() {
-        // emit_comments=false 的显著流里不应出现；出现即对拍会抓到
+        // emit_comments=false 的显著流里不应出现；出现即对照会抓到
         return "trivia";
     }
     "punct"

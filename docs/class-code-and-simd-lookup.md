@@ -32,7 +32,7 @@ dispatch 表（`src/scanner.zig` 的 `Dispatch` + `dispatch_table`），
 每个首字节一个位集：`punct_single / quote / digit / ident_start /
 punct_multi / slash / hash`。
 
-关键副产品是 **punct_single 零调用快路径**：语料里 94-98% 的 punctuator
+关键副产品是 **punct_single 零调用快路径**：样本里 94-98% 的 punctuator
 是单字节（`{}();,:~@`），命中位后直接内联构造 token，跳过 punctLen。
 多字节 punct（`==` `===` 等，占 punct 的 2-6%）走 `punctLenW`——
 候选点一次 4 字节 load + 首字符 switch + 常量比较贪心（SWAR 风格单点匹配），
@@ -149,7 +149,7 @@ whitespace = in.eq( pshufb(whitespace_table, in) );
    主要收益是正确性与 Unicode 地基（U+00A0 等不再误判 illegal、
    中文码点假候选 3→1 个/字），速度收益预估 <2%。
    注意会**有意改变行为**（非 ASCII whitespace 从 illegal 变 trivia），
-   tsc 差分口径同步更新。
+   tsc 差分测试口径同步更新。
 2. ~~**第二步：whitespace 平面改查表+验证**~~ 已实验并否决（见上）：
    JS 空白是连续区间，范围比较已最优。
 3. **第三步：OP 平面进 nibble LUT + packed tag 评估**。四维关系需要
@@ -199,7 +199,7 @@ Current-relation counterexamples: 0）。实测推翻了两处预估，结论如
 
 行为变化（有意）：非 ASCII whitespace 从 illegal 变 trivia（阶段 2 在
 lead 处统一产 `.whitespace` token，默认过滤，keep_comments 时可见）；
-`line_count` 从「\n 计数」变「逻辑换行计数」。tsc 差分四文件切分不变。
+`line_count` 从「\n 计数」变「逻辑换行计数」。tsc 差分测试四文件切分不变。
 
 ## ✅ 单阶段引擎成熟化（2026-09-15/16，exp/single-stage → 并入 jump_vec）
 
@@ -214,13 +214,13 @@ mine = 两阶段，yuku-main 为外部对照，同 run 比值才可信）：
 
 | 步骤 | 做法 | 结果 |
 | --- | --- | --- |
-| v1 单阶段 | 裁剪换行 pass + 标量驱动循环 | token 密集语料慢 10-23%（候选位图的 ctz 迭代有 OoO 重叠优势）；注释密集赢（省掉 classify 白工） |
-| E1+E2 | `ident_part_table`、dispatch 表加 ws 位合并判断、`skipWhitespace` 展开+SIMD | 7 语料赢 4；strings +12%、line-comments +10% |
+| v1 单阶段 | 裁剪换行 pass + 标量驱动循环 | token 密集样本慢 10-23%（候选位图的 ctz 迭代有 OoO 重叠优势）；注释密集赢（省掉 classify 白工） |
+| E1+E2 | `ident_part_table`、dispatch 表加 ws 位合并判断、`skipWhitespace` 展开+SIMD | 7 样本赢 4；strings +12%、line-comments +10% |
 | ❌ E3 | LineTracker 逐 span 增量行标记替代换行 pass | **全面回退**（react -18%、strings -30%）——span 多为 1-4 字节，per-span 开销远超 0.25 cycles/byte 的集中式 SIMD pass。**集中式换行 pass genuinely 高效，逐 span 增量标记是死路** |
 | E5 | **惰性 LineIndex**：扫描期不建任何行数据结构，首次 `lineAt`/`lineCount` 才跑换行 pass | 对齐 yuku 交付物（后核查其源码确认：扫描期只在空白分类 switch 顺路置 1-bit flag，不维护行号，下游按需重算）。单阶段全面反超两阶段（1.00-1.35）。**已并入主干**（2026-09-16 裁决）：「行号计入计时」口径连同「yuku 逐字符判断、殊途同归」的错误类比一并撤销，全变体统一惰性交付 |
 | E6 | 注释 trivia 快跳：`!keep_comments` 时不构造 token 直接跳 | line-comments 追平 yuku（2.15 vs 2.12 GB/s） |
 | E7 | unicode ID 两级位图（root[cp>>9] → 去重叶 8×u64，2 次 load）替代 795 范围二分 | cn-dense 0.88→1.12 vs yuku（0.84→1.07 GB/s，反超 yuku 的 0.92）。79/86 叶与 yuku 独立实现叶数一致 |
-| E8 | token 容量按 src.len/8 预留 + 内联容量检查（逐 token 调 `ensureUnusedCapacity` 实测占 12%）；isKeyword 换完美哈希 `(c0+c1+clast*62+len*27)&127`（原 len+首字符 switch+memcmp 链占 11.5%，间接跳转对多样标识符不友好） | **全 7 语料反超 yuku-main：1.07-1.26**（exp 分支口径，含惰性行号） |
+| E8 | token 容量按 src.len/8 预留 + 内联容量检查（逐 token 调 `ensureUnusedCapacity` 实测占 12%）；isKeyword 换完美哈希 `(c0+c1+clast*62+len*27)&127`（原 len+首字符 switch+memcmp 链占 11.5%，间接跳转对多样标识符不友好） | **全 7 样本反超 yuku-main：1.07-1.26**（exp 分支口径，含惰性行号） |
 
 **exp 分支最终数据**（M2，ReleaseFast，20 轮取最优；惰性行号口径，
 mine-1/mine 与 mine-1/yuku-main）。并入主干后的口径数字见
@@ -254,7 +254,7 @@ mine-1/mine 与 mine-1/yuku-main）。并入主干后的口径数字见
    字符的非法非 ASCII 字节，单阶段产 illegal（近 tsc Unknown）而
    两阶段静默吞（tradeoff T2 的变体间行为差）；行注释/字符串/正则内
    的 U+2028/29 不按 LineTerminator 处理（E3 精确化的开销不值，
-   tsc 差分语料无此形态）。
+   tsc 差分测试样本无此形态）。
 
 ## ❌ 已否决项存档
 

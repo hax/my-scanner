@@ -1,6 +1,6 @@
 // swc/oxc 对照计时(drive)的缓存调度:第三方版本由 Cargo.lock(锚钉版由
-// prepare-lexbench.sh 跟踪 crates.io 最新版) + vendored oxc 决定,语料/轮数/
-// 工具链任一变动自动失效,只对缺失或陈旧的语料重跑
+// prepare-lexbench.sh 跟踪 crates.io 最新版) + vendored oxc 决定,样本/轮数/
+// 工具链任一变动自动失效,只对缺失或陈旧的样本重跑
 // drive,其余读缓存合并出 rs.json。仅加速本地迭代;CI(GITHUB_ACTIONS)
 // 由 ci-bench.sh 显式传 --refresh 全量实跑(runner 代际性能漂移,第三方
 // 必须与自家实现同 run 实测)。
@@ -122,4 +122,4 @@ const runs = files.map((f) => ({
 }));
 writeFileSync(`${jsonOut}.tmp`, JSON.stringify({ rust: RUSTC, deps, runs }) + "\n");
 renameSync(`${jsonOut}.tmp`, jsonOut);
-console.log(`rs.json: ${files.length} 个语料(${files.length - miss.length} 个来自缓存,${miss.length} 个实测)`);
+console.log(`rs.json: ${files.length} 个样本(${files.length - miss.length} 个来自缓存,${miss.length} 个实测)`);

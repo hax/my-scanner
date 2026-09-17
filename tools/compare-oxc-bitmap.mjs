@@ -1,12 +1,12 @@
-// oxc_bitmap（oxc_lexer 多位图流水线实验 crate）与 my-scanner 的 lexeme spans 对拍。
+// oxc_bitmap（oxc_lexer 多位图流水线实验 crate）与 my-scanner 的 lexeme spans 对照。
 // 它不接受外部决策注入（正则/除号由内部 disambiguate pass 自决），本脚本即
-// 「歧义点决策一致」的等价验证：全 bench 语料切分一致才允许进入基准矩阵。
+// 「歧义点决策一致」的等价验证：全 bench 样本切分一致才允许进入基准矩阵。
 //
 //   node tools/compare-oxc-bitmap.mjs <file>...
 //
 // 对齐规则（与 compare-tsc.mjs 同款思路，但双方都是字节偏移、无需坐标换算）：
 // - 双方均为 trivia-free 显著流（my-scanner 的 trivia 不进流；oxc 侧
-//   emit_comments=false；hashbang 语料没有）；
+//   emit_comments=false；hashbang 样本没有）；
 // - 模板双方都拆 Head/Middle/Tail 片，1:1 对齐；
 // - TS 泛型嵌套的 `>` 家族：oxc 的 type-context oracle 把闭合类型实参的 `>` run
 //   拆成单 `>`（tsc 同款哲学，JS 表达式里的 `>>` 仍融合），my-scanner 恒融合——
@@ -49,7 +49,7 @@ function oxcTokens(file) {
 }
 
 function context(buf, bytePos, span = 60) {
-  // 展示用：直接按字节切片解码（非 ASCII 语料下不错位；切断的多字节序列
+  // 展示用：直接按字节切片解码（非 ASCII 样本下不错位；切断的多字节序列
   // 会显示为替换符，仅影响展示不影响判定）
   const a = Math.max(0, bytePos - span);
   const b = Math.min(buf.length, bytePos + span);

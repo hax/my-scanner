@@ -29,9 +29,9 @@ for (const f of readdirSync(reportsDir)) {
 }
 runs.sort((a, b) => a.date.localeCompare(b.date));
 
-// 语料清单单一来源(与 make-report.mjs 同读 tools/corpus-manifest.json):
-// 图表标题用文件名,「语料」一节用 分组/说明/来源(版本+链接)
-const parseSource = (src) => { // 来源串 → {text, url}:GitHub 仓 @ sha、npm 包@版本、raw 文件 @ tag;构造语料无链接
+// 样本清单单一来源(与 make-report.mjs 同读 tools/samples-manifest.json):
+// 图表标题用文件名,「样本」一节用 分组/说明/来源(版本+链接)
+const parseSource = (src) => { // 来源串 → {text, url}:GitHub 仓 @ sha、npm 包@版本、raw 文件 @ tag;构造样本无链接
   if (!src) return null;
   const gh = src.match(/^(https:\/\/github\.com\/\S+) @ ([0-9a-f]{7,40})$/);
   if (gh) return { text: gh[1].replace("https://github.com/", "") + " @ " + gh[2].slice(0, 10), url: gh[1] + "/tree/" + gh[2] };
@@ -41,10 +41,10 @@ const parseSource = (src) => { // 来源串 → {text, url}:GitHub 仓 @ sha、n
   if (raw) return { text: raw[1] + " @ " + raw[2], url: src };
   return /^https?:/.test(src) ? { text: src, url: src } : { text: src, url: null };
 };
-const corpusMeta = {};
+const samplesMeta = {};
 try {
-  const mf = JSON.parse(readFileSync(new URL("../../tools/corpus-manifest.json", import.meta.url), "utf8"));
-  for (const [i, f] of (mf.files ?? []).entries()) corpusMeta[f.path] = { name: f.path.split("/").pop(), note: f.note ?? "", group: f.group ?? "", src: parseSource(f.source), order: i };
+  const mf = JSON.parse(readFileSync(new URL("../../tools/samples-manifest.json", import.meta.url), "utf8"));
+  for (const [i, f] of (mf.files ?? []).entries()) samplesMeta[f.path] = { name: f.path.split("/").pop(), note: f.note ?? "", group: f.group ?? "", src: parseSource(f.source), order: i };
 } catch { /* 缺清单则回退为原始路径 */ }
 
 // 每文件大小/tokens:取自最近一个含该文件的 run(runs 已按日期升序,后者覆盖前者);
@@ -73,14 +73,14 @@ const index = {
   baselines: (() => { for (let i = runs.length - 1; i >= 0; i--) if (runs[i].baselines) return runs[i].baselines; return null; })(),
   // 第三方版本戳(run-rs-bench 自 Cargo.lock + oxc.sha 带入):取最近一个带该字段的 run
   deps: (() => { for (let i = runs.length - 1; i >= 0; i--) if (runs[i].deps) return runs[i].deps; return null; })(),
-  corpus: corpusMeta,
-  corpusStats: fileStats,
+  samples: samplesMeta,
+  samplesStats: fileStats,
   runs: runs.map((r) => ({ sha: r.sha, date: r.date, subject: r.subject, runner: r.runner, channel: r.channel ?? "ci", label: r.label ?? null })),
   series: {},
 };
 const fileNames = [...new Set(runs.flatMap(r => (r.files ?? []).map(f => f.file)))];
 // 展示顺序以 manifest 为单一来源(清单外旧 key 排最后,保持首见序)
-fileNames.sort((a, b) => (corpusMeta[a]?.order ?? 1e9) - (corpusMeta[b]?.order ?? 1e9));
+fileNames.sort((a, b) => (samplesMeta[a]?.order ?? 1e9) - (samplesMeta[b]?.order ?? 1e9));
 for (const file of fileNames) {
   const series = {};
   for (const impl of index.impls) series[impl] = [];
@@ -129,10 +129,10 @@ const html = `<!doctype html>
   h3 { font-size: 1rem; margin: 1rem 0 .1rem; font-weight: 600; }
   .intro { font-size: 1rem; }
   .meta { color: gray; font-size: .88rem; }
-  #impls, #machines, #corpus { border-collapse: collapse; font-size: .95rem; margin: .4rem 0 0; }
-  #impls td, #machines td, #corpus td { padding: .14rem .9rem .14rem 0; vertical-align: top; }
-  #impls td:first-child, #machines td:first-child, #corpus td:first-child { white-space: nowrap; }
-  #corpus td:nth-child(2) { color: gray; white-space: nowrap; }
+  #impls, #machines, #samples { border-collapse: collapse; font-size: .95rem; margin: .4rem 0 0; }
+  #impls td, #machines td, #samples td { padding: .14rem .9rem .14rem 0; vertical-align: top; }
+  #impls td:first-child, #machines td:first-child, #samples td:first-child { white-space: nowrap; }
+  #samples td:nth-child(2) { color: gray; white-space: nowrap; }
   .mode { margin: .2rem 0 .6rem; }
   .mode button { cursor: pointer; padding: .2rem .7rem; margin-right: .3rem; border-radius: 6px; border: 1px solid currentColor; background: transparent; color: inherit; }
   .mode button.on { background: #4b7bec; border-color: #4b7bec; color: #fff; }
@@ -147,7 +147,7 @@ const html = `<!doctype html>
 </head>
 <body>
 <h1>my-scanner 架构矩阵基准</h1>
-<p class="intro">每次 push 跑一轮全变体差分门禁 + 架构矩阵基准，本页汇总 CI 与本机 run。
+<p class="intro">每次 push 跑一轮全变体正确性校验 + 架构矩阵基准，本页汇总 CI 与本机 run。
 纵轴统一为 <code>vs baseline</code> 倍数（yuku v0.10.1 固定快照，&gt;1 即更快）——基线固定不漂，
 由同进程同文件实测带入，CI 与各本机的基线一致，相对倍数跨 run、跨机器均可比
 （绝对吞吐 GB/s 只有同机同 run 内可比，数值见 tooltip）。柱状图左 CI 右本机（同色，本机半透明；纵轴固定 0–2，超出画到图外），
@@ -159,9 +159,9 @@ two_phase→oxc_bitmap、bitmap→oxc_bitmap（同族原型），&gt;1 即我方
 <p class="meta">各机基线同为 yuku v0.10.1 固定快照（版本溯源见上表），倍数口径跨机可比。</p>
 <table id="machines"></table>
 <p class="meta" id="runinfo"></p>
-<h2>语料</h2>
+<h2>样本</h2>
 <p class="meta">大小与 tokens 取自最近一次 run；tokens 以 baseline（yuku v0.10.1 固定快照）计数。</p>
-<table id="corpus"></table>
+<table id="samples"></table>
 <h2>当前对比 · vs baseline</h2>
 <p class="meta" id="bars-meta"></p>
 <div id="bars"></div>
@@ -181,9 +181,9 @@ const DESCR  = {
   bitmap: "自有 · 多位图流水线（oxc_lexer 移植，NEON tbl 位图分类；非 aarch64 通用回退）",
   yuku_old: '第三方 · yuku <a href="https://github.com/yuku-toolchain/yuku/tree/v0.10.1">v0.10.1</a> 固定快照（引入向量化前）——本项目基线，固定不更新',
   yuku_main: "第三方 · yuku 上游主干（跟踪更新，移动才重拉）",
-  swc: "第三方 · swc lexer，决策注入驱动（同一 my-scanner 正则决策集，与 yuku 对拍同口径）",
+  swc: "第三方 · swc lexer，决策注入驱动（同一 my-scanner 正则决策集，与 yuku 对照同口径）",
   oxc: "第三方 · oxc lexer，决策注入驱动（同上）",
-  oxc_bitmap: "第三方 · oxc_lexer 多位图流水线（孵化实验，歧义自决 + spans 门禁；计时含 value lanes；仅 x86_64 SIMD）"
+  oxc_bitmap: "第三方 · oxc_lexer 多位图流水线（孵化实验，歧义自决 + spans 校验；计时含 value lanes；仅 x86_64 SIMD）"
 };
 // 柱状图按架构族分组(baseline 两柱恒为 1.0,与 y=1 虚线互证基线对齐):
 // oxc/swc 与 jump_vec 同族(单阶段+SIMD 长跳跃/字节搜索),故并入 jump_vec 组;
@@ -213,7 +213,7 @@ const allCharts = [];
 
 fetch("reports/index.json").then(r => r.json()).then(idx => {
   const nCi = idx.runs.filter(r => r.channel !== "local").length;
-  document.getElementById("runinfo").textContent = nCi + " CI runs + " + (idx.runs.length - nCi) + " local runs · 最近：" + (idx.runs.at(-1)?.date ?? "") + " · 每次 push 一个点，架构变体语义由差分门禁保证";
+  document.getElementById("runinfo").textContent = nCi + " CI runs + " + (idx.runs.length - nCi) + " local runs · 最近：" + (idx.runs.at(-1)?.date ?? "") + " · 每次 push 一个点，架构变体语义由正确性校验保证";
 
   // ---- 比对者一览(含基线溯源:yuku 版本 sha / 上游 commit 日期,链接到具体 git) ----
   const bl = idx.baselines ?? {};
@@ -268,10 +268,10 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
     "<tr><td><b>" + m[0] + "</b></td><td>" + m[1] + "</td></tr>"
   ).join("");
 
-  // ---- 语料说明(图标题只留文件名,分组/大小/tokens/出处/来源版本与链接集中在此) ----
-  document.getElementById("corpus").innerHTML = Object.keys(idx.series).map(file => {
-    const c = idx.corpus?.[file];
-    const s = idx.corpusStats?.[file];
+  // ---- 样本说明(图标题只留文件名,分组/大小/tokens/出处/来源版本与链接集中在此) ----
+  document.getElementById("samples").innerHTML = Object.keys(idx.series).map(file => {
+    const c = idx.samples?.[file];
+    const s = idx.samplesStats?.[file];
     const src = c?.src;
     const srcHtml = src ? (src.url ? '<a href="' + src.url + '">' + src.text + "</a>" : src.text) : "";
     return "<tr><td><code>" + (c?.name ?? file) + "</code></td><td>" + (c?.group ?? "") + "</td><td>" + (s?.bytes != null ? (s.bytes / 1e6).toFixed(2) + " MB" : "") + "</td><td>" + (s?.tokens != null ? s.tokens.toLocaleString("en-US") : "") + "</td><td>" + (c?.note ?? "") + "</td><td>" + srcHtml + "</td></tr>";
@@ -281,11 +281,11 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
   const shownImpl = impl => impl !== idx.anchor && (mode !== "peer" || idx.peers[impl]); // 锚点不进图(y=1 虚线代表);同族口径只画有第三方参照的实现
   const addH3 = (root, file) => {
     const h = document.createElement("h3");
-    h.textContent = idx.corpus?.[file]?.name ?? file; // 语料描述集中在「语料」一节,图上只留文件名
+    h.textContent = idx.samples?.[file]?.name ?? file; // 样本描述集中在「样本」一节,图上只留文件名
     root.appendChild(h);
   };
 
-  // ---- 柱状图:每语料一组,最近 CI 与本机 run 的基线倍数,左 CI 右本机;纵轴固定 0–2,超出画到图外 ----
+  // ---- 柱状图:每样本一组,最近 CI 与本机 run 的基线倍数,左 CI 右本机;纵轴固定 0–2,超出画到图外 ----
   const barPairs = [];
   if (lastCi != null) barPairs.push({ name: "CI", ri: lastCi, local: false });
   if (lastLocal != null) barPairs.push({ name: localName(idx.runs[lastLocal].label ?? "?"), ri: lastLocal, local: true });
@@ -344,7 +344,7 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
     });
   }
 
-  // ---- 趋势图:每语料一张折线,口径切换;实线 CI,虚线本机(同机相连) ----
+  // ---- 趋势图:每样本一张折线,口径切换;实线 CI,虚线本机(同机相连) ----
   const trendOption = series => {
     const sers = [];
     for (const impl of idx.impls) {
@@ -430,12 +430,12 @@ writeFileSync(join(pubDir, ".nojekyll"), "");
 // 分支自述
 const readme = `# my-scanner 架构矩阵基准报告
 
-每次 push 到 main 触发（\`.github/workflows/bench.yml\`）：全变体差分门禁 →
+每次 push 到 main 触发（\`.github/workflows/bench.yml\`）：全变体正确性校验 →
 架构矩阵基准 → 本分支归档。
 
 在线图表页（GitHub Pages，源 = 本分支）：<https://johnhax.net/my-scanner/>
 
-- [index.html](index.html) — ECharts 图表页：顶部为比对者说明（链接到各 git 仓；yuku 基线版本溯源、swc/oxc/oxc-bitmap 精确版本与链接——crates.io 版本 / oxc 仓 rev）、机器配置（CI runner 与本机，基线同为 yuku v0.10.1 固定快照）与语料说明（大小与 tokens（baseline 计数）、出处、来源版本与链接/构造场景，图上只留文件名）；柱状图为最近一次 CI 与本机 run 的「vs baseline」倍数对比（每语料一张 555px 定宽卡片、随页宽并排；label 45° 斜排；左 CI 右本机、同色本机半透明；纵轴固定 0–2、超出画到图外；柱距 CI/local 0.1、组内对照 0.25、架构族组间 0.5 柱宽，baseline 两柱恒 1.0、与 y=1 虚线互证基线对齐），下方为趋势折线（vs baseline / vs 同族参照两种口径；实线 CI、虚线本机按机器分组、同机相连；基线固定，相对值跨 run、跨机可比）。图表依赖 [vendor/echarts.min.js](vendor/echarts.min.js)（tools/package.json 固定版本）
+- [index.html](index.html) — ECharts 图表页：顶部为比对者说明（链接到各 git 仓；yuku 基线版本溯源、swc/oxc/oxc-bitmap 精确版本与链接——crates.io 版本 / oxc 仓 rev）、机器配置（CI runner 与本机，基线同为 yuku v0.10.1 固定快照）与样本说明（大小与 tokens（baseline 计数）、出处、来源版本与链接/构造场景，图上只留文件名）；柱状图为最近一次 CI 与本机 run 的「vs baseline」倍数对比（每样本一张 555px 定宽卡片、随页宽并排；label 45° 斜排；左 CI 右本机、同色本机半透明；纵轴固定 0–2、超出画到图外；柱距 CI/local 0.1、组内对照 0.25、架构族组间 0.5 柱宽，baseline 两柱恒 1.0、与 y=1 虚线互证基线对齐），下方为趋势折线（vs baseline / vs 同族参照两种口径；实线 CI、虚线本机按机器分组、同机相连；基线固定，相对值跨 run、跨机可比）。图表依赖 [vendor/echarts.min.js](vendor/echarts.min.js)（tools/package.json 固定版本）
 - [reports/](reports/) — 每次 run 的 \`<sha>.md\`（人读报告）与 \`<sha>.json\`（原始数据）；本地提交（bench.sh --submit）为 \`<sha>.local.*\`（机器名不入产物），与 CI 同图并绘
 
 对比口径与架构族谱见仓库 docs/architecture.md。

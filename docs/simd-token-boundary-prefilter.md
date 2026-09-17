@@ -110,7 +110,7 @@ a+++b
 a--*b
 ```
 
-不同语言模式允许使用不同 `OP` 集合；`op_cont_audit.js` 用合法语料分别审计
+不同语言模式允许使用不同 `OP` 集合；`op_cont_audit.js` 用合法样本分别审计
 JS、JSX、TS 和 TSX。
 
 ## UTF-8 与 Unicode whitespace
@@ -371,7 +371,7 @@ classifiedAfter(prev) & classifiedBefore(next)
 2. 该边界由后续扫描保证回填。
 
 因此 nibble 表搜索应直接优化最终 `after × before` 关系，并调用
-`op_cont_audit.js` 或更完整的语法语料验证，而不是分别最小化 `ID`、`OP`
+`op_cont_audit.js` 或更完整的语法样本验证，而不是分别最小化 `ID`、`OP`
 等属性的误报。
 
 ### 输入变换
@@ -486,7 +486,7 @@ NEON `tbl`、AVX-512 byte permute 的能力和吞吐也不同，因此不存在�
 - 初始化成本：表构造应在构建期完成，运行时只加载常量。
 - 稳态吞吐：cycles/byte、GB/s，并包含 bit plane 写出。
 - ASCII identifier 密集、格式化代码、minified 代码、运算符密集、中文、
-  Unicode whitespace 等不同语料。
+  Unicode whitespace 等不同样本。
 - 纯粗筛成本和包含后续候选验证的端到端成本。
 
 总成本近似为：

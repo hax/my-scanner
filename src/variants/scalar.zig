@@ -8,7 +8,7 @@
 //!
 //! 语义层（数字/标点/正则/Unicode 表/模板栈）与两阶段共享同一套函数，
 //! 保证语义修复单点生效；架构层（驱动循环与跳跃函数）本文件自治，
-//! 可独立演化。差分正确性由 compare-tsc（--variant=scalar）在 CI 兜底。
+//! 可独立演化。差分测试由 compare-tsc（--variant=scalar）在 CI 兜底。
 
 const std = @import("std");
 const lexeme_mod = @import("../lexeme.zig");
