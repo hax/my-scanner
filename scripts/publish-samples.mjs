@@ -8,7 +8,7 @@
 // 1. 双向校验 tools/samples-manifest.json 与本地 samples/ 文件集一致
 // 2. 生成派生文件 samples/decisions/** + samples/offsets/**（scripts/gen-derived.mjs,
 //    歧义决策真相 + 坐标修正表,格式见 tools/sample-derived.mjs）
-// 3. 渲染 sha256sums.txt / MANIFEST.md / LICENSES/ 到本地 samples/(保持本地 == 分支;
+// 3. 渲染 sha256sums.txt / README.md / LICENSES/ 到本地 samples/(保持本地 == 分支;
 //    sha256sums 同时覆盖样本文件与派生文件,prepare-samples.sh 现有校验自动生效)
 // 4. 临时目录 clone samples 分支(不存在则孤儿分支起步),同步内容,提交
 // 5. --push 时推送 origin
@@ -115,13 +115,13 @@ mLines.push(
   "  (每个非 ASCII 字符一条的增量表)。只随样本文件字节变;纯 ASCII 样本不生成。",
   "",
 );
-writeFileSync(join(ROOT, "samples/MANIFEST.md"), mLines.join("\n") + "\n");
+writeFileSync(join(ROOT, "samples/README.md"), mLines.join("\n") + "\n");
 
 mkdirSync(join(ROOT, "samples/LICENSES"), { recursive: true });
 for (const name of readdirSync(join(ROOT, "tools/samples-licenses"))) {
   cpSync(join(ROOT, "tools/samples-licenses", name), join(ROOT, "samples/LICENSES", name));
 }
-console.log(`已渲染: samples/sha256sums.txt, samples/MANIFEST.md, samples/LICENSES/ (${rows.length} 个样本文件 + ${derivedCount} 个派生文件)`);
+console.log(`已渲染: samples/sha256sums.txt, samples/README.md, samples/LICENSES/ (${rows.length} 个样本文件 + ${derivedCount} 个派生文件)`);
 
 if (process.argv.includes("--render-only")) {
   console.log("(--render-only,不碰 git)");
@@ -140,8 +140,8 @@ if (!cloned) {
   console.log(`${BRANCH} 分支不存在于 origin,创建孤儿分支`);
   git(["init", "-b", BRANCH, pub]);
 }
-for (const p of ["real", "synthetic", "LICENSES", "offsets", "decisions"]) rmSync(join(pub, p), { recursive: true, force: true });
-for (const p of ["real", "synthetic", "LICENSES", "offsets", "decisions", "MANIFEST.md", "sha256sums.txt"]) {
+for (const p of ["real", "synthetic", "LICENSES", "offsets", "decisions", "MANIFEST.md"]) rmSync(join(pub, p), { recursive: true, force: true });
+for (const p of ["real", "synthetic", "LICENSES", "offsets", "decisions", "README.md", "sha256sums.txt"]) {
   const src = join(ROOT, "samples", p);
   if (existsSync(src)) cpSync(src, join(pub, p), { recursive: true });
 }

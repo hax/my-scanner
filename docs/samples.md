@@ -16,10 +16,10 @@ bench/差分测试样本分两类，分列存放：
   否则从 `samples` 分支拉取并整体重建（幂等）。
 - 更新样本走 `scripts/publish-samples.mjs`：双向校验
   `tools/samples-manifest.json` 与本地文件集一致后，重新生成派生文件
-  （见下节）、渲染 `sha256sums.txt` / `MANIFEST.md` / `LICENSES/`
+  （见下节）、渲染 `sha256sums.txt` / `README.md` / `LICENSES/`
   并提交分支（`--push` 推送）。
 - **语义标签（分组/谱系）的单一来源是主仓 `tools/samples-manifest.json`**；
-  完整 sha256 清单在 samples 分支的 `sha256sums.txt` / `MANIFEST.md`。
+  完整 sha256 清单在 samples 分支的 `sha256sums.txt` / `README.md`。
 - **样本的新增/调整须 hax 审批**（AGENTS.md 流程规则）。
 
 ## 派生文件（decisions / offsets）
