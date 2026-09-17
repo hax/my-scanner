@@ -1,20 +1,23 @@
 # 实验：oxc_lexer 位图流水线移植到 Zig + NEON
 
-状态：**第一轮完成**（2026-09-17）
+状态：**第二轮完成**（2026-09-17；第一轮同日，口径已被 §10.1 修正）
 分支：`exp/oxc-bitmap-neon`（起点 58d3e3c）
 目标：**在 Apple Silicon（NEON）上达到 oxc_lexer（x86_64 AVX2+BMI2）相同的速度**。
 
 **结论速览**：新变体 `bitmap`（`src/variants/bitmap.zig`，oxc 六趟位图
 流水线 × my-scanner 语义层）check.sh 44/44 全绿（4 变体 × 11 语料
-差分）；M3 native 对 CI EPYC 的 oxc_bitmap AVX2 绝对值 **9/11 语料
-达到 0.85x 以上、其中 7 个 ≥0.95 追平或反超**；vs 本机 jump_vec
-6 胜 5 负——胜负倾向与 oxc_bitmap 一致（密语料与 unicode 赢、跳跃
-密集输），但幅度普遍缩水、两处方向翻转（strings.js、typescript.js），
-退化源头已知（compress 未 SIMD 化 + coalesce 每事件贪心），见 §9。
+差分）；vs 本机 jump_vec 6 胜 5 负——胜负倾向与 oxc_bitmap 一致，
+幅度普遍缩水。
 名词：oxc_lexer 是 oxc 主仓孵化的位图流水线实验 crate（bench 矩阵列
 名 oxc_bitmap，口径见 architecture.md「oxc_bitmap」节）；jump_vec 是
 本仓库现有最快的单阶段 SIMD 变体；scalar 是标量基线。「架构性格」
 指语料谱系上的胜负倾向。
+
+**第二轮口径纠正（2026-09-17 晚，详见 §10）**：第一轮的「M3 vs CI
+EPYC 绝对值对照」属跨机绝对值比较，不能作主要结论；「LUT 在
+Zig+NEON 不可用」已被推翻——inline asm `%[name]` 可封装 vqtbl
+（§10.2）。交付物对齐的对比已改走 oxc_lexer aarch64 后端
+（§10.3-§10.5），**当前结论以 §10.6 为准**。
 
 ## 0. 问题定义
 
@@ -343,32 +346,53 @@ disambiguate/lanes/诊断、同一测试套（test262 级）。
 | strings.js | 0.540 | **0.652** | 1.21x | 0.683 | ✗（0.95） |
 | cn-dense.ts | 0.322 | **0.352** | 1.09x | 0.284 | ✓ |
 
-同交付物、同代码的 NEON（M3）vs AVX2（EPYC）绝对速度：**10/11 语料
-追平或反超**（唯一未追平 strings.js 差 5%）。
+上表「NEON ≥ EPYC？」一列是**跨机绝对值对照**（M3 vs CI EPYC，
+单核不同），按 §10.1 口径只能作参照、不能作结论：NEON（M3）在
+10/11 语料不低于 EPYC AVX2（唯一差口 strings.js，0.95）。同机矩阵
+内的合法读数是 NEON/generic 列：aarch64 后端比同代码 generic 后端
+快 1.09-1.43x。跨机的结论性判定见 §10.5 基线倍数。
 
-### 10.5 基线倍数口径（bm/jv，严格标准）
+### 10.5 基线倍数口径（严格标准，结论性口径）
 
-M3 的 jump_vec/yuku 基线本身比 EPYC 强 ~1.5x，所以「相同速度」在
-倍数口径下要求 NEON 版跑出 EPYC 1.5 倍的绝对速度：
+分母唯一且同机：本仓库 jump_vec（同一 bench 驱动；yuku 第三方基线
+仅作旁证，不入分母）。M3 的 jump_vec 基线本身比 EPYC 强约 1.5x
+（中位数），所以「相同速度」在倍数口径下要求 NEON 版跑出 EPYC
+1.5 倍的绝对速度。
 
-| 语料 | bm/jv M3 | bm/jv CI（EPYC） |
-|---|---|---|
-| react.js | **2.81** | 1.54 ✓ |
-| react.min.js | **3.72** | 3.37 ✓ |
-| typescript.js | 1.17 | 1.64 |
-| typescript.min.js | 1.76 | 2.84 |
-| checker.ts | 1.32 | 1.75 |
-| 其余 | 均低于 CI | |
+| 语料 | NEON(M3) | jump_vec(M3) | bm/jv M3 | bm/jv CI | 达成？ |
+|---|---|---|---|---|---|
+| react.js | 1.066 | 0.38* | 2.81 | 1.54 | 表面 ✓ |
+| react.min.js | 0.819 | 0.22~0.46* | 1.78-3.72* | 3.37 | 不可判定（小文件噪声） |
+| typescript.js | 0.739 | 0.63 | 1.17 | 1.64 | ✗ |
+| typescript.min.js | 0.617 | 0.35 | 1.76 | 2.84 | ✗ |
+| checker.ts | 0.964 | 0.73 | 1.32 | 1.75 | ✗ |
+| lib.dom.d.ts | 1.119 | 1.60 | 0.70 | 1.00 | ✗ |
+| mon-entreprise.ts | 0.737 | 0.71 | 1.04 | 1.37 | ✗ |
+| line-comments.js | 1.045 | 2.26 | 0.46 | 0.66 | ✗ |
+| strings.js | 0.652 | 0.98 | 0.67 | 1.25 | ✗ |
+| cn-dense.ts | 0.352 | 1.29 | 0.27 | 0.48 | ✗ |
+| hanzi-chai.ts | 0.269 | 0.52 | 0.52 | 0.81 | ✗ |
 
-倍数口径 2/11 达到（react.js/react.min）。差口的来源：M3 基线强度
-×1.5（绝对速度追平只消耗了这部分红利）+ NEON 版相对退化幅度比
-AVX2 版大（跳跃密集语料尤甚——ovec 32B/步 vs NEON 16B/步、
-compress 的 cvtepu8/vpermd 在 NEON 需多指令展开）。
+*jump_vec 取自第二轮前后的本机 bench（15 轮，§8 同源）；react.min
+（6.4KB）单轮仅数十微秒，jump_vec 两轮测量 0.22-0.46 波动近一倍，
+该语料的倍数判定不可靠。
+
+**结论：基线倍数口径未达成**（1/11 表面达成且为假象——react.js 的
+M3 jump_vec 异常偏弱 0.38 vs CI 0.693，2.81 是分母红利不是分子优势；
+~1.5x 是中位数，逐语料基线强度 0.55x-2.26x 不等，倍数消除的是总体
+主频差，逐语料仍有基线特异性残余）。差口来源：①基线红利 ×1.5 需要
+NEON 版跑出 EPYC 1.5 倍绝对速度；②NEON 版相对退化幅度比 AVX2 版大
+——跳跃密集语料尤甚（AVX2 后端 32B/步 vs NEON 16B/步、compress 的
+cvtepu8/permutevar8x32 在 NEON 需多指令展开；注：32B 化已实证负收
+益，见 §10.7，修复路径不在拉宽步长）。
 
 ### 10.6 结论
 
-- 「达到 oxc-lexer 相同速度」在**同机绝对速度口径**下：达成
-  （10/11 ≥，1 个 0.95）。
+- 原目标「在 Apple Silicon 上达到 oxc_lexer 相同速度」：本机没有
+  同机 AVX2 可对照（Rosetta 仅底线参照，见 §6），结论性口径落在
+  **基线倍数——未达成（§10.5）**。跨机绝对值参照 10/11 不低于
+  EPYC AVX2，说明交付物对齐后 M3 单核不落后于 CI 单核，但不是
+  结论性判据。
 - 在**基线倍数口径**下：未达成（2/11），剩余差距有明确的指令级
   归因（见 §9 未竟事项 + §10.5），构成下一轮的量化目标。
 
@@ -389,8 +413,9 @@ movemask 是合成序列（~9 条/16B），翻倍步长 = 翻倍 movemask 成本
 ### 10.8 第二轮交付清单
 
 - `tools/lexbench-rs/oxc-lexer-neon-aarch64.patch`：oxc_lexer 的
-  aarch64 后端（classify/find/scan/compress 四趟 + cfg 接线，
-  765 行 patch，AVX2 分支原样保留，CI 与 M3 同代码）
+  aarch64 后端（classify/find/scan/compress 四趟 + cfg 接线；
+  coalesce/misc 两趟仍走 generic 标量路径，为后续候选；765 行
+  patch，AVX2 分支原样保留，CI 与 M3 同代码）
 - `scripts/prepare-lexbench.sh`：拉取后自动应用 patch（幂等，
   失效报错）
 - Zig 线：`tbl1` inline asm 封装 + classify nibble LUT（+14% 单
