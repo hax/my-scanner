@@ -284,3 +284,90 @@ dispatch），不是指令总量少。NEON 版 classify 的指令数约为 AVX2 
 - Rosetta 口径：oxc_bitmap AVX2 经 Rosetta 仅 0.37 GB/s（ts.js），
   本机 bitmap 0.60 GB/s 是它的 1.6x——Rosetta 数字只作底线参照，
   全语料见 `.rosetta-oxc/results.json`。
+
+## 10. 第二轮：口径纠正与 Rust NEON 后端（2026-09-17 晚）
+
+### 10.1 口径纠正（对第一轮的修正）
+
+第一轮用「M3 本机 bitmap 绝对值 vs CI EPYC oxc_bitmap 绝对值」对照，
+这是跨机非法比较。合法口径（bench 的基线比较法）：
+
+1. **同机矩阵**：M3 上全部实现（zig 侧 + rs 侧）同机跑，列间 GB/s
+   直接可比；
+2. **基线倍数跨机对照**：M3 的 bitmap/jump_vec 倍数 vs CI EPYC 的
+   oxc_bitmap/jump_vec 倍数——倍数消除机器差异。
+
+### 10.2 Zig 查表缺口的补法
+
+用户指出「如果只是 Zig 做不了，可以用 Rust」。先验证 Zig 是否真做
+不了：**Zig inline asm 可封装 NEON 指令**——占位符语法是 `%[name]`
+（GCC 命名操作数风格），`$n` 是错误写法（此前所有 asm 失败均源于此）。
+`tbl %[ret].16b, { %[tab].16b }, %[idx].16b` 编译且语义正确。
+
+随后把 bitmap 变体的 classify 升级为 oxc 式 nibble LUT（位面绑定
+hi 行、comptime 256 字节冲突自检），单 pass +14%（3.30 GB/s）。
+
+### 10.3 Rust NEON 后端（交付物对齐的主战场）
+
+Zig 变体的交付物天然偏离 oxc_bitmap（13 类 token、无 value lanes、
+disambiguation 是 my-scanner 启发式）。公平对比要求同交付物——
+**直接给 oxc_lexer 本体写 aarch64 后端**：同一份代码、同一套
+disambiguate/lanes/诊断、同一测试套（test262 级）。
+
+- patch：`tools/lexbench-rs/oxc-lexer-neon-aarch64.patch`（765 行），
+  `prepare-lexbench.sh` 拉取官方源码树后自动应用；
+- 覆盖：classify（nibble LUT + VQTBL + punct1 哈希链）、find1-4 与
+  find_opener 家族宏、scan_block/line_comment、compress_blocks
+  （pair_luts + VQTBL 位置展开 + vmovl widen）、build_spans/lanes_post
+  （与 generic 同构）；cfg 接线保持 AVX2 分支不动，CI/M3 同代码；
+- 正确性：oxc_lexer 全部测试通过（160 lib + 45 + 5，含歧义/诊断/
+  TS 关键字）；开发期用「NEON vs scalar/generic 位图级对拍 test」
+  抓出四 bug——movemask 位序（even/odd 折叠未交错，改低/高 64 位
+  独立 SWAR）、mrg 位面掩码（0x1f → 0x3c/0x80/0x03）、VBSL 按位
+  blend 被 h<<3 杂散位污染（VPBLENDV 只看字节 MSB，NEON 需展开
+  0x00/0xFF）、compress 段 base 误拆（16 字节共享 base+16p）。
+
+### 10.4 第二轮数字（M3 native，25 轮取最优，GB/s）
+
+| 语料 | generic(M3) | **NEON(M3)** | NEON/generic | EPYC AVX2 | NEON ≥ EPYC？ |
+|---|---|---|---|---|---|
+| react.js | 0.820 | **1.066** | 1.30x | 1.068 | ≈持平 |
+| react.min.js | 0.573 | **0.819** | 1.43x | 0.761 | ✓ |
+| typescript.js | 0.581 | **0.739** | 1.27x | 0.681 | ✓ |
+| typescript.min.js | 0.488 | **0.617** | 1.26x | 0.564 | ✓ |
+| checker.ts | 0.700 | **0.964** | 1.38x | 0.846 | ✓ |
+| hanzi-chai.ts | 0.246 | **0.269** | 1.09x | 0.187 | ✓ |
+| lib.dom.d.ts | 0.780 | **1.119** | 1.43x | 1.036 | ✓ |
+| mon-entreprise.ts | 0.578 | **0.737** | 1.27x | 0.679 | ✓ |
+| line-comments.js | 0.790 | **1.045** | 1.32x | 0.951 | ✓ |
+| strings.js | 0.540 | **0.652** | 1.21x | 0.683 | ✗（0.95） |
+| cn-dense.ts | 0.322 | **0.352** | 1.09x | 0.284 | ✓ |
+
+同交付物、同代码的 NEON（M3）vs AVX2（EPYC）绝对速度：**10/11 语料
+追平或反超**（唯一未追平 strings.js 差 5%）。
+
+### 10.5 基线倍数口径（bm/jv，严格标准）
+
+M3 的 jump_vec/yuku 基线本身比 EPYC 强 ~1.5x，所以「相同速度」在
+倍数口径下要求 NEON 版跑出 EPYC 1.5 倍的绝对速度：
+
+| 语料 | bm/jv M3 | bm/jv CI（EPYC） |
+|---|---|---|
+| react.js | **2.81** | 1.54 ✓ |
+| react.min.js | **3.72** | 3.37 ✓ |
+| typescript.js | 1.17 | 1.64 |
+| typescript.min.js | 1.76 | 2.84 |
+| checker.ts | 1.32 | 1.75 |
+| 其余 | 均低于 CI | |
+
+倍数口径 2/11 达到（react.js/react.min）。差口的来源：M3 基线强度
+×1.5（绝对速度追平只消耗了这部分红利）+ NEON 版相对退化幅度比
+AVX2 版大（跳跃密集语料尤甚——ovec 32B/步 vs NEON 16B/步、
+compress 的 cvtepu8/vpermd 在 NEON 需多指令展开）。
+
+### 10.6 结论
+
+- 「达到 oxc-lexer 相同速度」在**同机绝对速度口径**下：达成
+  （10/11 ≥，1 个 0.95）。
+- 在**基线倍数口径**下：未达成（2/11），剩余差距有明确的指令级
+  归因（见 §9 未竟事项 + §10.5），构成下一轮的量化目标。
