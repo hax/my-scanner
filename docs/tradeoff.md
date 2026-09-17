@@ -14,7 +14,6 @@
 
 | # | 输入形态 | 现状 | 期望行为 | 备注 |
 | --- | --- | --- | --- | ---|
-| L2 | 字符串行继续 + CRLF 行尾（`"...\` + `\r\n`） | `\`+CRLF 只跳过 `\r`，随后的 `\n` 被当裸换行，合法字符串被截断为 illegal | `\`+CRLF 是合法 LineContinuation | LF 行尾的行继续正常；待修 bug（非 tradeoff），代码内有 TODO |
 | L3 | legacy 八进制 `0755`、非法数字-标识符邻接 `3in`、空十六进制 `0x`、指数无数字 `1.e` | 均按容错策略产出边界近似合理的 token（`0755` 整体为 number、`3in` 拆成 number+identifier），无语义错误标记 | tsc 记错误 flag 并报诊断 | 「不产错误诊断」非目标（见 [goals.md](goals.md)）的直接结果；token 边界基本一致 |
 
 ### 维护说明

@@ -152,7 +152,7 @@ pub fn scan(allocator: std.mem.Allocator, src: []const u8) !Result {
     defer cls.starts.deinit(allocator);
     errdefer allocator.free(cls.line_breaks);
 
-    try consume(&tokens, allocator, src, &cls.starts);
+    try consume(&tokens, allocator, src, &cls.starts, cls.line_breaks);
 
     return .{
         .tokens = try tokens.toOwnedSlice(allocator),
@@ -171,7 +171,7 @@ pub fn scanInto(
     var cls = try simd.classifyTokenStarts(allocator, src);
     defer cls.starts.deinit(allocator);
     defer allocator.free(cls.line_breaks);
-    try consume(tokens, allocator, src, &cls.starts);
+    try consume(tokens, allocator, src, &cls.starts, cls.line_breaks);
 }
 
 /// 模板上下文栈：template_head 压一层（每个帧代表"在某模板的一个子表达
@@ -231,41 +231,34 @@ pub const Scan = struct {
     ws: bool = false,
 };
 
-/// [from, to) 内是否含行终止符（\n、\r、U+2028、U+2029；\v \f 只是空白，
-/// 与 LineIndex 口径一致）。短区间标量（空白 run、短注释占多数），
-/// 长区间 SIMD 块扫（长块注释体的检测是 JSDoc 密集语料上的主要成本）；
-/// 含 0xE2 的块标量复查 U+2028/29。
-pub fn hasLineTerminator(src: []const u8, from: usize, to: usize) bool {
-    var i = from;
-    const head = @min(from + 8, to);
-    while (i < head) : (i += 1) {
-        if (lineTerminatorAt(src, i, to)) return true;
-    }
-    while (i + simd.block_size <= to) : (i += simd.block_size) {
-        const chunk = simd.load(src, i);
-        const hit = simd.newlineMask(chunk) |
-            @as(simd.Mask, @bitCast(chunk == @as(simd.Chunk, @splat('\r'))));
-        if (hit != 0) return true;
-        // U+2028/29 = E2 80 A8/A9：只在含 0xE2 的块里标量复查
-        if (@reduce(.Or, chunk == @as(simd.Chunk, @splat(0xE2)))) {
-            var j = i;
-            const end = i + simd.block_size;
-            while (j < end) : (j += 1) {
-                if (lineTerminatorAt(src, j, to)) return true;
-            }
-        }
-    }
-    while (i < to) : (i += 1) {
-        if (lineTerminatorAt(src, i, to)) return true;
-    }
-    return false;
+/// unicode whitespace 码点是否行终止符（U+2028/U+2029 = E2 80 A8/A9；
+/// 其余 ws 码点不是）。调用方保证 start 处是完整 ws 码点
+/// （unicodeWhitespaceLen 已验证，读取不越界）。
+pub inline fn wsIsLineTerminator(src: []const u8, start: usize) bool {
+    return src[start] == 0xE2 and src[start + 1] == 0x80 and
+        (src[start + 2] == 0xA8 or src[start + 2] == 0xA9);
 }
 
-inline fn lineTerminatorAt(src: []const u8, i: usize, to: usize) bool {
-    const c = src[i];
-    if (c == '\n' or c == '\r') return true;
-    return c == 0xE2 and i + 2 < to and src[i + 1] == 0x80 and
-        (src[i + 2] == 0xA8 or src[i + 2] == 0xA9);
+/// classify 的换行位图上查 [from, to) 是否含行终止符
+/// （\n、孤立 \r、U+2028/U+2029，与 LineIndex 同口径；位标记在行终止
+/// 字节上）。两阶段引擎的 newline_before 检测全部走这里——位图是
+/// classify 副产品，避免对空白 run / 注释体的二次扫描（单阶段变体
+/// 没有位图，走扫描融合版 skipWhitespace/findBlockCommentEnd）。
+fn breaksInRange(line_breaks: []const u32, from: usize, to: usize) bool {
+    if (from >= to) return false;
+    const first = from / simd.block_size;
+    const last = (to - 1) / simd.block_size;
+    var b = first;
+    while (b <= last) : (b += 1) {
+        var m = line_breaks[b];
+        if (b == first) m &= @as(u32, std.math.maxInt(u32)) << @intCast(from % simd.block_size);
+        if (b == last) {
+            const hi = (to - 1) % simd.block_size;
+            if (hi < simd.block_size - 1) m &= (@as(u32, 1) << @intCast(hi + 1)) - 1;
+        }
+        if (m != 0) return true;
+    }
+    return false;
 }
 
 /// 阶段 2：块内迭代候选位，贪心消费。lexeme 区间内的假起点用
@@ -281,6 +274,7 @@ fn consume(
     allocator: std.mem.Allocator,
     src: []const u8,
     starts: *const simd.TokenStarts,
+    line_breaks: []const u32,
 ) !void {
     var pos: usize = 0;
     var prev_kind: ?LexemeKind = null; // 上一个显著 lexeme，供 `/` 判别
@@ -308,7 +302,7 @@ fn consume(
             const start = bi * simd.block_size + @as(usize, @ctz(m));
             m &= m - 1;
             if (start < pos) continue; // 上一个 lexeme 已越过该假候选
-            if (start > pos and !nl_before) nl_before = hasLineTerminator(src, pos, start);
+            if (start > pos and !nl_before) nl_before = breaksInRange(line_breaks, pos, start);
             const c0 = src[start];
             const s = blk: {
                 if (c0 == '/' and start + 1 < src.len) {
@@ -320,8 +314,8 @@ fn consume(
                     }
                     if (n == '*') {
                         if (simd.findBlockCommentEnd(src, start + 2)) |end| {
-                            if (!nl_before) nl_before = hasLineTerminator(src, start, end);
-                            pos = end;
+                            if (!nl_before) nl_before = breaksInRange(line_breaks, start, end.end);
+                            pos = end.end;
                             continue;
                         }
                         // 未闭合块注释：吞掉余下全部，illegal 落盘（错误可见）
@@ -331,7 +325,7 @@ fn consume(
                 break :blk scanAt(src, start, prev_kind, prev_text, prev2_text, &tpl);
             };
             if (s.ws) { // unicode whitespace：跳过，顺带置 flag
-                if (!nl_before) nl_before = hasLineTerminator(src, start, s.end);
+                if (!nl_before) nl_before = breaksInRange(line_breaks, start, s.end);
                 pos = s.end;
                 continue;
             }
@@ -343,7 +337,8 @@ fn consume(
                 .end = @intCast(s.end),
             });
             nl_before = false;
-            tpl.track(s.kind, src[start]);
+            // 栈空且非 head 时 track 必为 no-op，短路省掉 switch（语义同）
+            if (tpl.len > 0 or s.kind == .template_head) tpl.track(s.kind, src[start]);
             prev2_text = prev_text;
             prev_text = src[start..s.end];
             prev_kind = s.kind;
@@ -352,7 +347,7 @@ fn consume(
     // 尾部空白不是候选起点，pos 可能落后于 src.len：补一次行终止符检测
     // （单阶段变体的尾部 run 在循环内自然走到，这里需要显式补），
     // eof 固定 start == end == src.len
-    if (src.len > pos and !nl_before) nl_before = hasLineTerminator(src, pos, src.len);
+    if (src.len > pos and !nl_before) nl_before = breaksInRange(line_breaks, pos, src.len);
     try tokens.append(allocator, .{
         .kind = .eof,
         .flags = if (nl_before) lexeme_mod.flag_newline_before else 0,
@@ -372,7 +367,9 @@ pub inline fn scanAt(
     tpl: *TemplateStack,
 ) Scan {
     const s = tokenAt(src, start, prev_kind, prev_text, prev2_text);
-    if (s.kind == .punct and src[start] == '}' and tpl.closesTemplate()) {
+    // 栈空（不在任何模板内）时短路全部模板逻辑：模板-free 文件每个
+    // punct 只付一次比较（曾按 kind/字节顺序判，punct 需两次）
+    if (tpl.len > 0 and s.kind == .punct and src[start] == '}' and tpl.closesTemplate()) {
         return scanTemplatePart(src, start);
     }
     return s;
@@ -477,9 +474,12 @@ fn scanString(src: []const u8, start: usize, quote: u8) Scan {
             return .{ .kind = .string, .end = idx + 1 };
         }
         if (c == '\\') {
-            // TODO: `\`+CRLF 时这里只跳 2 字节（\ 与 \r），随后的 \n 命中
-            // stop mask 被当裸换行，合法行继续被截断为 illegal（LF 行尾正常）
-            i = idx + 2;
+            // `\`+CRLF 是合法行继续：跳 3 字节（`\`+LF / `\`+孤立 \r 跳 2）
+            if (idx + 2 < src.len and src[idx + 1] == '\r' and src[idx + 2] == '\n') {
+                i = idx + 3;
+            } else {
+                i = idx + 2;
+            }
             continue;
         }
         // 裸换行：非法字符串，吞到行尾当 illegal，容错继续
@@ -862,30 +862,49 @@ pub fn skipQuoted(src: []const u8, quote_at: usize) usize {
     var i = quote_at + 1;
     while (i < src.len) {
         if (src[i] == '\\') {
-            i += 2;
+            // `\`+CRLF 行继续跳 3 字节（同 scanString）
+            if (i + 2 < src.len and src[i + 1] == '\r' and src[i + 2] == '\n') {
+                i += 3;
+            } else {
+                i += 2;
+            }
             continue;
         }
-        if (src[i] == quote or src[i] == '\n') return i + 1;
+        if (src[i] == quote or src[i] == '\n' or src[i] == '\r') return i + 1;
         i += 1;
     }
     return i;
 }
 
+/// 找行终止符（\n、\r、U+2028/U+2029）的位置：行注释/shebang/非法恢复
+/// 的终点。此前只找 \n——孤立 \r 与 U+2028/29 同为 spec 行终止符，
+/// 行注释与非法字符串应在它们处收尾（tsc 同口径；顺带统一了三变体
+/// newline_before flag 的口径：注释体按构造不含行终止符）。
+/// SIMD 定位候选字节（\n|\r|0xE2），0xE2 标量确证 E2 80 A8/A9。
 pub fn lineEnd(src: []const u8, from: usize) usize {
-    // SIMD 找行尾（行注释/shebang/非法恢复路径）。此前是标量逐字节循环，
-    // 行注释密集语料上的明显遗漏。
     var i = from;
     while (i < src.len) {
         if (src.len - i >= simd.block_size) {
             const chunk = simd.load(src, i);
-            const nl = simd.newlineMask(chunk);
-            if (nl == 0) {
+            const cand = simd.newlineMask(chunk) |
+                @as(simd.Mask, @bitCast(chunk == @as(simd.Chunk, @splat('\r')))) |
+                @as(simd.Mask, @bitCast(chunk == @as(simd.Chunk, @splat(0xE2))));
+            if (cand == 0) {
                 i += simd.block_size;
                 continue;
             }
-            return i + @as(usize, @ctz(nl));
+            const idx = i + @as(usize, @ctz(cand));
+            if (src[idx] != 0xE2) return idx;
+            // U+2028/U+2029 = E2 80 A8/A9（跨块悬挂由逐字节路径兜底）
+            if (idx + 2 < src.len and src[idx + 1] == 0x80 and
+                (src[idx + 2] == 0xA8 or src[idx + 2] == 0xA9)) return idx;
+            i = idx + 1;
+            continue;
         }
-        if (src[i] == '\n') return i;
+        const c = src[i];
+        if (c == '\n' or c == '\r') return i;
+        if (c == 0xE2 and i + 2 < src.len and src[i + 1] == 0x80 and
+            (src[i + 2] == 0xA8 or src[i + 2] == 0xA9)) return i;
         i += 1;
     }
     return i;
@@ -976,6 +995,32 @@ test "字符串与转义" {
         .{ .string, "\"a\\\"b\"" },
         .{ .punct, "+" },
         .{ .string, "'c\\'d'" },
+        .{ .eof, "" },
+    });
+}
+
+test "字符串行继续（L2 修复：\\ + CRLF 不再截断）" {
+    // `\`+CRLF 是合法 LineContinuation：此前只跳 2 字节（\ 与 \r），随后的
+    // \n 命中 stop mask 被当裸换行，合法字符串被截断为 illegal
+    try expectTokens("\"ab\\\r\ncd\" + e", &.{
+        .{ .string, "\"ab\\\r\ncd\"" },
+        .{ .punct, "+" },
+        .{ .identifier, "e" },
+        .{ .eof, "" },
+    });
+    // `\`+孤立 \r 同样是行继续（跳 2 字节）
+    try expectTokens("\"ab\\\rcd\"", &.{
+        .{ .string, "\"ab\\\rcd\"" },
+        .{ .eof, "" },
+    });
+    // `\`+LF（原有行为不变）
+    try expectTokens("\"ab\\\ncd\"", &.{
+        .{ .string, "\"ab\\\ncd\"" },
+        .{ .eof, "" },
+    });
+    // 行继续后字符串未闭合仍按 illegal 容错
+    try expectTokens("\"ab\\\r\ncd", &.{
+        .{ .illegal, "\"ab\\\r\ncd" },
         .{ .eof, "" },
     });
 }
@@ -1191,6 +1236,18 @@ test "newline_before flag（trivia 不落盘，换行压成 1 bit）" {
     try expectNewlineFlags("a\xc2\xa0b", &.{ .{ 0, false }, .{ 3, false } });
     // shebang 自身无 flag，其后 lexeme 有
     try expectNewlineFlags("#!/usr/bin/env node\nx", &.{ .{ 0, false }, .{ 20, true } });
+    // 行注释在孤立 \r / U+2028 处收尾（spec 行终止符；tsc 同口径），
+    // 后续字节的 flag 由 ws run 给出
+    try expectTokens("// a\rb", &.{
+        .{ .identifier, "b" },
+        .{ .eof, "" },
+    });
+    try expectTokens("// a\xe2\x80\xa8b", &.{
+        .{ .identifier, "b" },
+        .{ .eof, "" },
+    });
+    try expectNewlineFlags("// a\rb", &.{.{ 5, true }});
+    try expectNewlineFlags("// a\xe2\x80\xa8b", &.{.{ 7, true }});
     // 文件开头的换行置 flag；尾部换行归 eof
     try expectNewlineFlags("\na \n", &.{ .{ 1, true }, .{ 4, true } });
     // 模板文本内部的换行不算（在 lexeme 体内不在 trivia）

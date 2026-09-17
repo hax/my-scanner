@@ -76,23 +76,36 @@ pub inline fn templateStopMask(chunk: Chunk) Mask {
     return @bitCast(q | esc | dollar);
 }
 
-/// 定位从 from 起下一个 `*/`（返回其 **后一位**），找不到返回 null。
+/// 块注释扫描结果：end 是 `*/` 的后一位；saw_lf 表示注释体内是否含
+/// 行终止符（\n、\r；U+2028/29 由调用方按需另查——位图口径见
+/// scanner.breaksInRange / wsIsLineTerminator）。
+pub const BlockCommentEnd = struct { end: usize, saw_lf: bool };
+
+/// 定位从 from 起下一个 `*/`，找不到返回 null。
 ///
 /// 思路：`slash_mask & (star_mask << 1)` 即"前面是 `*` 的 `/`"，
 /// 一条位逻辑同时检查 32 个位置。跨块边界（上一块末字节是 `*`、
-/// 本块首字节是 `/`）用 carry 位衔接。
-pub fn findBlockCommentEnd(src: []const u8, from: usize) ?usize {
+/// 本块首字节是 `/`）用 carry 位衔接。换行检测融合同一趟扫描
+/// （每块 2 条向量比较，省掉对注释体的二次扫描）；close 命中时
+/// 只计 `*/` 之前的字节，尾随内容不污染 saw_lf。
+pub fn findBlockCommentEnd(src: []const u8, from: usize) ?BlockCommentEnd {
     var i = from;
     var carry: Mask = 0; // 上一块的最后一个字节是否为 '*'
+    var saw_lf = false;
     while (i < src.len) {
         const chunk = load(src, i);
         const star: Mask = @bitCast(chunk == splat('*'));
         const slash: Mask = @bitCast(chunk == splat('/'));
         const close = slash & ((star << 1) | carry);
+        const term = newlineMask(chunk) | @as(Mask, @bitCast(chunk == splat('\r')));
         if (close != 0) {
-            // padding 区不可能是 '/'，命中位必在真实字节里
-            return i + @as(usize, @ctz(close)) + 1;
+            // padding 区不可能是 '/'，命中位必在真实字节里。
+            // 换行只算到 `*/` 为止（`/ 右侧的内容不属于注释体）
+            const stop: u5 = @intCast(@ctz(close));
+            const prefix = @as(Mask, std.math.maxInt(Mask)) >> @as(u5, @intCast(block_size - 1 - stop));
+            return .{ .end = i + @as(usize, stop) + 1, .saw_lf = saw_lf or ((term & prefix) != 0) };
         }
+        saw_lf = saw_lf or (term != 0);
         carry = star >> (block_size - 1);
         i += block_size;
     }
@@ -651,15 +664,25 @@ test "findBlockCommentEnd 各种对齐（含跨块边界）" {
         const comment = "/* yy */ tail";
         @memcpy(src_buf[pad..][0..comment.len], comment);
         const src = src_buf[0 .. pad + comment.len];
-        const end = findBlockCommentEnd(src, pad + 2).?;
-        try testing.expectEqual(pad + "/* yy */".len, end);
+        const hit = findBlockCommentEnd(src, pad + 2).?;
+        try testing.expectEqual(pad + "/* yy */".len, hit.end);
+        try testing.expect(!hit.saw_lf); // 'x' 与 " yy " 均无换行
+    }
+    // 注释体内的换行只计到 `*/` 为止，尾随换行不污染 saw_lf
+    {
+        const src = "/* a\nb */   \n   x";
+        const hit = findBlockCommentEnd(src, 2).?;
+        try testing.expectEqual(@as(usize, 9), hit.end);
+        try testing.expect(hit.saw_lf);
+        const hit2 = findBlockCommentEnd("/* ab */   \n   x", 2).?;
+        try testing.expect(!hit2.saw_lf); // 换行在 `*/` 之后
     }
 }
 
 test "findBlockCommentEnd 未闭合" {
-    try testing.expectEqual(@as(?usize, null), findBlockCommentEnd("/* nope", 2));
-    try testing.expectEqual(@as(?usize, null), findBlockCommentEnd("", 0));
-    try testing.expectEqual(@as(?usize, null), findBlockCommentEnd("a */", 3));
+    try testing.expectEqual(@as(?BlockCommentEnd, null), findBlockCommentEnd("/* nope", 2));
+    try testing.expectEqual(@as(?BlockCommentEnd, null), findBlockCommentEnd("", 0));
+    try testing.expectEqual(@as(?BlockCommentEnd, null), findBlockCommentEnd("a */", 3));
 }
 
 test "countNewlines" {

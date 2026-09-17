@@ -25,20 +25,33 @@ const TemplateStack = scanner.TemplateStack;
 
 // -- 标量跳跃函数（对应两阶段里的 SIMD 版）--------------------------------
 
-/// 找 '\n'（行注释/shebang/非法恢复的终点）。
+/// 找行终止符（行注释/shebang/非法恢复的终点）：\n、\r、U+2028/U+2029
+/// （与 scanner.lineEnd 同口径的标量版）。
 fn lineEndScalar(src: []const u8, from: usize) usize {
     var i = from;
     while (i < src.len) : (i += 1) {
-        if (src[i] == '\n') return i;
+        const c = src[i];
+        if (c == '\n' or c == '\r') return i;
+        if (c == 0xE2 and i + 2 < src.len and src[i + 1] == 0x80 and
+            (src[i + 2] == 0xA8 or src[i + 2] == 0xA9)) return i;
     }
     return i;
 }
 
-/// 从 from 起找下一个 `*/`（返回其后一位），找不到 null。逐字节。
-fn findBlockCommentEndScalar(src: []const u8, from: usize) ?usize {
+/// 块注释扫描结果（findBlockCommentEnd 的标量版）：end 是 `*/` 后一位；
+/// saw_lf 表示注释体内是否含 \n/\r（U+2028/29 由主循环统一经
+/// 空白 run 或 ws 标记判定，不在此重复）。
+const BcEnd = struct { end: usize, saw_lf: bool };
+
+/// 从 from 起找下一个 `*/`（返回其后一位），找不到 null。逐字节，
+/// 换行检测融合同一趟。
+fn findBlockCommentEndScalar(src: []const u8, from: usize) ?BcEnd {
     var i = from;
+    var saw_lf = false;
     while (i + 1 < src.len) : (i += 1) {
-        if (src[i] == '*' and src[i + 1] == '/') return i + 2;
+        const c = src[i];
+        saw_lf = saw_lf or (c == '\n' or c == '\r');
+        if (c == '*' and src[i + 1] == '/') return .{ .end = i + 2, .saw_lf = saw_lf };
     }
     return null;
 }
@@ -50,7 +63,12 @@ fn scanStringScalar(src: []const u8, start: usize, quote: u8) Scan {
         const c = src[i];
         if (c == quote) return .{ .kind = .string, .end = i + 1 };
         if (c == '\\') {
-            i += 2;
+            // `\`+CRLF 是合法行继续：跳 3 字节（`\`+LF / `\`+孤立 \r 跳 2）
+            if (i + 2 < src.len and src[i + 1] == '\r' and src[i + 2] == '\n') {
+                i += 3;
+            } else {
+                i += 2;
+            }
             continue;
         }
         if (c == '\n' or c == '\r') {
@@ -205,7 +223,8 @@ inline fn scanAtScalar(
     tpl: *TemplateStack,
 ) Scan {
     const s = tokenAtScalar(src, start, prev_kind, prev_text, prev2_text);
-    if (s.kind == .punct and src[start] == '}' and tpl.closesTemplate()) {
+    // 栈空（不在任何模板内）时短路全部模板逻辑（同 scanner.scanAt）
+    if (tpl.len > 0 and s.kind == .punct and src[start] == '}' and tpl.closesTemplate()) {
         return scanTemplatePartScalar(src, start);
     }
     return s;
@@ -249,15 +268,15 @@ pub fn scanInto(
         try tokens.append(allocator, .{ .kind = .shebang, .start = 0, .end = @intCast(s.end) });
     }
     while (pos < src.len) {
-        // 空白 run（ASCII + Unicode ws）整段跳过，顺带置 flag
-        const ws_to = common.skipWhitespace(src, pos);
-        if (ws_to > pos) {
-            if (!nl_before) nl_before = scanner.hasLineTerminator(src, pos, ws_to);
-            pos = ws_to;
+        // 空白 run（ASCII + Unicode ws）整段跳过，换行检测融合同一趟
+        const run = common.skipWhitespace(src, pos);
+        if (run.end > pos) {
+            if (!nl_before) nl_before = run.saw_lf;
+            pos = run.end;
             if (pos >= src.len) break;
         }
-        // 注释（标量快跳；块注释体检测行终止符置 flag；未闭合块注释
-        // 落到统一落盘路径产 illegal，错误可见）
+        // 注释（标量快跳；块注释的换行检测融合进查找同一趟；未闭合块
+        // 注释落到统一落盘路径产 illegal，错误可见）
         const c0 = src[pos];
         if (c0 == '/' and pos + 1 < src.len) {
             const n = src[pos + 1];
@@ -267,8 +286,8 @@ pub fn scanInto(
             }
             if (n == '*') {
                 if (findBlockCommentEndScalar(src, pos + 2)) |end| {
-                    if (!nl_before) nl_before = scanner.hasLineTerminator(src, pos, end);
-                    pos = end;
+                    if (!nl_before) nl_before = end.saw_lf;
+                    pos = end.end;
                     continue;
                 }
             }
@@ -287,7 +306,8 @@ pub fn scanInto(
             .end = @intCast(s.end),
         });
         nl_before = false;
-        tpl.track(s.kind, src[start]);
+        // 栈空且非 head 时 track 必为 no-op，短路省掉 switch（语义同）
+        if (tpl.len > 0 or s.kind == .template_head) tpl.track(s.kind, src[start]);
         prev2_text = prev_text;
         prev_text = src[start..s.end];
         prev_kind = s.kind;

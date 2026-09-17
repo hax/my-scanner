@@ -86,15 +86,17 @@ fn consumeDirect(
     while (pos < src.len) {
         const code = scanner.dispatch_table[src[pos]];
         if (code & scanner.Dispatch.whitespace != 0) {
-            const to = skipWhitespace(src, pos + 1);
-            if (!nl_before) nl_before = scanner.hasLineTerminator(src, pos, to);
-            pos = to;
+            const c = src[pos];
+            const run = skipWhitespace(src, pos + 1);
+            // run 不含首字节的换行事实（skipWhitespace 从 pos+1 起扫）
+            if (!nl_before) nl_before = c == '\n' or c == '\r' or run.saw_lf;
+            pos = run.end;
             continue;
         }
         // 注释快跳（不构造 lexeme 直接跳，对齐 yuku 的
         // skipWsAndComments——行注释语料上省掉每注释一次的构造与分发）。
-        // 块注释体检测行终止符置 flag；未闭合块注释落到统一落盘路径产
-        // illegal（错误可见）
+        // 块注释的换行检测融合进 findBlockCommentEnd 同一趟扫描；
+        // 未闭合块注释落到统一落盘路径产 illegal（错误可见）
         if (code & scanner.Dispatch.slash != 0 and pos + 1 < src.len) {
             const n = src[pos + 1];
             if (n == '/') {
@@ -103,8 +105,8 @@ fn consumeDirect(
             }
             if (n == '*') {
                 if (simd.findBlockCommentEnd(src, pos + 2)) |end| {
-                    if (!nl_before) nl_before = scanner.hasLineTerminator(src, pos, end);
-                    pos = end;
+                    if (!nl_before) nl_before = end.saw_lf;
+                    pos = end.end;
                     continue;
                 }
             }
@@ -116,7 +118,7 @@ fn consumeDirect(
         const start = pos;
         const s = scanner.scanAt(src, start, prev_kind, prev_text, prev2_text, &tpl);
         if (s.ws) { // unicode whitespace：跳过，顺带置 flag
-            if (!nl_before) nl_before = scanner.hasLineTerminator(src, start, s.end);
+            if (!nl_before) nl_before = scanner.wsIsLineTerminator(src, start);
             pos = s.end;
             continue;
         }
@@ -128,7 +130,8 @@ fn consumeDirect(
             .end = @intCast(s.end),
         });
         nl_before = false;
-        tpl.track(s.kind, src[start]);
+        // 栈空且非 head 时 track 必为 no-op，短路省掉 switch（语义同）
+        if (tpl.len > 0 or s.kind == .template_head) tpl.track(s.kind, src[start]);
         prev2_text = prev_text;
         prev_text = src[start..s.end];
         prev_kind = s.kind;
@@ -146,32 +149,47 @@ inline fn isAsciiWs(c: u8) bool {
     return c == ' ' or (c >= 0x09 and c <= 0x0D);
 }
 
+/// ASCII 空白 run 扫描结果：end 是 run 终点；saw_lf 表示 run 内是否含
+/// 行终止符（\n、\r；U+2028/29 不走此路径——它们在主循环经 ws 标记
+/// 单独判定，见 scanner.wsIsLineTerminator）。
+const WsRun = struct { end: usize, saw_lf: bool };
+
 /// ASCII 空白 run 的结尾（from 处可以是任意字节，按实际跳过）。
 /// 短 run 逐字节展开（格式化代码的空白多为 0-2 字节：紧跟 lexeme、
-/// 单空格或换行+缩进），长 run 转 SIMD 块扫。Unicode whitespace 不在
-/// 此处理：它在主循环经 scanAt → scanNonAscii 的 ws 标记跳过，
-/// 语义与两阶段一致。
-fn skipWhitespace(src: []const u8, from: usize) usize {
+/// 单空格或换行+缩进），长 run 转 SIMD 块扫。换行检测融合同一趟
+/// 扫描（省掉对 run 的二次扫描）；SIMD 块命中 run 终点时换行位
+/// 只计 ws 前缀，尾随的非空白不污染 saw_lf。
+fn skipWhitespace(src: []const u8, from: usize) WsRun {
     var i = from;
+    var saw_lf = false;
     inline for (0..4) |_| {
-        if (i >= src.len or !isAsciiWs(src[i])) return i;
+        if (i >= src.len or !isAsciiWs(src[i])) return .{ .end = i, .saw_lf = saw_lf };
+        saw_lf = saw_lf or (src[i] == '\n' or src[i] == '\r');
         i += 1;
     }
     while (i < src.len) {
         if (src.len - i >= simd.block_size) {
-            const inv = ~simd.whitespaceMask(simd.load(src, i));
+            const chunk = simd.load(src, i);
+            const inv = ~simd.whitespaceMask(chunk);
+            const term = simd.newlineMask(chunk) |
+                @as(simd.Mask, @bitCast(chunk == @as(simd.Chunk, @splat('\r'))));
             if (inv == 0) {
+                saw_lf = saw_lf or (term != 0);
                 i += simd.block_size;
                 continue;
             }
-            i += @as(usize, @ctz(inv));
+            const stop: u5 = @intCast(@ctz(inv));
+            const ws_prefix = (@as(simd.Mask, 1) << stop) - 1;
+            saw_lf = saw_lf or ((term & ws_prefix) != 0);
+            i += stop;
             break;
         }
         if (isAsciiWs(src[i])) {
+            saw_lf = saw_lf or (src[i] == '\n' or src[i] == '\r');
             i += 1;
         } else break;
     }
-    return i;
+    return .{ .end = i, .saw_lf = saw_lf };
 }
 
 // -- 测试：与两阶段交叉验证 ---------------------------------------------------
