@@ -10,11 +10,12 @@ pub const simd = @import("simd.zig");
 pub const scanner = @import("scanner.zig");
 
 /// 架构变体：与 two_phase 共享语义层，各自独立演化驱动与跳跃策略。
-/// 每个 scan/scanInto 与 scanner 同签名，可互换驱动（bench/差分测试/CLI）。
+/// 每个变体一个目录（root.zig 为入口），scan/scanInto 与 scanner 同签名，
+/// 可互换驱动（bench/差分测试/CLI）。
 pub const variants = struct {
-    pub const scalar = @import("variants/scalar.zig");
-    pub const jump_vec = @import("variants/jump_vec.zig");
-    pub const bitmap = @import("variants/bitmap.zig");
+    pub const scalar = @import("variants/scalar/root.zig");
+    pub const jump_vec = @import("variants/jump_vec/root.zig");
+    pub const bitmap = @import("variants/bitmap/root.zig");
 };
 
 pub const Variant = enum {
@@ -59,8 +60,19 @@ test {
     _ = @import("token.zig");
     _ = @import("simd.zig");
     _ = @import("scanner.zig");
-    _ = @import("variants/scalar.zig");
-    _ = @import("variants/jump_vec.zig");
-    _ = @import("variants/bitmap.zig");
+    _ = @import("variants/scalar/root.zig");
+    _ = @import("variants/scalar/jumps.zig");
+    _ = @import("variants/scalar/dispatch.zig");
+    _ = @import("variants/jump_vec/root.zig");
+    _ = @import("variants/jump_vec/ws.zig");
+    _ = @import("variants/bitmap/root.zig");
+    _ = @import("variants/bitmap/bits.zig");
+    _ = @import("variants/bitmap/vec.zig");
+    _ = @import("variants/bitmap/classify.zig");
+    _ = @import("variants/bitmap/misc_pass.zig");
+    _ = @import("variants/bitmap/carve.zig");
+    _ = @import("variants/bitmap/regex_allowed.zig");
+    _ = @import("variants/bitmap/coalesce.zig");
+    _ = @import("variants/bitmap/compress.zig");
     _ = @import("variants/common.zig");
 }

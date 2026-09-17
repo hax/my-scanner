@@ -4,7 +4,7 @@
 分支：`exp/oxc-bitmap-neon`（起点 58d3e3c）
 目标：**在 Apple Silicon（NEON）上达到 oxc_lexer（x86_64 AVX2+BMI2）相同的速度**。
 
-**结论速览**：新变体 `bitmap`（`src/variants/bitmap.zig`，oxc 六趟位图
+**结论速览**：新变体 `bitmap`（`src/variants/bitmap/`，oxc 六趟位图
 流水线 × my-scanner 语义层）check.sh 44/44 全绿（4 变体 × 11 样本
 差分测试）；vs 本机 jump_vec 6 胜 5 负——胜负倾向与 oxc_bitmap 一致，
 幅度普遍缩水。
@@ -84,7 +84,7 @@ classify → misc_pre → carve → coalesce → misc_post → compress
 
 ## 2. 移植策略：oxc 架构 × my-scanner 语义
 
-新变体 `bitmap`（`src/variants/bitmap.zig`）。**架构**复刻 oxc 六趟流水线；
+新变体 `bitmap`（`src/variants/bitmap/`）。**架构**复刻 oxc 六趟流水线；
 **语义**（token 切分口径）复用 my-scanner 已过 tsc 差分测试的语义层，这样：
 
 - check.sh 校验直接可用（变体 vs tsc 差分测试）；
@@ -213,9 +213,9 @@ flag + 模板拆片 + `#` 恒单字节 punct + `/` 双回看判别），bitmap �
 
 ## 7. 实现（commit f9721cd 及前序）
 
-- `src/variants/bitmap.zig`：~~五张位图~~（合并后六张：word/st/opch/
-  numch/misc/nl）+ kind 数组；classify（NEON 比较链）→ miscPass
-  （unicode/`\`）→ carve（opener 事件 + 字面量/正则 + 模板栈）→
+- `src/variants/bitmap/`（目录，按趟分文件）：~~五张位图~~（合并后六张：
+  word/st/opch/numch/misc/nl）+ kind 数组；classify（NEON 比较链）→
+  miscPass（unicode/`\`）→ carve（opener 事件 + 字面量/正则 + 模板栈）→
   coalesce（multi/数字事件）→ compress（位图 → lexeme 流）。
 - **与 oxc 的七张位图相比少了 kwinit 与 dot**：kwinit（关键字首字母
   位图）的预筛职责由 keywords pass 的三重位并行过滤吸收——word run
@@ -446,6 +446,6 @@ movemask 是合成序列（~9 条/16B），翻倍步长 = 翻倍 movemask 成本
 - `scripts/prepare-lexbench.sh`：拉取后自动应用 patch（幂等，
   失效报错）
 - Zig 线：`tbl1` inline asm 封装 + classify nibble LUT（+14% 单
-  pass），防回归于 `src/variants/bitmap.zig`
+  pass），防回归于 `src/variants/bitmap/root.zig`
 - 主仓库 `.bench-deps/oxc` 曾被失败 patch 的绝对路径头污染，已删除
   （下次 prepare 幂等重拉干净版，实证确认无 aarch64 残留）

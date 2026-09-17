@@ -9,9 +9,9 @@
 //! 主循环。
 //!
 //! 跳跃手段：dispatch_table 空白位一次表查合并「是否空白」与分发判断；
-//! ASCII 空白 run 短者逐字节展开、长者 SIMD 块扫；注释 trivia 快跳
-//! （不构造 lexeme 直接跳，对齐 yuku 的 skipWsAndComments）；字符串/
-//! 模板/块注释/正则的终点查找复用共享语义层已有的 SIMD 原语。
+//! ASCII 空白 run 由 ws.zig 块扫（短者逐字节展开、长者 SIMD）；注释
+//! trivia 快跳（不构造 lexeme 直接跳，对齐 yuku 的 skipWsAndComments）；
+//! 字符串/模板/块注释/正则的终点查找复用共享语义层已有的 SIMD 原语。
 //!
 //! 行号是惰性交付：扫描期零行跟踪成本（对齐 yuku 的交付物——它扫描期
 //! 只带 1-bit line_terminator_before flag，行号由下游按需重算），首次
@@ -23,9 +23,10 @@
 //! 空间在跳跃原语与驱动循环，语义修复由共享层单点生效。
 
 const std = @import("std");
-const lexeme_mod = @import("../lexeme.zig");
-const scanner = @import("../scanner.zig");
-const simd = @import("../simd.zig");
+const lexeme_mod = @import("../../lexeme.zig");
+const scanner = @import("../../scanner.zig");
+const simd = @import("../../simd.zig");
+const ws = @import("ws.zig");
 
 const Lexeme = lexeme_mod.Lexeme;
 const LexemeKind = lexeme_mod.LexemeKind;
@@ -87,7 +88,7 @@ fn consumeDirect(
         const code = scanner.dispatch_table[src[pos]];
         if (code & scanner.Dispatch.whitespace != 0) {
             const c = src[pos];
-            const run = skipWhitespace(src, pos + 1);
+            const run = ws.skipWhitespace(src, pos + 1);
             // run 不含首字节的换行事实（skipWhitespace 从 pos+1 起扫）
             if (!nl_before) nl_before = c == '\n' or c == '\r' or run.saw_lf;
             pos = run.end;
@@ -143,53 +144,6 @@ fn consumeDirect(
         .start = @intCast(src.len),
         .end = @intCast(src.len),
     });
-}
-
-inline fn isAsciiWs(c: u8) bool {
-    return c == ' ' or (c >= 0x09 and c <= 0x0D);
-}
-
-/// ASCII 空白 run 扫描结果：end 是 run 终点；saw_lf 表示 run 内是否含
-/// 行终止符（\n、\r；U+2028/29 不走此路径——它们在主循环经 ws 标记
-/// 单独判定，见 scanner.wsIsLineTerminator）。
-const WsRun = struct { end: usize, saw_lf: bool };
-
-/// ASCII 空白 run 的结尾（from 处可以是任意字节，按实际跳过）。
-/// 短 run 逐字节展开（格式化代码的空白多为 0-2 字节：紧跟 lexeme、
-/// 单空格或换行+缩进），长 run 转 SIMD 块扫。换行检测融合同一趟
-/// 扫描（省掉对 run 的二次扫描）；SIMD 块命中 run 终点时换行位
-/// 只计 ws 前缀，尾随的非空白不污染 saw_lf。
-fn skipWhitespace(src: []const u8, from: usize) WsRun {
-    var i = from;
-    var saw_lf = false;
-    inline for (0..4) |_| {
-        if (i >= src.len or !isAsciiWs(src[i])) return .{ .end = i, .saw_lf = saw_lf };
-        saw_lf = saw_lf or (src[i] == '\n' or src[i] == '\r');
-        i += 1;
-    }
-    while (i < src.len) {
-        if (src.len - i >= simd.block_size) {
-            const chunk = simd.load(src, i);
-            const inv = ~simd.whitespaceMask(chunk);
-            const term = simd.newlineMask(chunk) |
-                @as(simd.Mask, @bitCast(chunk == @as(simd.Chunk, @splat('\r'))));
-            if (inv == 0) {
-                saw_lf = saw_lf or (term != 0);
-                i += simd.block_size;
-                continue;
-            }
-            const stop: u5 = @intCast(@ctz(inv));
-            const ws_prefix = (@as(simd.Mask, 1) << stop) - 1;
-            saw_lf = saw_lf or ((term & ws_prefix) != 0);
-            i += stop;
-            break;
-        }
-        if (isAsciiWs(src[i])) {
-            saw_lf = saw_lf or (src[i] == '\n' or src[i] == '\r');
-            i += 1;
-        } else break;
-    }
-    return .{ .end = i, .saw_lf = saw_lf };
 }
 
 // -- 测试：与两阶段交叉验证 ---------------------------------------------------
