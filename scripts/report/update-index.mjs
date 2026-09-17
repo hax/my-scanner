@@ -71,6 +71,8 @@ const index = {
   impls: ["scalar", "jump_vec", "two_phase", "bitmap", "yuku_old", "yuku_main", "oxc", "swc", "oxc_bitmap"],
   // 基线溯源(bench.zig 自 prepare-baselines 版本标记带入):取最近一个带该字段的 run
   baselines: (() => { for (let i = runs.length - 1; i >= 0; i--) if (runs[i].baselines) return runs[i].baselines; return null; })(),
+  // 第三方版本戳(run-rs-bench 自 Cargo.lock + oxc.sha 带入):取最近一个带该字段的 run
+  deps: (() => { for (let i = runs.length - 1; i >= 0; i--) if (runs[i].deps) return runs[i].deps; return null; })(),
   corpus: corpusMeta,
   corpusStats: fileStats,
   runs: runs.map((r) => ({ sha: r.sha, date: r.date, subject: r.subject, runner: r.runner, channel: r.channel ?? "ci", label: r.label ?? null })),
@@ -223,9 +225,23 @@ fetch("reports/index.json").then(r => r.json()).then(idx => {
     if (b.sha) bits.push('<a href="' + LINKS[impl] + "/commit/" + b.sha + '">sha ' + b.sha.slice(0, 10) + "</a>");
     return bits.length ? "（" + bits.join("，") + "）" : "";
   };
+  // 第三方版本溯源(rs.json deps 戳:swc/oxc 链 crates.io 精确版本,oxc_bitmap
+  // 链 oxc 仓 rev 的 crate 目录;oxc_lexer 不上 crates.io,只能链 git)
+  const dep = idx.deps ?? {};
+  const depText = (impl) => {
+    const rev = dep.oxc_rev;
+    if (impl === "swc" && dep.swc_ecma_parser)
+      return '（<a href="https://crates.io/crates/swc_ecma_parser/' + dep.swc_ecma_parser + '">swc_ecma_parser ' + dep.swc_ecma_parser + "</a>）";
+    if (impl === "oxc" && dep.oxc_parser)
+      return '（<a href="https://crates.io/crates/oxc_parser/' + dep.oxc_parser + '">oxc_parser ' + dep.oxc_parser + "</a>，vendored 2 行 patch）";
+    if (impl === "oxc_bitmap" && dep.oxc_lexer)
+      return "（" + (rev ? '<a href="' + LINKS.oxc_bitmap + "/tree/" + rev + '/crates/oxc_lexer">oxc_lexer ' + dep.oxc_lexer + "</a>" : "oxc_lexer " + dep.oxc_lexer)
+        + (rev ? ' @ <a href="' + LINKS.oxc_bitmap + "/commit/" + rev + '">' + rev.slice(0, 10) + "</a>" : "") + "，+NEON patch）";
+    return "";
+  };
   document.getElementById("impls").innerHTML = idx.impls.map(impl =>
     "<tr><td><svg width='10' height='10'><rect width='10' height='10' rx='2' fill='" + COLORS[impl] + "'/></svg> <a href='" + LINKS[impl] + "'><code>"
-    + SHORT[impl] + "</code></a></td><td>" + (DESCR[impl] ?? impl) + " " + blText(impl) + "</td></tr>"
+    + SHORT[impl] + "</code></a></td><td>" + (DESCR[impl] ?? impl) + " " + blText(impl) + depText(impl) + "</td></tr>"
   ).join("");
 
   // ---- run 分堆:CI 序列 + 本机按 label 分组 ----
@@ -419,7 +435,7 @@ const readme = `# my-scanner 架构矩阵基准报告
 
 在线图表页（GitHub Pages，源 = 本分支）：<https://johnhax.net/my-scanner/>
 
-- [index.html](index.html) — ECharts 图表页：顶部为比对者说明（链接到各 git 仓，yuku 基线版本溯源）、机器配置（CI runner 与本机，基线同为 yuku v0.10.1 固定快照）与语料说明（大小与 tokens（baseline 计数）、出处、来源版本与链接/构造场景，图上只留文件名）；柱状图为最近一次 CI 与本机 run 的「vs baseline」倍数对比（每语料一张 555px 定宽卡片、随页宽并排；label 45° 斜排；左 CI 右本机、同色本机半透明；纵轴固定 0–2、超出画到图外；柱距 CI/local 0.1、组内对照 0.25、架构族组间 0.5 柱宽，baseline 两柱恒 1.0、与 y=1 虚线互证基线对齐），下方为趋势折线（vs baseline / vs 同族参照两种口径；实线 CI、虚线本机按机器分组、同机相连；基线固定，相对值跨 run、跨机可比）。图表依赖 [vendor/echarts.min.js](vendor/echarts.min.js)（tools/package.json 固定版本）
+- [index.html](index.html) — ECharts 图表页：顶部为比对者说明（链接到各 git 仓；yuku 基线版本溯源、swc/oxc/oxc-bitmap 精确版本与链接——crates.io 版本 / oxc 仓 rev）、机器配置（CI runner 与本机，基线同为 yuku v0.10.1 固定快照）与语料说明（大小与 tokens（baseline 计数）、出处、来源版本与链接/构造场景，图上只留文件名）；柱状图为最近一次 CI 与本机 run 的「vs baseline」倍数对比（每语料一张 555px 定宽卡片、随页宽并排；label 45° 斜排；左 CI 右本机、同色本机半透明；纵轴固定 0–2、超出画到图外；柱距 CI/local 0.1、组内对照 0.25、架构族组间 0.5 柱宽，baseline 两柱恒 1.0、与 y=1 虚线互证基线对齐），下方为趋势折线（vs baseline / vs 同族参照两种口径；实线 CI、虚线本机按机器分组、同机相连；基线固定，相对值跨 run、跨机可比）。图表依赖 [vendor/echarts.min.js](vendor/echarts.min.js)（tools/package.json 固定版本）
 - [reports/](reports/) — 每次 run 的 \`<sha>.md\`（人读报告）与 \`<sha>.json\`（原始数据）；本地提交（bench.sh --submit）为 \`<sha>.local.*\`（机器名不入产物），与 CI 同图并绘
 
 对比口径与架构族谱见仓库 docs/architecture.md。

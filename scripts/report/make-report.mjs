@@ -76,11 +76,13 @@ const metaByPath = new Map(manifest.files.map((f, i) => [f.path, { ...f, order: 
 const files = new Map(); // file -> {bytes, results: Map}
 let baselines = null; // zig.json 的基线溯源(prepare-baselines 版本标记),透传给 data.json
 let rsRust = null; // rs.json 的 rustc 版本戳(run-rs-bench 写入):实际编译 swc/oxc/oxc_bitmap 的工具链
+let rsDeps = null; // rs.json 的第三方版本戳(Cargo.lock + oxc 仓 rev):报告与趋势页展示用
 for (const path of [zigJsonPath, opt("--rs")]) {
   if (!path || !existsSync(path)) continue;
   const data = JSON.parse(readFileSync(path, "utf8"));
   baselines ??= data.baselines ?? null;
   rsRust ??= data.rust ?? null;
+  rsDeps ??= data.deps ?? null;
   for (const run of data.runs) {
     let f = files.get(run.file);
     if (!f) { f = { bytes: run.bytes, results: new Map() }; files.set(run.file, f); }
@@ -120,7 +122,7 @@ runner.rust = rustV(rsRust) || rustV(env("rustc", ["--version"])) || null;
 // ---- data.json ----
 const dataJson = {
   sha, date: new Date().toISOString(), subject, repeats: Number(repeats) || null, runner,
-  channel, label: runLabel, baselines,
+  channel, label: runLabel, baselines, deps: rsDeps,
   files: fileRuns.map(({ order, ...rest }) => rest),
 };
 writeFileSync(join(outDir, "data.json"), JSON.stringify(dataJson, null, 1) + "\n");
@@ -143,7 +145,15 @@ if (baselines) {
 lines.push(`- 同族参照：scalar vs baseline、jump_vec vs yuku-main、two_phase/bitmap vs oxc_bitmap（自有实现 / 同族第三方，>1 即我方更快）`);
 if (opt("--rs")) {
   lines.push(`- swc/oxc：lexbench-rs 决策注入驱动（同一 my-scanner 正则决策集 + 模板花括号栈重扫，与 yuku 对拍同口径），独立进程`);
-  lines.push(`- oxc_bitmap：oxc_lexer 多位图流水线（孵化实验 crate，rev 固定）；歧义内部自决、经全语料 spans 门禁验证；计时含 value lanes（字符串 cooked、数字解析、atoms、注释元数据，比别家多做工）；TS 泛型侧不融合 \`>\`，token 数略多；仅 x86_64+AVX2/BMI2 为 SIMD 形态，其余平台 generic fallback（仅 smoke）`);
+  lines.push(`- oxc_bitmap：oxc_lexer 多位图流水线（孵化实验 crate，rev 随 oxc main 跟踪，见下条第三方版本行）；歧义内部自决、经全语料 spans 门禁验证；计时含 value lanes（字符串 cooked、数字解析、atoms、注释元数据，比别家多做工）；TS 泛型侧不融合 \`>\`，token 数略多；SIMD 形态覆盖 x86_64+AVX2/BMI2 与 aarch64+NEON（本仓库 NEON 后端 patch），其余平台 generic fallback（仅 smoke）`);
+  if (rsDeps) {
+    // 版本戳来自 rs.json(run-rs-bench 自 Cargo.lock + .bench-deps/oxc.sha 解析)
+    const crate = (name, ver) => (ver ? `[${name} ${ver}](https://crates.io/crates/${name}/${ver})` : `${name} ?`);
+    const rev = rsDeps.oxc_rev;
+    const revLink = rev ? `[${rev.slice(0, 10)}](https://github.com/oxc-project/oxc/commit/${rev})` : "?";
+    const lexLink = rev ? `[oxc_lexer ${rsDeps.oxc_lexer ?? "?"}](https://github.com/oxc-project/oxc/tree/${rev}/crates/oxc_lexer)` : `oxc_lexer ${rsDeps.oxc_lexer ?? "?"}`;
+    lines.push(`- 第三方版本：swc ${crate("swc_ecma_parser", rsDeps.swc_ecma_parser)} ｜ oxc ${crate("oxc_parser", rsDeps.oxc_parser)}（vendored，2 行可见性 patch） ｜ oxc-bitmap ${lexLink} @ oxc ${revLink}（+ 本仓库 aarch64 NEON patch）`);
+  }
 }
 lines.push("");
 lines.push("| 实现 | 架构族 | 第三方参照 |");

@@ -11,9 +11,13 @@
 | --- | --- | --- | --- |
 | TypeScript tsc scanner | tools 依赖 | `tools/node_modules/typescript/lib/typescript.js`（下文 ts.js）与 `typescript.d.ts`（下文 d.ts） | 差分门禁基准 |
 | yuku | v0.10.1（钉）/ main（跟踪），两版 `src/parser/token.zig` 字节级相同 | `.bench-deps/yuku/src/parser/`（下文 token.zig / lexer.zig / parser.zig / ast.zig） | 速度基线（scalar / jump_vec 同族参照） |
-| swc | swc_ecma_parser 45.1.3（`unstable` feature） | cargo registry，下文 `$REG/` = `~/.cargo/registry/src/index.crates.io-*/` | jump_vec 族第三方参照 |
-| oxc fused lexer | oxc_parser 0.150.0 | `.bench-deps/oxc_parser-0.150.0/src/`（下文 kind.rs、token.rs、lexer/*.rs 等） | jump_vec 族第三方参照 |
-| oxc_lexer（多位图流水线） | 0.139.0，钉 rev | `.bench-deps/oxc/crates/oxc_lexer/src/` | two_phase 族第三方参照 |
+| swc | swc_ecma_parser（`unstable` feature；版本自动跟踪 crates.io 最新版） | cargo registry，下文 `$REG/` = `~/.cargo/registry/src/index.crates.io-*/` | jump_vec 族第三方参照 |
+| oxc fused lexer | oxc_parser（版本自动跟踪；本文引用写于 0.150.0） | `.bench-deps/oxc_parser/src/`（下文 kind.rs、token.rs、lexer/*.rs 等） | jump_vec 族第三方参照 |
+| oxc_lexer（多位图流水线） | 跟踪 oxc main（publish=false 无 crates.io 版本；crate 自身版本串 0.139.0） | `.bench-deps/oxc/crates/oxc_lexer/src/` | two_phase 族第三方参照 |
+
+三方版本由 prepare-lexbench.sh 自动跟踪上游（机制见
+[benchmarks.md](benchmarks.md) 的「第三方版本」）；本文的
+源码行号引用写于上表所列版本，引用时若已升版需按当前源码复核。
 
 ## 一、各家的数据结构
 

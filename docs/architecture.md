@@ -109,9 +109,16 @@ scalar 对 baseline、jump_vec 对 yuku-main、two_phase/bitmap 对 oxc_bitmap
   断档说明见 [benchmarks.md](benchmarks.md)。
 - yuku-main 跟踪上游 HEAD：clone 时记 `<dir>.sha` 版本标记，每跑
   ls-remote 探测，上游移动才重 clone（离线沿用现有副本）。
-- swc/oxc 由 Cargo.lock + vendored oxc 固定版本（升级走 prepare-lexbench.sh
-  的 VER/SHA256）；oxc_bitmap 的 oxc 仓源码树由 prepare-lexbench.sh
-  钉 rev（`.bench-deps/oxc.sha` 标记，换 rev 才重拉）。
+- swc/oxc 自动跟踪上游最新稳定版：prepare-lexbench.sh 每跑查 crates.io，
+  有新版即改写 tools/lexbench-rs/Cargo.toml 的锚钉版（oxc_parser /
+  swc_ecma_parser，`=` 精确版本）并 cargo update 落 Cargo.lock；oxc_parser
+  的 vendored 副本（`.bench-deps/oxc_parser`）随版本重建——crates.io 官方
+  .crate + index cksum 校验 + 2 行可见性 patch，patch 失效即报错。
+  oxc_bitmap 的 oxc 仓源码树跟踪 oxc main（`.bench-deps/oxc.sha` 记 rev，
+  ls-remote 探测，分支移动才重拉 + 重打 NEON patch，patch 失败即报错，
+  不静默沿用旧树）。实测版本戳由 run-rs-bench 解析进 rs.json 的 `deps`，
+  report.md 与趋势页同源展示；当前版本与链接清单见
+  [benchmarks.md](benchmarks.md) 的「第三方版本」。
 - **本地缓存**：第三方计时结果缓存在 `.bench-deps/`，键含基线版本
   标记、语料 sha256、轮数与编译器版本，任一变动自动失效——本地迭代
   不为第三方重复付费；`--refresh-baselines`（zig bench）/`--refresh`
@@ -332,8 +339,8 @@ oxc 0.150.0，registry vendored 源码）全部定位为**歧义点无外部驱�
 - **oxc 两处 `pub(crate)` → `pub`**：`next_regex(kind)`（当前
   Slash/SlashEq 原地重扫，无需 rewind）、
   `next_template_substitution_tail()`（当前 `}` 重扫）。vendored 副本
-  `.bench-deps/oxc_parser-0.150.0`（gitignore），经
-  `[patch.crates-io]` 接入，版本升级需重贴这 2 行。
+  `.bench-deps/oxc_parser`（gitignore，内容随版本跟踪移动），经
+  `[patch.crates-io]` 接入；prepare-lexbench.sh 升版时自动重贴这 2 行。
 - **决策集**：my-scanner `--emit-regex-starts`（主流即全集——模板
   拆片后 `${}` 内正则也在主流），与 yuku bench 的决策对齐同源。
 
@@ -372,15 +379,16 @@ cargo build → `drive --json` → make-report `--rs` 合并；swc/oxc 列进
 4. `A<<T>>` 嵌套泛型在当前语料未出现（`<<` 均为位移）；如需，oxc 要
    再 patch `re_lex_as_typescript_l_angle`，swc 无对应 lexer 侧入口
    （parser 内部拆分），届时另议。
-5. oxc 版本升级：prepare-lexbench.sh 的 VER/SHA256 同步更新并重贴
-   patch（脚本对 patch 未生效有兜底报错）；长期可跟踪上游是否暴露
-   re-lex（swc 公开 trait 是先例）。
+5. oxc 版本升级：prepare-lexbench.sh 自动跟踪 crates.io 最新稳定版（改
+   Cargo.toml 锚钉版 + `cargo update`，见 benchmarks.md「第三方版本」），
+   同时重贴 vendored 可见性 patch（脚本对 patch 未生效/非干净应用兜底报错）；
+   长期可跟踪上游是否暴露 re-lex（swc 公开 trait 是先例）。
 
 ## oxc_bitmap：多位图流水线（two_phase 族第三方参照，2026-09-16 接入）
 
 oxc 主仓孵化的 `oxc_lexer` crate（2026-07 合入，与 oxc_parser 的 fused
-lexer 并存的双实现；孵化期 publish=false 不上 crates.io，钉 rev 取仓内
-源码树，prepare-lexbench.sh 负责）是**位图流水线族内另一个、且更极端的
+lexer 并存的双实现；孵化期 publish=false 不上 crates.io，跟踪 oxc main
+取仓内源码树，prepare-lexbench.sh 负责）是**位图流水线族内另一个、且更极端的
 设计点**，做 two_phase 的第三方参照：
 
 - **六趟 unfused 流水线**：classify（纯 SIMD 产 7 种每 64B 块位图 +

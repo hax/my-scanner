@@ -14,7 +14,7 @@
 //! - 模板 `${}` 内表达式用花括号平衡栈跟踪（与 yuku bench 同款）
 //!
 //! oxc 的注入点在上游均为 `pub(crate)`，经 vendored 副本改为 pub 后驱动
-//! （`.bench-deps/oxc_parser-0.150.0`，仅 2 处可见性改动，scripts/prepare-lexbench.sh
+//! （`.bench-deps/oxc_parser`，仅 2 处可见性改动，scripts/prepare-lexbench.sh
 //! 幂等准备）：
 //! - `next_regex(kind)` → 当前 Slash/SlashEq token 重扫为正则
 //! - `next_template_substitution_tail()` → 当前 `}` 重扫为模板续段

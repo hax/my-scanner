@@ -29,6 +29,34 @@ InvalidUnicodeEscape，锚点整行失真）。
 强制重跑。**CI 总是实跑**——runner 代际性能漂移，第三方必须与自家实现
 同 run 实测，缓存的绝对值不能跨 run 复用。
 
+**第三方版本（自动跟踪）**（每次 run 由 run-rs-bench 解析进 rs.json 的
+`deps` 字段，report.md 头部与趋势页同源展示——跨 run 的版本变动在那里
+一眼可见，故不手工钉版）：
+
+- **swc**：[swc_ecma_parser](https://crates.io/crates/swc_ecma_parser)
+  （lexer 在该 crate 内，`unstable` feature 驱动公开 `Tokens` trait）：
+  每次跑查 crates.io sparse index 取最新稳定版，有新版即改写 Cargo.toml
+  的锚钉版（`=` 精确版本）并 `cargo update` 落 Cargo.lock。
+- **oxc**：[oxc_parser](https://crates.io/crates/oxc_parser)：与 swc 同款
+  跟踪；另备 vendored 副本 `.bench-deps/oxc_parser`（crates.io 官方 .crate
+  + index cksum 校验 + 仅 2 行可见性 patch），副本随版本重建，patch 失效
+  即报错。
+- **oxc-bitmap**：oxc_lexer（孵化期 publish=false 不上 crates.io，故版本号
+  链 git 而非 crates.io）：跟踪 oxc 仓
+  [main 分支](https://github.com/oxc-project/oxc/commits/main)——ls-remote
+  探测，分支移动才重拉源码树 + 重打本仓库 aarch64 NEON patch（要求干净
+  应用：有 fuzz / .rej 残留即报错，需按上游改动 rebase patch）。rev 一动
+  oxc_bitmap 列的绝对值就与前次 run 不可直接比——趋势页与 report.md 记
+  rev，跨 run 解读先看 rev 是否移动；同族参照倍数（two_phase/bitmap ÷
+  oxc_bitmap）受影响最小。
+
+伴随 crate（oxc_allocator / oxc_span / swc_common / swc_ecma_ast 等）不设
+上限，由 cargo 在锚的兼容范围内解析到最新版（升锚时一并前移），实际版本以
+[Cargo.lock](../tools/lexbench-rs/Cargo.lock) 为准。探测失败（离线）时脚本
+只警告并沿用现有钉版，本地迭代不被网络阻塞；`LEXBENCH_PIN=1` 则显式关掉
+全部探测（钉版与 oxc 源码树都不动），复现既有 run 或上游升版打断 patch 时
+可用——此时报告版本戳会停留旧值，读数字前先看清版本行。
+
 已知系统偏差：各实现按固定顺序测量（自家 → yuku-old → yuku-main →
 swc → oxc → oxc_bitmap），runner 频率漂移给后测者 ~3% 量级的系统性
 劣势（CI 上 yuku_old/yuku_main 恒 ≈0.96-0.98 即由此）；解读第三方

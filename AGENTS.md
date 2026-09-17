@@ -18,9 +18,13 @@ zig build test       # 仅单元测试，不等价于门禁
 `check.sh` 首次运行需要 `cd tools && npm i`（tsc 差分依赖）；`bench.sh`
 首次运行由 `scripts/prepare-baselines.sh` 备第三方基线到 `.bench-deps/`
 （已 gitignore）：yuku-old 钉 v0.10.1、yuku-main 跟踪上游（移动才重
-clone）。第三方计时结果缓存在 `.bench-deps/`（版本/语料/轮数/编译器
-变动自动失效），强制重跑用 `--refresh-baselines`；**CI 总是实跑**
-（GITHUB_ACTIONS 下显式 refresh，勿把本地缓存数字当跨机结论）。
+clone）；swc/oxc 由 `scripts/prepare-lexbench.sh` 自动跟踪 crates.io 最新
+稳定版（有新版即改写 Cargo.toml 锚钉版 + `cargo update` 落锁），oxc_lexer
+跟踪 oxc 仓 main（分支移动才重拉 + 重打 NEON patch）；vendored oxc_parser
+或 NEON patch 失效即报错退出（该修就修，勿静默沿用旧版数字）。第三方计时
+结果缓存在 `.bench-deps/`（版本/语料/轮数/编译器变动自动失效），强制重跑
+用 `--refresh-baselines`；**CI 总是实跑**（GITHUB_ACTIONS 下显式 refresh，
+勿把本地缓存数字当跨机结论）。
 
 报告页脚本（make-report / publish-report / update-index）在
 `scripts/report/`：只影响报告展示与发布、不影响测量与门禁，已在

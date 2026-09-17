@@ -1,5 +1,6 @@
-// swc/oxc 对照计时(drive)的缓存调度:第三方版本由 Cargo.lock + vendored
-// oxc 钉死,语料/轮数/工具链任一变动自动失效,只对缺失或陈旧的语料重跑
+// swc/oxc 对照计时(drive)的缓存调度:第三方版本由 Cargo.lock(锚钉版由
+// prepare-lexbench.sh 跟踪 crates.io 最新版) + vendored oxc 决定,语料/轮数/
+// 工具链任一变动自动失效,只对缺失或陈旧的语料重跑
 // drive,其余读缓存合并出 rs.json。仅加速本地迭代;CI(GITHUB_ACTIONS)
 // 由 ci-bench.sh 显式传 --refresh 全量实跑(runner 代际性能漂移,第三方
 // 必须与自家实现同 run 实测)。
@@ -15,8 +16,8 @@ const ROOT = new URL("..", import.meta.url).pathname;
 const DRIVE = join(ROOT, "tools/lexbench-rs/target/release/drive");
 const CACHE_PATH = join(ROOT, ".bench-deps/rs-bench-cache.json");
 const LOCK_PATH = join(ROOT, "tools/lexbench-rs/Cargo.lock");
-const OXC_DIR = join(ROOT, ".bench-deps/oxc_parser-0.150.0");
-// oxc_bitmap 的源:prepare-lexbench.sh 钉 rev 的 oxc 仓源码树(rev 不进
+const OXC_DIR = join(ROOT, ".bench-deps/oxc_parser");
+// oxc_bitmap 的源:prepare-lexbench.sh 跟踪 oxc main 拉取的源码树(rev 不进
 // Cargo.lock,换 rev 必须失缓存,否则 oxc_bitmap 列沿用旧数字)
 const OXC_LEXER_DIR = join(ROOT, ".bench-deps/oxc/crates/oxc_lexer");
 
@@ -64,6 +65,23 @@ function dirFingerprint(dir) {
 // (x86_64 的 avx2/bmi2 开关改变产物,见 ci-bench.sh)。
 // rustc 版本同时戳进 rs.json:报告溯源实际编译对照组的工具链
 const RUSTC = (() => { try { return execFileSync("rustc", ["--version"], { encoding: "utf8" }).trim(); } catch { return "unknown"; } })();
+
+// 第三方版本戳(Cargo.lock 解析 + oxc 仓 rev 标记),盖进 rs.json 的 deps
+// 字段:报告与趋势页的版本展示与此同源,升版自动跟随。oxc_lexer 孵化期
+// publish=false 不在 crates.io,版本号旁必须带 oxc 仓 rev 链接。
+function lockVersion(lockText, name) {
+  const m = lockText.match(new RegExp(`\\[\\[package\\]\\]\\nname = "${name}"\\nversion = "([^"]+)"`));
+  return m?.[1] ?? null;
+}
+const lockText = readFileSync(LOCK_PATH, "utf8");
+const readMarker = (p) => { try { return readFileSync(p, "utf8").trim() || null; } catch { return null; } };
+const deps = {
+  swc_ecma_parser: lockVersion(lockText, "swc_ecma_parser"),
+  oxc_parser: lockVersion(lockText, "oxc_parser"),
+  oxc_lexer: lockVersion(lockText, "oxc_lexer"),
+  oxc_rev: readMarker(join(ROOT, ".bench-deps/oxc.sha")),
+};
+
 function toolFingerprint() {
   const h = createHash("sha256");
   h.update(readFileSync(LOCK_PATH));
@@ -102,6 +120,6 @@ const runs = files.map((f) => ({
   bytes: statSync(f).size,
   results: cache.entries[keyOf(f)],
 }));
-writeFileSync(`${jsonOut}.tmp`, JSON.stringify({ rust: RUSTC, runs }) + "\n");
+writeFileSync(`${jsonOut}.tmp`, JSON.stringify({ rust: RUSTC, deps, runs }) + "\n");
 renameSync(`${jsonOut}.tmp`, jsonOut);
 console.log(`rs.json: ${files.length} 个语料(${files.length - miss.length} 个来自缓存,${miss.length} 个实测)`);

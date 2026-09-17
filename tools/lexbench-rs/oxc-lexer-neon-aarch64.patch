@@ -1,6 +1,6 @@
 diff -ruN a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs	2026-09-16 16:48:43
-+++ b/src/lib.rs	2026-09-17 08:38:16
+--- a/src/lib.rs	2026-09-17 16:05:26
++++ b/src/lib.rs	2026-09-17 16:05:26
 @@ -27,7 +27,8 @@
  /// `true` if the SIMD core is compiled in, `false` if the scalar fallback is.
  /// Used by CI to ensure it's testing the implementation it thinks it is.
@@ -12,8 +12,8 @@ diff -ruN a/src/lib.rs b/src/lib.rs
  thread_local! {
      static SCRATCH: RefCell<Lexer> = RefCell::new(Lexer::new());
 diff -ruN a/src/pipeline/chunk.rs b/src/pipeline/chunk.rs
---- a/src/pipeline/chunk.rs	2026-09-16 16:48:43
-+++ b/src/pipeline/chunk.rs	2026-09-17 08:18:24
+--- a/src/pipeline/chunk.rs	2026-09-17 16:05:26
++++ b/src/pipeline/chunk.rs	2026-09-17 16:05:26
 @@ -36,6 +36,40 @@
      }
  }
@@ -54,7 +54,7 @@ diff -ruN a/src/pipeline/chunk.rs b/src/pipeline/chunk.rs
 +
  #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
  mod primitives {
-     use core::ptr;
+     use std::ptr;
 @@ -68,4 +102,9 @@
      }
  }
@@ -67,7 +67,7 @@ diff -ruN a/src/pipeline/chunk.rs b/src/pipeline/chunk.rs
 +pub(super) use primitives::{eqm, load64};
 diff -ruN a/src/pipeline/classify/aarch64.rs b/src/pipeline/classify/aarch64.rs
 --- a/src/pipeline/classify/aarch64.rs	1970-01-01 08:00:00
-+++ b/src/pipeline/classify/aarch64.rs	2026-09-17 08:29:30
++++ b/src/pipeline/classify/aarch64.rs	2026-09-17 16:05:26
 @@ -0,0 +1,182 @@
 +use core::arch::aarch64::*;
 +
@@ -101,7 +101,7 @@ diff -ruN a/src/pipeline/classify/aarch64.rs b/src/pipeline/classify/aarch64.rs
 +
 +/// The merged LUT variants differ only in the keyword-initial bits; the
 +/// selection happens once, outside the loop.
-+pub unsafe fn classify(
++pub(super) unsafe fn classify_impl(
 +    t: &Tables,
 +    ts: bool,
 +    src: *const u8,
@@ -252,18 +252,17 @@ diff -ruN a/src/pipeline/classify/aarch64.rs b/src/pipeline/classify/aarch64.rs
 +    }
 +}
 diff -ruN a/src/pipeline/classify/mod.rs b/src/pipeline/classify/mod.rs
---- a/src/pipeline/classify/mod.rs	2026-09-16 16:48:43
-+++ b/src/pipeline/classify/mod.rs	2026-09-17 08:55:20
-@@ -3,7 +3,23 @@
+--- a/src/pipeline/classify/mod.rs	2026-09-17 16:05:26
++++ b/src/pipeline/classify/mod.rs	2026-09-17 16:05:26
+@@ -5,9 +5,24 @@
  #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"))]
- pub use avx2::classify;
+ use avx2::classify_impl;
  
 -#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
 +#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 +mod aarch64;
-+
 +#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-+pub use aarch64::classify;
++use aarch64::classify_impl;
 +
 +#[cfg(not(any(
 +    all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"),
@@ -279,10 +278,12 @@ diff -ruN a/src/pipeline/classify/mod.rs b/src/pipeline/classify/mod.rs
 +    all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"),
 +    all(target_arch = "aarch64", target_feature = "neon")
 +)))]
- pub use generic::classify;
+ use generic::classify_impl;
+ 
+ pub(super) unsafe fn classify(
 diff -ruN a/src/pipeline/compress/aarch64.rs b/src/pipeline/compress/aarch64.rs
 --- a/src/pipeline/compress/aarch64.rs	1970-01-01 08:00:00
-+++ b/src/pipeline/compress/aarch64.rs	2026-09-17 08:54:58
++++ b/src/pipeline/compress/aarch64.rs	2026-09-17 16:05:26
 @@ -0,0 +1,157 @@
 +use core::arch::aarch64::*;
 +
@@ -442,8 +443,8 @@ diff -ruN a/src/pipeline/compress/aarch64.rs b/src/pipeline/compress/aarch64.rs
 +    }
 +}
 diff -ruN a/src/pipeline/compress/mod.rs b/src/pipeline/compress/mod.rs
---- a/src/pipeline/compress/mod.rs	2026-09-16 16:48:43
-+++ b/src/pipeline/compress/mod.rs	2026-09-17 08:55:20
+--- a/src/pipeline/compress/mod.rs	2026-09-17 16:05:26
++++ b/src/pipeline/compress/mod.rs	2026-09-17 16:05:26
 @@ -11,9 +11,15 @@
  #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"))]
  use avx2::{build_spans, compress_blocks, lanes_post};
@@ -464,7 +465,7 @@ diff -ruN a/src/pipeline/compress/mod.rs b/src/pipeline/compress/mod.rs
  mod common;
 diff -ruN a/src/pipeline/find/aarch64.rs b/src/pipeline/find/aarch64.rs
 --- a/src/pipeline/find/aarch64.rs	1970-01-01 08:00:00
-+++ b/src/pipeline/find/aarch64.rs	2026-09-17 08:43:25
++++ b/src/pipeline/find/aarch64.rs	2026-09-17 16:05:26
 @@ -0,0 +1,128 @@
 +use core::arch::aarch64::*;
 +
@@ -595,8 +596,8 @@ diff -ruN a/src/pipeline/find/aarch64.rs b/src/pipeline/find/aarch64.rs
 +}
 +
 diff -ruN a/src/pipeline/find/mod.rs b/src/pipeline/find/mod.rs
---- a/src/pipeline/find/mod.rs	2026-09-16 16:48:43
-+++ b/src/pipeline/find/mod.rs	2026-09-17 08:38:16
+--- a/src/pipeline/find/mod.rs	2026-09-17 16:05:26
++++ b/src/pipeline/find/mod.rs	2026-09-17 16:05:26
 @@ -5,11 +5,18 @@
  #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"))]
  pub(super) use avx2::{find1, find2, find3, find4};
@@ -621,7 +622,7 @@ diff -ruN a/src/pipeline/find/mod.rs b/src/pipeline/find/mod.rs
  mod common;
 diff -ruN a/src/pipeline/scan/aarch64.rs b/src/pipeline/scan/aarch64.rs
 --- a/src/pipeline/scan/aarch64.rs	1970-01-01 08:00:00
-+++ b/src/pipeline/scan/aarch64.rs	2026-09-17 08:31:11
++++ b/src/pipeline/scan/aarch64.rs	2026-09-17 16:05:26
 @@ -0,0 +1,120 @@
 +use core::arch::aarch64::*;
 +
@@ -744,8 +745,8 @@ diff -ruN a/src/pipeline/scan/aarch64.rs b/src/pipeline/scan/aarch64.rs
 +    -1
 +}
 diff -ruN a/src/pipeline/scan/mod.rs b/src/pipeline/scan/mod.rs
---- a/src/pipeline/scan/mod.rs	2026-09-16 16:48:43
-+++ b/src/pipeline/scan/mod.rs	2026-09-17 08:38:16
+--- a/src/pipeline/scan/mod.rs	2026-09-17 16:05:26
++++ b/src/pipeline/scan/mod.rs	2026-09-17 16:05:26
 @@ -3,9 +3,14 @@
  #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"))]
  pub(super) use avx2::{scan_block_comment, scan_line_comment};
