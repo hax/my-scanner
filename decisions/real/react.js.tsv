@@ -1,0 +1,8 @@
+# my-scanner decisions v1
+# src: samples/real/react.js
+# sha256: ec670cc82d2aac81844bae49353d11bef1a8a21e727290a3bcc24a2928839496
+# tsc: 6.0.3
+D regex 27080 27087 27080 27087
+D regex 27448 27454 27448 27454
+D regex 50789 50803 50789 50803
+D regex 61272 61283 61272 61283

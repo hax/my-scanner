@@ -19,3 +19,15 @@
 | `synthetic/strings.js` | synthetic | 字符串密集（构造） | 547460 | 构造生成，无上游 | 本项目 | `899bd0db7cd5ecc5…` |
 | `synthetic/cn-dense.ts` | synthetic | CJK 标识符极端（构造） | 967530 | 构造生成，无上游 | 本项目 | `e9efdc654123d072…` |
 
+## 派生文件(勿手改)
+
+`decisions/` 与 `offsets/` 由主仓 `scripts/publish-samples.mjs`(内部调
+`scripts/gen-derived.mjs`)在发布时重新生成,随本分支一同发布,已纳入 `sha256sums.txt`:
+
+- `decisions/<分组>/<样本>.tsv`:歧义决策真相(正则字面量 / 模板续片的位置与 span,
+  发布期由 tsc parser 生成一次)。运行期差分只跑 tsc scanner、按它驱动重扫,
+  并断言 my-scanner 在这些点上的 lexeme 全中。**只随 tsc 版本失效**——升级 tsc 后
+  重新发布(头里版本对不上时差分硬报错)。
+- `offsets/<分组>/<样本>.tsv.gz`:非 ASCII 样本的「字节 ↔ UTF-16 code unit」修正表
+  (每个非 ASCII 字符一条的增量表)。只随样本文件字节变;纯 ASCII 样本不生成。
+
