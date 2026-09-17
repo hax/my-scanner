@@ -40,6 +40,33 @@ fn splat(c: u8) Chunk {
     return @splat(c);
 }
 
+const V16 = @Vector(16, u8);
+
+inline fn splat16(c: u8) V16 {
+    return @splat(c);
+}
+
+/// 16B 版尾块安全加载（越界填 0x7f）
+inline fn loadPad16(src: []const u8, i: usize) V16 {
+    if (i + 16 <= src.len) return src[i..][0..16].*;
+    var buf: [16]u8 = @splat(0x7f);
+    if (i < src.len) {
+        const k = @min(16, src.len - i);
+        @memcpy(buf[0..k], src[i..][0..k]);
+    }
+    return buf;
+}
+
+/// vqtbl1q：16B 表内动态查表（pshufb 的 NEON 等价）。与 pshufb 的差异：
+/// 索引 ≥16 输出 0（pshufb 按 16 取模）——nibble 分解查找时索引须 & 15。
+pub inline fn tbl1(table: V16, idx: V16) V16 {
+    return asm ("tbl %[ret].16b, { %[tab].16b }, %[idx].16b"
+        : [ret] "=w" (-> V16),
+        : [tab] "w" (table),
+          [idx] "w" (idx),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 位图容器：每 64 字节块一个 u64 word（多 1 word 给 n 处 sentinel），
 // kind 每字节一个 u8（长度补齐到 64 倍数再 +64，尾块向量整存 + sentinel）
@@ -181,7 +208,69 @@ fn bmNext0(bm: []const u64, i: usize) usize {
 }
 
 // ---------------------------------------------------------------------------
-// classify：SIMD 比较链产 5 张位图 + kind 数组
+// classify：nibble LUT（tbl）产 5 张位图 + kind 数组
+//
+// 查表结构对齐 oxc tables.rs 的 build_merged_luts：每张 16B 表按「低
+// nibble 平面位并 / 高 nibble 行位并」分解 256 项集合，两表 AND 即精确
+// 成员判定（构造需无 nibble 冲突，comptime selfCheck 兜底）。比逐谓词
+// 比较链省 ~30% 指令，且补上 Zig 无法自动合成 vqtbl 的缺口（inline asm）。
+// ---------------------------------------------------------------------------
+
+/// 平面位定义（wb 表）：bit0-5 word 分解、bit6 ws、bit7 space；digit=bit1
+const WB_PLANES = struct {
+    fn bit(c: u8) u8 {
+        var b: u8 = 0;
+        if (c == '$') b |= 1 << 0;
+        if (c >= '0' and c <= '9') b |= 1 << 1;
+        if (c >= 'A' and c <= 'O') b |= 1 << 2;
+        if ((c >= 'P' and c <= 'Z') or c == '_') b |= 1 << 3;
+        if (c >= 'a' and c <= 'o') b |= 1 << 4;
+        if (c >= 'p' and c <= 'z') b |= 1 << 5;
+        if ((c >= 0x09 and c <= 0x0d)) b |= 1 << 6;
+        if (c == ' ') b |= 1 << 7;
+        return b;
+    }
+};
+/// 平面位定义（mrg 表）：**位面绑定 high-nibble 行**（oxc ROWS 同款
+/// 构造）——opch 字符跨 4 个 hi 行，每行一个专属位，构造性无 nibble
+/// 冲突：opch = bit0-3 任一、dot = bit4。
+const MRG_PLANES = struct {
+    fn bit(c: u8) u8 {
+        var b: u8 = 0;
+        if (c == '+' or c == '-' or c == '*' or c == '&' or c == '!' or c == '.') b |= 1 << 0; // h2 行
+        if (c == '=' or c == '<' or c == '>' or c == '?') b |= 1 << 1; // h3 行
+        if (c == '^') b |= 1 << 2; // h5 行
+        if (c == '|') b |= 1 << 3; // h7 行
+        if (c == '.') b |= 1 << 4; // dot
+        return b;
+    }
+};
+
+fn buildNibbleLut(comptime plane: anytype) struct { lo: V16, hi: V16 } {
+    @setEvalBranchQuota(10000);
+    var lo: [16]u8 = @splat(0);
+    var hi: [16]u8 = @splat(0);
+    var c: usize = 0;
+    while (c < 256) : (c += 1) {
+        const b = plane.bit(@intCast(c));
+        lo[c & 15] |= b;
+        hi[c >> 4] |= b;
+    }
+    // 自检：lo & hi 的 AND 必须精确还原每字节平面位（无 nibble 冲突）
+    c = 0;
+    while (c < 256) : (c += 1) {
+        const got = lo[c & 15] & hi[c >> 4];
+        const want = plane.bit(@intCast(c));
+        if (got != want) @compileError("nibble LUT conflict at byte " ++ std.fmt.comptimePrint("{d}", .{c}));
+    }
+    return .{ .lo = lo, .hi = hi };
+}
+
+const wb_lut = buildNibbleLut(WB_PLANES);
+const mrg_lut = buildNibbleLut(MRG_PLANES);
+
+// ---------------------------------------------------------------------------
+// classify（tbl LUT 版）
 // ---------------------------------------------------------------------------
 
 inline fn wsBool(c: Chunk) @Vector(32, bool) {
@@ -230,40 +319,68 @@ pub fn classify(bm: *Bitmaps, src: []const u8) void {
     var b: usize = 0;
     while (b < nb) : (b += 1) {
         const base = b * 64;
-        const c0 = loadPad(src, base);
-        const c1 = loadPad(src, base + 32);
+        var wordm: u64 = 0;
+        var wsm: u64 = 0;
+        var numch: u64 = 0;
+        var opchm: u64 = 0;
+        var miscm: u64 = 0;
+        inline for (0..4) |seg| {
+            const off = base + seg * 16;
+            const v: V16 = loadPad16(src, off);
+            const vn = v & splat16(0x0f);
+            const vh = v >> @as(V16, @splat(4));
+            const wb = tbl1(wb_lut.lo, vn) & tbl1(wb_lut.hi, vh);
+            const mg = tbl1(mrg_lut.lo, vn) & tbl1(mrg_lut.hi, vh);
+            const na: @Vector(16, bool) = v >= splat16(0x80);
+            const ws_b: @Vector(16, bool) = (wb & splat16(0xc0)) != splat16(0);
+            const word_b: @Vector(16, bool) = ((wb & splat16(0x3f)) != splat16(0)) | na;
+            const digit_b: @Vector(16, bool) = (wb & splat16(0x02)) != splat16(0);
+            const dot_b: @Vector(16, bool) = (mg & splat16(0x10)) != splat16(0);
+            const opch_b: @Vector(16, bool) = ((mg & splat16(0x0f)) != splat16(0)) | dot_b;
+            const misc_b: @Vector(16, bool) = (v == splat16('#')) | (v == splat16('\\')) | na;
 
-        const w0: Mask = @bitCast(wordBool(c0));
-        const w1: Mask = @bitCast(wordBool(c1));
-        const s0: Mask = @bitCast(wsBool(c0));
-        const s1: Mask = @bitCast(wsBool(c1));
-        const d0: Mask = @bitCast((c0 >= splat('0')) & (c0 <= splat('9')));
-        const d1: Mask = @bitCast((c1 >= splat('0')) & (c1 <= splat('9')));
-        const t0: Mask = @bitCast(c0 == splat('.'));
-        const t1: Mask = @bitCast(c1 == splat('.'));
-        const o0: Mask = @bitCast(opchBool(c0));
-        const o1: Mask = @bitCast(opchBool(c1));
-        const m0: Mask = @bitCast(miscBool(c0));
-        const m1: Mask = @bitCast(miscBool(c1));
+            const w16: u16 = @bitCast(word_b);
+            const s16: u16 = @bitCast(ws_b);
+            const d16: u16 = @bitCast(digit_b);
+            const t16m: u16 = @bitCast(dot_b);
+            const o16: u16 = @bitCast(opch_b);
+            const m16: u16 = @bitCast(misc_b);
+            const sh: u6 = @intCast(seg * 16);
+            wordm |= @as(u64, w16) << sh;
+            wsm |= @as(u64, s16) << sh;
+            numch |= @as(u64, d16 | t16m) << sh;
+            opchm |= @as(u64, o16) << sh;
+            miscm |= @as(u64, m16) << sh;
 
-        const wordm = @as(u64, w1) << 32 | w0;
-        const wsm = @as(u64, s1) << 32 | s0;
-        bm.word[b] = wordm;
-        bm.numch[b] = (@as(u64, d1) << 32 | d0) | (@as(u64, t1) << 32 | t0);
-        bm.opch[b] = @as(u64, o1) << 32 | o0;
-        bm.misc[b] = @as(u64, m1) << 32 | m0;
+            // kind：punct 为底 → word(identifier) → digit(number) →
+            // #(private_name) → \(illegal) → ws(whitespace)
+            const ki: V16 = @splat(@as(u8, @intFromEnum(TokenKind.identifier)));
+            const kn: V16 = @splat(@as(u8, @intFromEnum(TokenKind.number)));
+            const kh: V16 = @splat(@as(u8, @intFromEnum(TokenKind.private_name)));
+            const ke: V16 = @splat(@as(u8, @intFromEnum(TokenKind.illegal)));
+            const ks: V16 = @splat(@as(u8, @intFromEnum(TokenKind.whitespace)));
+            var k: V16 = @splat(@as(u8, @intFromEnum(TokenKind.punct)));
+            k = @select(u8, word_b, ki, k);
+            k = @select(u8, digit_b, kn, k);
+            k = @select(u8, v == splat16('#'), kh, k);
+            k = @select(u8, v == splat16('\\'), ke, k);
+            k = @select(u8, ws_b, ks, k);
+            bm.kind[off..][0..16].* = k;
+        }
+        const wordm2 = wordm;
+        const wsm2 = wsm;
+        bm.word[b] = wordm2;
+        bm.numch[b] = numch;
+        bm.opch[b] = opchm;
+        bm.misc[b] = miscm;
 
-        const wprev = (wordm << 1) | cw;
-        const sprev = (wsm << 1) | cs;
-        cw = wordm >> 63;
-        cs = wsm >> 63;
-        bm.st[b] = (wsm & ~sprev) | (wordm & ~wprev) | (~wsm & ~wordm);
-
-        bm.kind[base..][0..32].* = kindVec(c0);
-        bm.kind[base + 32 ..][0..32].* = kindVec(c1);
+        const wprev = (wordm2 << 1) | cw;
+        const sprev = (wsm2 << 1) | cs;
+        cw = wordm2 >> 63;
+        cs = wsm2 >> 63;
+        bm.st[b] = (wsm2 & ~sprev) | (wordm2 & ~wprev) | (~wsm2 & ~wordm2);
     }
-    // 尾块越读位清零（simd.load 用 0x7f pad：0x7f 非 word 非 ws 非 opch 非
-    // misc → st=1，必须按 rem mask 掉，否则 compress 会产出幻影 token）
+    // 尾块越读位清零（pad 0x7f 非 word 非 ws 非 opch 非 misc → st=1 幻影）
     const rem = n & 63;
     if (rem != 0) {
         const last = nb - 1;

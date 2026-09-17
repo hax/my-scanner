@@ -21,7 +21,7 @@ pub fn main(init: std.process.Init) !void {
         const c1 = Io.Timestamp.now(io, .awake);
         bitmap.miscPass(&bm, src);
         const c2 = Io.Timestamp.now(io, .awake);
-        try bitmap.carvePub(&bm, src, .{});
+        try bitmap.carve(&bm, src, .{}, 0);
         const c3 = Io.Timestamp.now(io, .awake);
         bitmap.coalesce(&bm, src);
         bitmap.keywords(&bm, src);
