@@ -20,8 +20,13 @@
 | `scalar` | 全标量单阶段 | pos 循环 | 纯标量 | yuku-old（0.10.1） |
 | `jump_vec` | 单阶段 + SIMD 长跳跃 | pos 循环 | SIMD 原语 + 空白块扫 + 注释快跳 | yuku-main / swc / oxc |
 | `two_phase` | 两阶段 SIMD | 位图 ctz 迭代 | SIMD 原语 | oxc_bitmap（孵化实验，见「oxc_bitmap」一节） |
-| `bitmap` | oxc_lexer 式六趟位图流水线（NEON） | 位图批量产出 token | 语义层共享 | oxc_bitmap AVX2（实验记录见 [oxc-bitmap-neon-experiment.md](oxc-bitmap-neon-experiment.md)） |
+| `bitmap` | oxc_lexer 式六趟位图流水线 | 位图批量产出 token | 语义层共享 | oxc_bitmap AVX2（实验记录见 [oxc-bitmap-neon-experiment.md](oxc-bitmap-neon-experiment.md)） |
 | （未实施） | 单阶段 + 按块候选缓冲 | 块内产掩码即消费 | SIMD 原语 | — |
+
+ISA 说明：`bitmap` 仅 classify 一趟有 ISA 快路径——aarch64 用 NEON
+inline asm（vqtbl1q nibble LUT）；其它架构经 comptime arch 分流回退到
+语义逐位一致的比较链 classify（非 aarch64 目标 codegen 完全看不到
+NEON asm），其余各 pass 本来就是跨平台 `@Vector` 写法。
 
 规则：任何语义修复/变更必须全变体差分全绿（`scripts/check.sh` 对
 每个变体跑 tsc 差分）；各架构独立优化不许互相拉扯；`jump_vec` 是
@@ -84,13 +89,14 @@ yuku v0.10.1 固定快照，各机一致）与**语料说明**表（real 出处�
 随页宽并排、label 45° 斜排；左 CI 右本机、同色本机半透明，baseline
 两柱恒 1.0、与 y=1 虚线互证基线对齐，架构族间留空槽分组——
 scalar|baseline、jump_vec 族四柱
-（oxc/swc 同族）、two_phase|oxc-bitmap）；下方**趋势折线**纵轴统一为
+（oxc/swc 同族）、two_phase|bitmap|oxc-bitmap（重 SIMD 架构组，
+bitmap 的同族原型即 oxc_bitmap））；下方**趋势折线**纵轴统一为
 相对基线的倍数——基线固定不漂，且由同进程同文件实测带入，相对倍数
 跨 run、跨 runner 代际、跨机器均可比（2026-09-16 自 yuku-main 切换，
 历史点由 data.json 的 best_ns 全量重算，序列无断档）；实线 CI、虚线
 本机（按机器分组、同机相连），绝对吞吐（GB/s）仅同机同 run 内可比，
 只在 tooltip 出现。另有 "vs 同族参照"口径衡量各族自身成熟度：
-scalar 对 baseline、jump_vec 对 yuku-main、two_phase 对 oxc_bitmap
+scalar 对 baseline、jump_vec 对 yuku-main、two_phase/bitmap 对 oxc_bitmap
 （>1 即我方更快；oxc_bitmap 口径注记见其专节与报告头），report.md
 含同口径的分组几何平均表。
 

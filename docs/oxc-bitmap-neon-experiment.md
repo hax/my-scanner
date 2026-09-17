@@ -226,9 +226,10 @@ flag + 模板拆片 + `#` 恒单字节 punct + `/` 双回看判别），bitmap �
   numch（digit|dot），`.5` 数字与 `...` 合并由事件处的 scanPunct
   口径自然分流。刻意**不做**「不在 dot 后」排除——语义层 `.if`
   同样判 keyword（isKeyword 无上下文），排除了会偏离 my-scanner 口径。
-- 语义层复用：scanString/scanTemplate/scanNumber/scanPunct/scanRegex/
-  isKeyword/decodeIdentEscape 等直接调用（tryComment/scanString/
-  scanTemplate 改 pub）；`punctLenW` pub 供 gluePunct 直用。
+- 语义层复用：scanString/scanTemplatePart/scanNumber/scanPunct/
+  scanRegex/isKeyword/decodeIdentEscape 等直接调用（合并进 main 新
+  语义层后，仅 scanString/punctLenW 需放开 pub，其余本已 pub）；
+  `punctLenW` 供 gluePunct 直用。
 - token 端点：end = 位图上下一个 st 位（sentinel at n），恒成立的论证
   与 oxc build_spans 的 stage 配对同构，见文件头注释。
 
@@ -400,10 +401,11 @@ disambiguate/lanes/诊断、同一测试套（test262 级）。
 （6.4KB）单轮仅数十微秒，jump_vec 两轮测量 0.22-0.46 波动近一倍，
 该语料的倍数判定不可靠。
 
-**结论：基线倍数口径未达成**（1/11 表面达成且为假象——react.js 的
-M3 jump_vec 异常偏弱 0.38 vs CI 0.693，2.81 是分母红利不是分子优势；
-~1.5x 是中位数，逐语料基线强度 0.55x-2.26x 不等，倍数消除的是总体
-主频差，逐语料仍有基线特异性残余）。差口来源：①基线红利 ×1.5 需要
+**结论：基线倍数口径未达成**（严格 0/11。逐语料计数：表面 ✓ 1/11
+——react.js 的 M3 jump_vec 异常偏弱 0.38 vs CI 0.693，2.81 是分母
+红利不是分子优势；不可判定 1/11——react.min.js 小文件噪声；明确
+✗ 9/11。~1.5x 是中位数，逐语料基线强度 0.55x-2.26x 不等，倍数消除
+的是总体主频差，逐语料仍有基线特异性残余）。差口来源：①基线红利 ×1.5 需要
 NEON 版跑出 EPYC 1.5 倍绝对速度；②NEON 版相对退化幅度比 AVX2 版大
 ——跳跃密集语料尤甚（AVX2 后端 32B/步 vs NEON 16B/步、compress 的
 cvtepu8/permutevar8x32 在 NEON 需多指令展开；注：32B 化已实证负收
@@ -416,8 +418,10 @@ cvtepu8/permutevar8x32 在 NEON 需多指令展开；注：32B 化已实证负�
   **基线倍数——未达成（§10.5）**。跨机绝对值参照 10/11 不低于
   EPYC AVX2，说明交付物对齐后 M3 单核不落后于 CI 单核，但不是
   结论性判据。
-- 在**基线倍数口径**下：未达成（2/11），剩余差距有明确的指令级
-  归因（见 §9 未竟事项 + §10.5），构成下一轮的量化目标。
+- 在**基线倍数口径**下：未达成（严格 0/11——唯一的表面 ✓ 是分母
+  红利假象，另 1/11 不可判定，逐语料计数同 §10.5），剩余差距有
+  明确的指令级归因（见 §9 未竟事项 + §10.5），构成下一轮的量化
+  目标。
 
 ### 10.7 32B 步长实验：**否决**（NEON vs AVX2 的结构性差异实证）
 

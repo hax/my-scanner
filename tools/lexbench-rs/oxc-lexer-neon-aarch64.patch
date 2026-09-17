@@ -1,4 +1,4 @@
-diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/lib.rs .bench-deps/oxc/crates/oxc_lexer/src/lib.rs
+diff -ruN a/src/lib.rs b/src/lib.rs
 --- a/src/lib.rs	2026-09-16 16:48:43
 +++ b/src/lib.rs	2026-09-17 08:38:16
 @@ -27,7 +27,8 @@
@@ -11,7 +11,7 @@ diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/lib
  
  thread_local! {
      static SCRATCH: RefCell<Lexer> = RefCell::new(Lexer::new());
-diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/chunk.rs .bench-deps/oxc/crates/oxc_lexer/src/pipeline/chunk.rs
+diff -ruN a/src/pipeline/chunk.rs b/src/pipeline/chunk.rs
 --- a/src/pipeline/chunk.rs	2026-09-16 16:48:43
 +++ b/src/pipeline/chunk.rs	2026-09-17 08:18:24
 @@ -36,6 +36,40 @@
@@ -65,7 +65,7 @@ diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pip
 +pub(super) use primitives_neon::*;
 +#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
 +pub(super) use primitives::{eqm, load64};
-diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/classify/aarch64.rs .bench-deps/oxc/crates/oxc_lexer/src/pipeline/classify/aarch64.rs
+diff -ruN a/src/pipeline/classify/aarch64.rs b/src/pipeline/classify/aarch64.rs
 --- a/src/pipeline/classify/aarch64.rs	1970-01-01 08:00:00
 +++ b/src/pipeline/classify/aarch64.rs	2026-09-17 08:29:30
 @@ -0,0 +1,182 @@
@@ -251,7 +251,7 @@ diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pip
 +        *misc.add(last) &= m;
 +    }
 +}
-diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/classify/mod.rs .bench-deps/oxc/crates/oxc_lexer/src/pipeline/classify/mod.rs
+diff -ruN a/src/pipeline/classify/mod.rs b/src/pipeline/classify/mod.rs
 --- a/src/pipeline/classify/mod.rs	2026-09-16 16:48:43
 +++ b/src/pipeline/classify/mod.rs	2026-09-17 08:55:20
 @@ -3,7 +3,23 @@
@@ -280,7 +280,7 @@ diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pip
 +    all(target_arch = "aarch64", target_feature = "neon")
 +)))]
  pub use generic::classify;
-diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/compress/aarch64.rs .bench-deps/oxc/crates/oxc_lexer/src/pipeline/compress/aarch64.rs
+diff -ruN a/src/pipeline/compress/aarch64.rs b/src/pipeline/compress/aarch64.rs
 --- a/src/pipeline/compress/aarch64.rs	1970-01-01 08:00:00
 +++ b/src/pipeline/compress/aarch64.rs	2026-09-17 08:54:58
 @@ -0,0 +1,157 @@
@@ -441,7 +441,7 @@ diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pip
 +        invalid_diags(src, out_kinds, out_spans, m, nn, lanes);
 +    }
 +}
-diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/compress/mod.rs .bench-deps/oxc/crates/oxc_lexer/src/pipeline/compress/mod.rs
+diff -ruN a/src/pipeline/compress/mod.rs b/src/pipeline/compress/mod.rs
 --- a/src/pipeline/compress/mod.rs	2026-09-16 16:48:43
 +++ b/src/pipeline/compress/mod.rs	2026-09-17 08:55:20
 @@ -11,9 +11,15 @@
@@ -462,7 +462,7 @@ diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pip
  use generic::{build_spans, compress_blocks, lanes_post};
  
  mod common;
-diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/find/aarch64.rs .bench-deps/oxc/crates/oxc_lexer/src/pipeline/find/aarch64.rs
+diff -ruN a/src/pipeline/find/aarch64.rs b/src/pipeline/find/aarch64.rs
 --- a/src/pipeline/find/aarch64.rs	1970-01-01 08:00:00
 +++ b/src/pipeline/find/aarch64.rs	2026-09-17 08:43:25
 @@ -0,0 +1,128 @@
@@ -594,7 +594,7 @@ diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pip
 +    n
 +}
 +
-diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/find/mod.rs .bench-deps/oxc/crates/oxc_lexer/src/pipeline/find/mod.rs
+diff -ruN a/src/pipeline/find/mod.rs b/src/pipeline/find/mod.rs
 --- a/src/pipeline/find/mod.rs	2026-09-16 16:48:43
 +++ b/src/pipeline/find/mod.rs	2026-09-17 08:38:16
 @@ -5,11 +5,18 @@
@@ -619,7 +619,7 @@ diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pip
  pub(super) use generic::{find1, find2, find3, find4};
  
  mod common;
-diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/scan/aarch64.rs .bench-deps/oxc/crates/oxc_lexer/src/pipeline/scan/aarch64.rs
+diff -ruN a/src/pipeline/scan/aarch64.rs b/src/pipeline/scan/aarch64.rs
 --- a/src/pipeline/scan/aarch64.rs	1970-01-01 08:00:00
 +++ b/src/pipeline/scan/aarch64.rs	2026-09-17 08:31:11
 @@ -0,0 +1,120 @@
@@ -743,7 +743,7 @@ diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pip
 +    }
 +    -1
 +}
-diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/scan/mod.rs .bench-deps/oxc/crates/oxc_lexer/src/pipeline/scan/mod.rs
+diff -ruN a/src/pipeline/scan/mod.rs b/src/pipeline/scan/mod.rs
 --- a/src/pipeline/scan/mod.rs	2026-09-16 16:48:43
 +++ b/src/pipeline/scan/mod.rs	2026-09-17 08:38:16
 @@ -3,9 +3,14 @@

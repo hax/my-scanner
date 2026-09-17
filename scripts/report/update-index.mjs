@@ -62,13 +62,13 @@ for (const r of runs) {
 // ratio 一律由 best_ns 重算(历史 data.json 的 vs_anchor 是旧锚口径,不可用);
 // 同族参照(与 make-report.mjs 的 PEER 同步):自有实现 → 同族第三方对照,
 // pratio 同样由 best_ns 补算,历史 run 无 vs_peer 字段也兼容。
-const PEERS = { scalar: "yuku_old", jump_vec: "yuku_main", two_phase: "oxc_bitmap" };
+const PEERS = { scalar: "yuku_old", jump_vec: "yuku_main", two_phase: "oxc_bitmap", bitmap: "oxc_bitmap" };
 const index = {
   updated: new Date().toISOString(),
   anchor: "yuku_old",
   anchor_label: "baseline",
   peers: PEERS,
-  impls: ["scalar", "jump_vec", "two_phase", "yuku_old", "yuku_main", "oxc", "swc", "oxc_bitmap"],
+  impls: ["scalar", "jump_vec", "two_phase", "bitmap", "yuku_old", "yuku_main", "oxc", "swc", "oxc_bitmap"],
   // 基线溯源(bench.zig 自 prepare-baselines 版本标记带入):取最近一个带该字段的 run
   baselines: (() => { for (let i = runs.length - 1; i >= 0; i--) if (runs[i].baselines) return runs[i].baselines; return null; })(),
   corpus: corpusMeta,
@@ -151,7 +151,7 @@ const html = `<!doctype html>
 （绝对吞吐 GB/s 只有同机同 run 内可比，数值见 tooltip）。柱状图左 CI 右本机（同色，本机半透明；纵轴固定 0–2，超出画到图外），
 趋势图实线 CI、虚线本机（同机相连，按机器分组）。
 「同族参照」= 自有实现 / 同架构族第三方对照（scalar→baseline、jump_vec→yuku-main、
-two_phase→oxc_bitmap，&gt;1 即我方更快），衡量各族自身成熟度。</p>
+two_phase→oxc_bitmap、bitmap→oxc_bitmap（同族原型），&gt;1 即我方更快），衡量各族自身成熟度。</p>
 <table id="impls"></table>
 <h2>机器配置</h2>
 <p class="meta">各机基线同为 yuku v0.10.1 固定快照（版本溯源见上表），倍数口径跨机可比。</p>
@@ -168,14 +168,15 @@ two_phase→oxc_bitmap，&gt;1 即我方更快），衡量各族自身成熟度�
 <div id="files"></div>
 <script>
 // 每实现一个区分色(对照组不再保持同色系);CI/本机以 实心/半透明(柱)、实线/虚线空心点(趋势) 区分
-const COLORS = { scalar:"#e67e22", jump_vec:"#27ae60", two_phase:"#e74c3c", yuku_old:"#95a5a6", yuku_main:"#2980b9", swc:"#9b59b6", oxc:"#1abc9c", oxc_bitmap:"#d4ac0d" };
-const NAMES  = { scalar:"scalar（全标量）", jump_vec:"jump_vec（单阶段+SIMD跳跃）", two_phase:"two_phase（两阶段）", yuku_old:"baseline", yuku_main:"yuku-main", swc:"swc（决策注入）", oxc:"oxc（决策注入）", oxc_bitmap:"oxc-bitmap（位图流水线）" };
-const SHORT  = { scalar:"scalar", jump_vec:"jump_vec", two_phase:"two_phase", yuku_old:"baseline", yuku_main:"yuku-main", swc:"swc", oxc:"oxc", oxc_bitmap:"oxc-bitmap" };
-const LINKS  = { scalar:"https://github.com/hax/my-scanner", jump_vec:"https://github.com/hax/my-scanner", two_phase:"https://github.com/hax/my-scanner", yuku_old:"https://github.com/yuku-toolchain/yuku", yuku_main:"https://github.com/yuku-toolchain/yuku", swc:"https://github.com/swc-project/swc", oxc:"https://github.com/oxc-project/oxc", oxc_bitmap:"https://github.com/oxc-project/oxc" };
+const COLORS = { scalar:"#e67e22", jump_vec:"#27ae60", two_phase:"#e74c3c", bitmap:"#e84393", yuku_old:"#95a5a6", yuku_main:"#2980b9", swc:"#9b59b6", oxc:"#1abc9c", oxc_bitmap:"#d4ac0d" };
+const NAMES  = { scalar:"scalar（全标量）", jump_vec:"jump_vec（单阶段+SIMD跳跃）", two_phase:"two_phase（两阶段）", bitmap:"bitmap（位图流水线）", yuku_old:"baseline", yuku_main:"yuku-main", swc:"swc（决策注入）", oxc:"oxc（决策注入）", oxc_bitmap:"oxc-bitmap（位图流水线）" };
+const SHORT  = { scalar:"scalar", jump_vec:"jump_vec", two_phase:"two_phase", bitmap:"bitmap", yuku_old:"baseline", yuku_main:"yuku-main", swc:"swc", oxc:"oxc", oxc_bitmap:"oxc-bitmap" };
+const LINKS  = { scalar:"https://github.com/hax/my-scanner", jump_vec:"https://github.com/hax/my-scanner", two_phase:"https://github.com/hax/my-scanner", bitmap:"https://github.com/hax/my-scanner", yuku_old:"https://github.com/yuku-toolchain/yuku", yuku_main:"https://github.com/yuku-toolchain/yuku", swc:"https://github.com/swc-project/swc", oxc:"https://github.com/oxc-project/oxc", oxc_bitmap:"https://github.com/oxc-project/oxc" };
 const DESCR  = {
   scalar: "自有 · 全标量单阶段（无 SIMD）",
   jump_vec: "自有 · 单阶段 + SIMD 长跳跃",
   two_phase: "自有 · 两阶段 SIMD（先 SIMD 分类出 token 起点掩码，再精确扫描）",
+  bitmap: "自有 · 多位图流水线（oxc_lexer 移植，NEON tbl 位图分类；非 aarch64 通用回退）",
   yuku_old: '第三方 · yuku <a href="https://github.com/yuku-toolchain/yuku/tree/v0.10.1">v0.10.1</a> 固定快照（引入向量化前）——本项目基线，固定不更新',
   yuku_main: "第三方 · yuku 上游主干（跟踪更新，移动才重拉）",
   swc: "第三方 · swc lexer，决策注入驱动（同一 my-scanner 正则决策集，与 yuku 对拍同口径）",
@@ -183,10 +184,12 @@ const DESCR  = {
   oxc_bitmap: "第三方 · oxc_lexer 多位图流水线（孵化实验，歧义自决 + spans 门禁；计时含 value lanes；仅 x86_64 SIMD）"
 };
 // 柱状图按架构族分组(baseline 两柱恒为 1.0,与 y=1 虚线互证基线对齐):
-// oxc/swc 与 jump_vec 同族(单阶段+SIMD 长跳跃/字节搜索),故并入 jump_vec 组。
+// oxc/swc 与 jump_vec 同族(单阶段+SIMD 长跳跃/字节搜索),故并入 jump_vec 组;
+// 第三组是重 SIMD 架构组——two_phase 与 bitmap(oxc_lexer 移植)及两者共同的
+// 最近参照 oxc_bitmap(同族原型,bitmap 的同族对照即它)。
 // 布局以柱宽为 1 单位手工排布(value 轴 + custom series):CI/local 对内间距 0.1、
 // 同组相邻对照间距 0.25、架构族分组间距 0.5
-const BAR_GROUPS = [["scalar", "yuku_old"], ["jump_vec", "yuku_main", "oxc", "swc"], ["two_phase", "oxc_bitmap"]];
+const BAR_GROUPS = [["scalar", "yuku_old"], ["jump_vec", "yuku_main", "oxc", "swc"], ["two_phase", "bitmap", "oxc_bitmap"]];
 const PAIR_GAP = 0.1, IMPL_GAP = 0.25, GROUP_GAP = 0.5, PAIR_SPAN = 2 + PAIR_GAP;
 const IMPL_X = {};  // 实现 → 柱对中心横坐标
 let BAR_XMAX = 0;   // 最右柱对右缘
