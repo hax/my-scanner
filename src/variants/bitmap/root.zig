@@ -34,6 +34,7 @@
 const std = @import("std");
 const lexeme_mod = @import("../../lexeme.zig");
 const scanner = @import("../../scanner.zig");
+const two_phase = @import("../two_phase/root.zig");
 const bits = @import("bits.zig");
 const classify_mod = @import("classify.zig");
 const misc_pass = @import("misc_pass.zig");
@@ -131,7 +132,7 @@ pub fn scan(allocator: std.mem.Allocator, src: []const u8) !scanner.Result {
 
 fn expectSame(src: []const u8) !void {
     const a = std.testing.allocator;
-    var want = try scanner.scan(a, src);
+    var want = try two_phase.scan(a, src);
     defer want.deinit(a);
     var got_list: std.ArrayList(Lexeme) = .empty;
     defer got_list.deinit(a);
@@ -224,7 +225,7 @@ test "bitmap 复用缓冲跨轮一致" {
         var got_list: std.ArrayList(Lexeme) = .empty;
         defer got_list.deinit(a);
         try scanInto(&got_list, a, src);
-        var want = try scanner.scan(a, src);
+        var want = try two_phase.scan(a, src);
         defer want.deinit(a);
         if (want.tokens.len != got_list.items.len) {
             std.debug.print("lexeme 数不一致：两阶段 {d}，bitmap {d}\nsrc: {s}\n", .{ want.tokens.len, got_list.items.len, src });

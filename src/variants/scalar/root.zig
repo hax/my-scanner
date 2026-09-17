@@ -15,6 +15,7 @@ const std = @import("std");
 const lexeme_mod = @import("../../lexeme.zig");
 const scanner = @import("../../scanner.zig");
 const common = @import("../common.zig");
+const two_phase = @import("../two_phase/root.zig");
 const jumps = @import("jumps.zig");
 const dispatch = @import("dispatch.zig");
 
@@ -117,7 +118,7 @@ pub fn scanInto(
 // -- 测试：与两阶段交叉验证 ---------------------------------------------------
 
 fn crossCheck(src: []const u8) !void {
-    var a = try scanner.scan(std.testing.allocator, src);
+    var a = try two_phase.scan(std.testing.allocator, src);
     defer a.deinit(std.testing.allocator);
     var mine = try scan(std.testing.allocator, src);
     defer mine.deinit(std.testing.allocator);

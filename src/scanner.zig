@@ -1,4 +1,9 @@
-//! JS/TS scanner 主循环。
+//! 共享语义层：JS/TS lexeme 切分的纯函数与共享类型。
+//!
+//! 架构变体（src/variants/{two_phase,scalar,jump_vec,bitmap}/）的驱动
+//! 循环不在此——本文件是它们共享的语义层：tokenAt/scanAt 首字节分发 +
+//! dispatch 表、数字/标点/正则/字符串/模板/标识符扫描、关键字表、
+//! 模板栈、行索引。语义修复在此单点生效，全变体由 check.sh 差分兜底。
 //!
 //! 产出是粗粒度 Lexeme 流（见 lexeme.zig）：连续覆盖全文，trivia
 //! （whitespace / newline / comment）常驻，end 隐含为下一个 lexeme 的 start。
@@ -140,46 +145,11 @@ pub fn isKeyword(text: []const u8) bool {
     return e.len == text.len and std.mem.eql(u8, text, e.name[0..e.len]);
 }
 
-/// 扫描 src，返回 lexeme 序列（以 eof 收尾）+ 惰性行号索引。
-pub fn scan(allocator: std.mem.Allocator, src: []const u8) !Result {
-    std.debug.assert(src.len <= std.math.maxInt(u32));
-    var tokens: std.ArrayList(Lexeme) = .empty;
-    errdefer tokens.deinit(allocator);
-
-    var cls = try simd.classifyTokenStarts(allocator, src);
-    // masks 只在扫描期间使用（成功路径也释放）；line_breaks 是 classify
-    // 的顺带产物，预填给 LineIndex（本引擎的行号地基零额外成本）
-    defer cls.starts.deinit(allocator);
-    errdefer allocator.free(cls.line_breaks);
-
-    try consume(&tokens, allocator, src, &cls.starts, cls.line_breaks);
-
-    return .{
-        .tokens = try tokens.toOwnedSlice(allocator),
-        .lines = .{ .src = src, .allocator = allocator, .breaks = cls.line_breaks },
-    };
-}
-
-/// scan 的复用缓冲版本：调用方管理 lexeme 列表（bench 循环里避免反复分配）。
-/// 不产出任何行号信息（行索引是惰性设计，纯词法化路径零行跟踪成本；
-/// 本引擎的 classify 顺带算换行位图，用完即弃）。
-pub fn scanInto(
-    tokens: *std.ArrayList(Lexeme),
-    allocator: std.mem.Allocator,
-    src: []const u8,
-) !void {
-    var cls = try simd.classifyTokenStarts(allocator, src);
-    defer cls.starts.deinit(allocator);
-    defer allocator.free(cls.line_breaks);
-    try consume(tokens, allocator, src, &cls.starts, cls.line_breaks);
-}
-
 /// 模板上下文栈：template_head 压一层（每个帧代表"在某模板的一个子表达
 /// 式内"），层内花括号计数；`}` 在计数归零时是模板续片起点（重扫为
 /// middle/tail），否则只是普通块/对象闭合。middle 重开同一模板的下一个
 /// 子表达式（帧保持），tail 弹一层。上界 64 层，真实代码嵌套不过几层；
-/// 溢出不再压栈（按普通 punct 容错，不中断）。三个驱动循环
-/// （两阶段 / jump_vec / scalar）共用。
+/// 溢出不再压栈（按普通 punct 容错，不中断）。各变体驱动循环共用。
 pub const TemplateStack = struct {
     depths: [64]u32 = undefined,
     len: u32 = 0,
@@ -237,123 +207,6 @@ pub const Scan = struct {
 pub inline fn wsIsLineTerminator(src: []const u8, start: usize) bool {
     return src[start] == 0xE2 and src[start + 1] == 0x80 and
         (src[start + 2] == 0xA8 or src[start + 2] == 0xA9);
-}
-
-/// classify 的换行位图上查 [from, to) 是否含行终止符
-/// （\n、孤立 \r、U+2028/U+2029，与 LineIndex 同口径；位标记在行终止
-/// 字节上）。两阶段引擎的 newline_before 检测全部走这里——位图是
-/// classify 副产品，避免对空白 run / 注释体的二次扫描（单阶段变体
-/// 没有位图，走扫描融合版 skipWhitespace/findBlockCommentEnd）。
-fn breaksInRange(line_breaks: []const u32, from: usize, to: usize) bool {
-    if (from >= to) return false;
-    const first = from / simd.block_size;
-    const last = (to - 1) / simd.block_size;
-    var b = first;
-    while (b <= last) : (b += 1) {
-        var m = line_breaks[b];
-        if (b == first) m &= @as(u32, std.math.maxInt(u32)) << @intCast(from % simd.block_size);
-        if (b == last) {
-            const hi = (to - 1) % simd.block_size;
-            if (hi < simd.block_size - 1) m &= (@as(u32, 1) << @intCast(hi + 1)) - 1;
-        }
-        if (m != 0) return true;
-    }
-    return false;
-}
-
-/// 阶段 2：块内迭代候选位，贪心消费。lexeme 区间内的假起点用
-/// `start < pos` 越过。所有状态（pos/prev/tpl/nl_before）都是循环局部
-/// 变量，由编译器驻进寄存器——这是数据流化的核心：扫描函数全是纯函数，
-/// 没有隐藏的 store/load 链。
-///
-/// trivia 不落盘（交付口径对齐 yuku）：候选间隙即 ASCII 空白 run，
-/// unicode whitespace 走 tokenAt 的 ws 标记、注释由驱动循环前置判别——
-/// 三者只顺路累积 newline_before，挂到下一个显著 lexeme 的 flags 上。
-fn consume(
-    tokens: *std.ArrayList(Lexeme),
-    allocator: std.mem.Allocator,
-    src: []const u8,
-    starts: *const simd.TokenStarts,
-    line_breaks: []const u32,
-) !void {
-    var pos: usize = 0;
-    var prev_kind: ?LexemeKind = null; // 上一个显著 lexeme，供 `/` 判别
-    var prev_text: []const u8 = "";
-    var prev2_text: []const u8 = ""; // prev 之前那个显著 lexeme 的文本（名字位置判别）
-    var tpl: TemplateStack = .{};
-    var nl_before = false; // 上一个显著 lexeme 之后的 trivia 是否含行终止符
-
-    if (src.len >= 2 and src[0] == '#' and src[1] == '!') {
-        const s = scanShebang(src);
-        pos = s.end;
-        prev_kind = s.kind;
-        prev_text = src[0..s.end];
-        try tokens.append(allocator, .{ .kind = .shebang, .start = 0, .end = @intCast(s.end) });
-    }
-    for (starts.masks, 0..) |mask, bi| {
-        // 整块已被上一个 lexeme 覆盖（如长块注释/长字符串的后续块）：
-        // 直接跳过整块，避免逐假候选迭代（lib.dom.d.ts 这类 JSDoc 密集
-        // 样本里，块注释内的 `*` `/` 全是假候选，这里是主要成本）
-        if (bi * simd.block_size + simd.block_size <= pos) continue;
-        // 一块最多 32 个候选 → 每 lexeme 的容量检查摊薄为每块一次
-        try tokens.ensureUnusedCapacity(allocator, simd.block_size);
-        var m = mask;
-        while (m != 0) {
-            const start = bi * simd.block_size + @as(usize, @ctz(m));
-            m &= m - 1;
-            if (start < pos) continue; // 上一个 lexeme 已越过该假候选
-            if (start > pos and !nl_before) nl_before = breaksInRange(line_breaks, pos, start);
-            const c0 = src[start];
-            const s = blk: {
-                if (c0 == '/' and start + 1 < src.len) {
-                    const n = src[start + 1];
-                    if (n == '/') {
-                        // 行注释：体不含行终止符，结尾 \n 归后续 gap
-                        pos = lineEnd(src, start);
-                        continue;
-                    }
-                    if (n == '*') {
-                        if (simd.findBlockCommentEnd(src, start + 2)) |end| {
-                            if (!nl_before) nl_before = breaksInRange(line_breaks, start, end.end);
-                            pos = end.end;
-                            continue;
-                        }
-                        // 未闭合块注释：吞掉余下全部，illegal 落盘（错误可见）
-                        break :blk unterminatedBlockComment(src);
-                    }
-                }
-                break :blk scanAt(src, start, prev_kind, prev_text, prev2_text, &tpl);
-            };
-            if (s.ws) { // unicode whitespace：跳过，顺带置 flag
-                if (!nl_before) nl_before = breaksInRange(line_breaks, start, s.end);
-                pos = s.end;
-                continue;
-            }
-            pos = s.end;
-            tokens.appendAssumeCapacity(.{
-                .kind = s.kind,
-                .flags = if (nl_before) lexeme_mod.flag_newline_before else 0,
-                .start = @intCast(start),
-                .end = @intCast(s.end),
-            });
-            nl_before = false;
-            // 栈空且非 head 时 track 必为 no-op，短路省掉 switch（语义同）
-            if (tpl.len > 0 or s.kind == .template_head) tpl.track(s.kind, src[start]);
-            prev2_text = prev_text;
-            prev_text = src[start..s.end];
-            prev_kind = s.kind;
-        }
-    }
-    // 尾部空白不是候选起点，pos 可能落后于 src.len：补一次行终止符检测
-    // （单阶段变体的尾部 run 在循环内自然走到，这里需要显式补），
-    // eof 固定 start == end == src.len
-    if (src.len > pos and !nl_before) nl_before = breaksInRange(line_breaks, pos, src.len);
-    try tokens.append(allocator, .{
-        .kind = .eof,
-        .flags = if (nl_before) lexeme_mod.flag_newline_before else 0,
-        .start = @intCast(src.len),
-        .end = @intCast(src.len),
-    });
 }
 
 /// 候选起点处的完整判别：tokenAt + 模板收尾拦截（`}` 在花括号计数归零的
@@ -738,7 +591,7 @@ fn scanNonAscii(src: []const u8, start: usize) Scan {
 // 容错路径统一收进冷函数：@branchHint(.unlikely) 等价 cold attribute，
 // 编译器把代码放进 cold 段并让调用点按 unlikely 预测。
 
-fn unterminatedBlockComment(src: []const u8) Scan {
+pub fn unterminatedBlockComment(src: []const u8) Scan {
     @branchHint(.unlikely);
     return .{ .kind = .illegal, .end = src.len };
 }
@@ -918,12 +771,16 @@ pub fn lineEnd(src: []const u8, from: usize) usize {
 
 const testing = std.testing;
 
+/// 语义测试的驱动入口：全管线参考实现（两阶段驱动在
+/// variants/two_phase/root.zig，不在本语义层文件内）。
+const two_phase = @import("variants/two_phase/root.zig");
+
 /// (kind, text) 二元组，方便写期望序列
 const Expected = struct { LexemeKind, []const u8 };
 
 /// 比对 lexeme 序列（交付流不含 trivia，直接全流比对）
 fn expectTokens(src: []const u8, expected: []const Expected) !void {
-    var result = try scan(testing.allocator, src);
+    var result = try two_phase.scan(testing.allocator, src);
     defer result.deinit(testing.allocator);
     const actual = result.tokens;
     if (actual.len != expected.len) {
@@ -948,7 +805,7 @@ fn expectTokens(src: []const u8, expected: []const Expected) !void {
 
 /// 各偏移处 lexeme 的 newline_before flag 断言：{start, 期望 flag}
 fn expectNewlineFlags(src: []const u8, expected: []const struct { u32, bool }) !void {
-    var result = try scan(testing.allocator, src);
+    var result = try two_phase.scan(testing.allocator, src);
     defer result.deinit(testing.allocator);
     for (expected) |e| {
         const start = e[0];
@@ -1547,7 +1404,7 @@ test "块注释跨块（各种对齐）" {
 
 test "行数统计" {
     const src = "a\n// c\nb\n`multi\nline`";
-    var result = try scan(testing.allocator, src);
+    var result = try two_phase.scan(testing.allocator, src);
     defer result.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 5), try result.lineCount());
 }
@@ -1691,25 +1548,25 @@ test "跨块的 Unicode whitespace 走兜底路径" {
 test "逻辑换行：U+2028/U+2029 与孤立 \\r" {
     // U+2028 是行终止符
     {
-        var result = try scan(testing.allocator, "a\xe2\x80\xa8b");
+        var result = try two_phase.scan(testing.allocator, "a\xe2\x80\xa8b");
         defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(usize, 2), try result.lineCount());
     }
     // U+2029 同样
     {
-        var result = try scan(testing.allocator, "a\xe2\x80\xa9b");
+        var result = try two_phase.scan(testing.allocator, "a\xe2\x80\xa9b");
         defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(usize, 2), try result.lineCount());
     }
     // 孤立 \r 计一次
     {
-        var result = try scan(testing.allocator, "a\rb");
+        var result = try two_phase.scan(testing.allocator, "a\rb");
         defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(usize, 2), try result.lineCount());
     }
     // CRLF 只计一次
     {
-        var result = try scan(testing.allocator, "a\r\nb");
+        var result = try two_phase.scan(testing.allocator, "a\r\nb");
         defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(usize, 2), try result.lineCount());
     }
@@ -1783,7 +1640,7 @@ test "模板子表达式：嵌套模板与注释里的 } 不干扰平衡" {
 test "行号索引 lineAt（逻辑换行：\\n、CRLF、孤立 \\r、U+2028）" {
     const src = "a\nb\r\nc\rd\u{2028}e";
     // 布局：a@0 \n@1 b@2 \r@3 \n@4 c@5 \r@6 d@7 U+2028@8..10 e@11
-    var result = try scan(testing.allocator, src);
+    var result = try two_phase.scan(testing.allocator, src);
     defer result.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 5), try result.lineCount());
     try testing.expectEqual(@as(usize, 5), try result.lines.lineCount());
@@ -1804,12 +1661,12 @@ test "行号索引 lineAt（逻辑换行：\\n、CRLF、孤立 \\r、U+2028）" 
 
 test "行号索引：空文件与单行" {
     {
-        var result = try scan(testing.allocator, "");
+        var result = try two_phase.scan(testing.allocator, "");
         defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(usize, 1), try result.lines.lineAt(0));
     }
     {
-        var result = try scan(testing.allocator, "let x = 1;");
+        var result = try two_phase.scan(testing.allocator, "let x = 1;");
         defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(usize, 1), try result.lineCount());
         for (result.tokens) |t| {
