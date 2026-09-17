@@ -459,7 +459,8 @@ pub inline fn tokenAt(
 
 /// 单/双引号字符串。SIMD 定位 `引号|反斜杠|换行`，转义对直接跳 2 字节。
 /// 合法字符串不跨行，所以中途不用维护行数。
-fn scanString(src: []const u8, start: usize, quote: u8) Scan {
+/// （pub：bitmap 变体的 carve pass 复用，语义单点。）
+pub fn scanString(src: []const u8, start: usize, quote: u8) Scan {
     var i = start + 1;
     while (i < src.len) {
         const chunk = simd.load(src, i);
@@ -689,7 +690,8 @@ pub fn scanPunct(src: []const u8, start: usize) Scan {
 
 /// punctLen 的无边界检查版本：w 是 src[start..start+4] 的小端 u32，
 /// 一次加载后截取出 b1/b2/b3。
-fn punctLenW(w: u32) usize {
+/// （pub：bitmap 变体的 coalesce pass 复用，语义单点。）
+pub fn punctLenW(w: u32) usize {
     const b1: u8 = @truncate(w >> 8);
     const b2: u8 = @truncate(w >> 16);
     const b3: u8 = @truncate(w >> 24);

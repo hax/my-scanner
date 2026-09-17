@@ -1,0 +1,113 @@
+{
+  "meta": {
+    "what": "oxc_lexer x86_64 AVX2+BMI2 (oxc_bitmap) 交叉编译 + Rosetta 2 运行",
+    "host": "Apple M3 Pro (arm64, macOS), 用户态经 Rosetta 2 翻译执行 AVX2/BMI2",
+    "target": "x86_64-apple-darwin",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "rustc_host": "aarch64-apple-darwin",
+    "rustflags": "-C target-feature=+avx2,+bmi2",
+    "profile": "release (opt-level=3, lto=thin, codegen-units=1)",
+    "repeats": 25,
+    "metric": "N 轮取最优 best_ns；GB/s = bytes/best_ns；Mtok/s = tokens*1000/best_ns",
+    "oxc_rev": "68ce6107d748d086ca09b36ece8b808ccaccc56e",
+    "simd_check": "drive stderr 无 generic fallback 警告（IS_SIMD=true）",
+    "options": "module=true; ts 按 .ts/.mts/.cts 开; jsx 按 .tsx/.jsx 开; validate_utf8=false; arena 轮外创建跨轮复用",
+    "date": "2026-09-16T19:59:36.696Z"
+  },
+  "runs": [
+    {
+      "file": "corpus/real/checker.ts",
+      "bytes": 3120982,
+      "tokens": 344505,
+      "best_ns": 7228792,
+      "gb_per_s": 0.432,
+      "mtok_per_s": 47.7
+    },
+    {
+      "file": "corpus/real/hanzi-chai.ts",
+      "bytes": 254527,
+      "tokens": 47133,
+      "best_ns": 1436875,
+      "gb_per_s": 0.177,
+      "mtok_per_s": 32.8
+    },
+    {
+      "file": "corpus/real/lib.dom.d.ts",
+      "bytes": 1874901,
+      "tokens": 116949,
+      "best_ns": 3774125,
+      "gb_per_s": 0.497,
+      "mtok_per_s": 31
+    },
+    {
+      "file": "corpus/real/mon-entreprise.ts",
+      "bytes": 104340,
+      "tokens": 15899,
+      "best_ns": 304792,
+      "gb_per_s": 0.342,
+      "mtok_per_s": 52.2
+    },
+    {
+      "file": "corpus/real/react.js",
+      "bytes": 72141,
+      "tokens": 8409,
+      "best_ns": 155833,
+      "gb_per_s": 0.463,
+      "mtok_per_s": 54
+    },
+    {
+      "file": "corpus/real/react.min.js",
+      "bytes": 6450,
+      "tokens": 2541,
+      "best_ns": 20083,
+      "gb_per_s": 0.321,
+      "mtok_per_s": 126.5,
+      "ci_epyc_gb_per_s": 0.761,
+      "rosetta_vs_epyc": "-58%"
+    },
+    {
+      "file": "corpus/real/typescript.js",
+      "bytes": 8207497,
+      "tokens": 1126203,
+      "best_ns": 22322583,
+      "gb_per_s": 0.368,
+      "mtok_per_s": 50.5,
+      "ci_epyc_gb_per_s": 0.681,
+      "rosetta_vs_epyc": "-46%"
+    },
+    {
+      "file": "corpus/real/typescript.min.js",
+      "bytes": 2959754,
+      "tokens": 1053016,
+      "best_ns": 9081084,
+      "gb_per_s": 0.326,
+      "mtok_per_s": 116
+    },
+    {
+      "file": "corpus/synthetic/cn-dense.ts",
+      "bytes": 967530,
+      "tokens": 94400,
+      "best_ns": 4660625,
+      "gb_per_s": 0.208,
+      "mtok_per_s": 20.3
+    },
+    {
+      "file": "corpus/synthetic/line-comments.js",
+      "bytes": 1676670,
+      "tokens": 90000,
+      "best_ns": 4213250,
+      "gb_per_s": 0.398,
+      "mtok_per_s": 21.4,
+      "ci_epyc_gb_per_s": 0.951,
+      "rosetta_vs_epyc": "-58%"
+    },
+    {
+      "file": "corpus/synthetic/strings.js",
+      "bytes": 547460,
+      "tokens": 84000,
+      "best_ns": 1915375,
+      "gb_per_s": 0.286,
+      "mtok_per_s": 43.9
+    }
+  ]
+}

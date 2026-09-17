@@ -14,12 +14,14 @@ pub const scanner = @import("scanner.zig");
 pub const variants = struct {
     pub const scalar = @import("variants/scalar.zig");
     pub const jump_vec = @import("variants/jump_vec.zig");
+    pub const bitmap = @import("variants/bitmap.zig");
 };
 
 pub const Variant = enum {
     two_phase,
     scalar,
     jump_vec,
+    bitmap,
 
     pub fn scanInto(
         self: Variant,
@@ -31,6 +33,7 @@ pub const Variant = enum {
             .two_phase => scanner.scanInto(tokens, allocator, src),
             .scalar => variants.scalar.scanInto(tokens, allocator, src),
             .jump_vec => variants.jump_vec.scanInto(tokens, allocator, src),
+            .bitmap => variants.bitmap.scanInto(tokens, allocator, src),
         };
     }
 
@@ -39,6 +42,7 @@ pub const Variant = enum {
             .two_phase => scanner.scan(allocator, src),
             .scalar => variants.scalar.scan(allocator, src),
             .jump_vec => variants.jump_vec.scan(allocator, src),
+            .bitmap => variants.bitmap.scan(allocator, src),
         };
     }
 };
@@ -57,5 +61,6 @@ test {
     _ = @import("scanner.zig");
     _ = @import("variants/scalar.zig");
     _ = @import("variants/jump_vec.zig");
+    _ = @import("variants/bitmap.zig");
     _ = @import("variants/common.zig");
 }

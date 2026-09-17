@@ -75,3 +75,22 @@ if [ "$recorded" != "$OXC_REV" ] || [ ! -d "$OXC_DIR/crates/oxc_lexer" ]; then
   echo "$OXC_REV" > .bench-deps/oxc.sha
   echo "==> $OXC_DIR 就绪"
 fi
+
+# ---- oxc_lexer 的 aarch64 NEON 后端（本仓库实验新增，见
+# docs/oxc-bitmap-neon-experiment.md）----
+# 拉取官方源码树后应用本仓库维护的 NEON patch（classify/find/scan/compress
+# 四趟的 aarch64 后端 + cfg 接线）；patch 未生效时报错退出。
+if [ -d "$OXC_DIR/crates/oxc_lexer" ]; then
+  LEX_DIR="$OXC_DIR/crates/oxc_lexer"
+  PATCH="tools/lexbench-rs/oxc-lexer-neon-aarch64.patch"
+  PATCH_ABS="$(pwd)/$PATCH"
+  if [ ! -f "$LEX_DIR/src/pipeline/classify/aarch64.rs" ]; then
+    echo "==> 应用 oxc_lexer aarch64 NEON 后端 patch"
+    (cd "$OXC_DIR/crates/oxc_lexer" && patch -p1 -s <"$PATCH_ABS")
+    grep -q "aarch64" "$LEX_DIR/src/pipeline/classify/mod.rs" || {
+      echo "error: NEON patch 未生效（oxc rev 或路径已变？）" >&2
+      exit 1
+    }
+    echo "==> NEON 后端就绪"
+  fi
+fi

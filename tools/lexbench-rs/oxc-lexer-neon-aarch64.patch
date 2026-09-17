@@ -1,0 +1,765 @@
+diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/lib.rs .bench-deps/oxc/crates/oxc_lexer/src/lib.rs
+--- a/src/lib.rs	2026-09-16 16:48:43
++++ b/src/lib.rs	2026-09-17 08:38:16
+@@ -27,7 +27,8 @@
+ /// `true` if the SIMD core is compiled in, `false` if the scalar fallback is.
+ /// Used by CI to ensure it's testing the implementation it thinks it is.
+ pub const IS_SIMD: bool =
+-    cfg!(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"));
++    cfg!(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"))
++        || cfg!(all(target_arch = "aarch64", target_feature = "neon"));
+ 
+ thread_local! {
+     static SCRATCH: RefCell<Lexer> = RefCell::new(Lexer::new());
+diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/chunk.rs .bench-deps/oxc/crates/oxc_lexer/src/pipeline/chunk.rs
+--- a/src/pipeline/chunk.rs	2026-09-16 16:48:43
++++ b/src/pipeline/chunk.rs	2026-09-17 08:18:24
+@@ -36,6 +36,40 @@
+     }
+ }
+ 
++
++#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
++mod primitives_neon {
++    /// NEON intrinsics are `#[target_feature]` and thus unsafe; the helpers
++    /// below are pure register ops with no memory safety preconditions, so
++    /// each wraps itself in an `unsafe` block.
++    mod raw {
++        use core::arch::aarch64::*;
++        pub unsafe fn load128(src: *const u8, i: usize) -> uint8x16_t {
++            vld1q_u8(src.add(i))
++        }
++        pub fn veq(v: uint8x16_t, c: u8) -> uint8x16_t {
++            unsafe { vceqq_u8(v, vdupq_n_u8(c)) }
++        }
++        pub fn mm(v: uint8x16_t) -> u16 {
++            // Input bytes are 0x00/0xFF. The low/high 64-bit halves go
++            // through GPR SWAR multiplies independently (bits 0-7 / 8-15);
++            // byte order within each half maps directly to bit order, so no
++            // deinterleave is needed.
++            unsafe {
++                let halves = vreinterpretq_u64_u8(v);
++                let lo64: u64 = vgetq_lane_u64(halves, 0);
++                let hi64: u64 = vgetq_lane_u64(halves, 1);
++                const SWAR: u64 = 0x0102_0408_1020_4080;
++                const ONES: u64 = 0x0101_0101_0101_0101;
++                let lo = ((lo64 & ONES).wrapping_mul(SWAR)) >> 56;
++                let hi = ((hi64 & ONES).wrapping_mul(SWAR)) >> 56;
++                (lo as u16) | ((hi as u16) << 8)
++            }
++        }
++    }
++    pub use raw::*;
++}
++
+ #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
+ mod primitives {
+     use core::ptr;
+@@ -68,4 +102,9 @@
+     }
+ }
+ 
++#[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"))]
+ pub(super) use primitives::*;
++#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
++pub(super) use primitives_neon::*;
++#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
++pub(super) use primitives::{eqm, load64};
+diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/classify/aarch64.rs .bench-deps/oxc/crates/oxc_lexer/src/pipeline/classify/aarch64.rs
+--- a/src/pipeline/classify/aarch64.rs	1970-01-01 08:00:00
++++ b/src/pipeline/classify/aarch64.rs	2026-09-17 08:29:30
+@@ -0,0 +1,182 @@
++use core::arch::aarch64::*;
++
++use crate::{tables::Tables, token::tk};
++
++use super::super::chunk::{load128, mm, veq};
++
++#[inline(always)]
++fn dup(c: u8) -> uint8x16_t {
++    // SAFETY: pure register op.
++    unsafe { vdupq_n_u8(c) }
++}
++
++#[inline(always)]
++unsafe fn tbl2way(lo_lut: &[u8; 16], hi_lut: &[u8; 16], v: uint8x16_t, vn: uint8x16_t, vh: uint8x16_t) -> uint8x16_t {
++    // SAFETY: caller guarantees readable src; LUTs are 16-byte arrays.
++    unsafe {
++        vandq_u8(
++            vqtbl1q_u8(vld1q_u8(lo_lut.as_ptr()), vn),
++            vqtbl1q_u8(vld1q_u8(hi_lut.as_ptr()), vh),
++        )
++    }
++}
++
++#[inline(always)]
++fn not0(x: uint8x16_t) -> uint8x16_t {
++    // x != 0 per lane, as 0x00/0xFF
++    // SAFETY: pure register ops.
++    unsafe { vmvnq_u8(vceqzq_u8(x)) }
++}
++
++/// The merged LUT variants differ only in the keyword-initial bits; the
++/// selection happens once, outside the loop.
++pub unsafe fn classify(
++    t: &Tables,
++    ts: bool,
++    src: *const u8,
++    n: usize,
++    word: *mut u64,
++    st: *mut u64,
++    kwinit: *mut u64,
++    opch: *mut u64,
++    digit: *mut u64,
++    dot: *mut u64,
++    misc: *mut u64,
++    kind: *mut u8,
++) {
++    let mrg_lo = if ts { &t.mrg_lo_ts } else { &t.mrg_lo };
++    let mrg_hi = &t.mrg_hi;
++    let mut cw: u64 = 0;
++    let mut cs: u64 = 0;
++    let mut i = 0usize;
++    let mut b = 0usize;
++    let nb_ceil = n.div_ceil(64);
++    // SAFETY: vld1q of 16-byte static arrays.
++    let (wb_lo, wb_hi, mrg_lo_v, mrg_hi_v) = unsafe {
++        (
++            vld1q_u8(t.wb_lo.as_ptr()),
++            vld1q_u8(t.wb_hi.as_ptr()),
++            vld1q_u8(mrg_lo.as_ptr()),
++            vld1q_u8(mrg_hi.as_ptr()),
++        )
++    };
++    let v_ff = dup(0xff);
++    let v_00 = dup(0);
++    let v_3f = dup(0x3f);
++    let v_3c = dup(0x3c);
++    let v_c0 = dup(0xc0);
++    let v_02 = dup(0x02);
++    let v_80m = dup(0x80);
++    let v_10 = dup(0x10);
++    let v_03 = dup(0x03);
++    let v_0f = dup(0x0f);
++    let v_20 = dup(0x20);
++    let v_80m = dup(0x80);
++    let v_10 = dup(0x10);
++    let v_inv = dup(tk!(Invalid) as u8);
++    let v_ws = dup(tk!(Whitespace) as u8);
++    let v_ident = dup(tk!(Ident) as u8);
++    let v_num = dup(tk!(Number) as u8);
++    // SAFETY: vld1q of 16-byte static arrays.
++    let (ph_a, ph_b, ph_t0, ph_t1) = unsafe {
++        (
++            vld1q_u8(crate::tables::PH_A.as_ptr()),
++            vld1q_u8(crate::tables::PH_B.as_ptr()),
++            vld1q_u8(crate::tables::PH_T0.as_ptr()),
++            vld1q_u8(crate::tables::PH_T1.as_ptr()),
++        )
++    };
++    while b < nb_ceil {
++        let mut wordm: u64 = 0;
++        let mut wsm: u64 = 0;
++        let mut digitm: u64 = 0;
++        let mut miscm: u64 = 0;
++        let mut kwt: u64 = 0;
++        let mut opt: u64 = 0;
++        let mut dtt: u64 = 0;
++        for seg in 0..4 {
++            let off = i + seg * 16;
++            // SAFETY: overreads land in the caller-guaranteed zeroed PAD.
++            let v = unsafe { load128(src, off) };
++            let vn = vandq_u8(v, v_0f);
++            let vh = vshrq_n_u8(v, 4);
++            let wb = tbl2way(&t.wb_lo, &t.wb_hi, v, vn, vh);
++            let mg = tbl2way(mrg_lo, mrg_hi, v, vn, vh);
++            // Non-ASCII bytes count as identifier chars in `word` and are
++            // folded into `misc` so `misc_pre` can re-classify Unicode
++            // whitespace (signed < 0 == unsigned >= 0x80).
++            let na = unsafe { vcgtq_s8(vreinterpretq_s8_u8(v_00), vreinterpretq_s8_u8(v)) };
++            let word_b = vorrq_u8(vmvnq_u8(vceqq_u8(vandq_u8(wb, v_3f), v_00)), na);
++            let ws_b = vmvnq_u8(vceqq_u8(vandq_u8(wb, v_c0), v_00));
++            let digit_b = not0(vandq_u8(wb, v_02));
++            // oxc mrg 表的位面按 high-nibble 行拆分（见 tables.rs
++            // merged_selfcheck）：opch = 0x3c、dot = 0x80、kwinit = 0x03
++            let dot_b = not0(vandq_u8(mg, v_80m));
++            let opch_b = vorrq_u8(not0(vandq_u8(mg, v_3c)), dot_b);
++            let misc_b = vorrq_u8(
++                vorrq_u8(unsafe { veq(v, b'#') }, unsafe { veq(v, b'\\') }),
++                na,
++            );
++            let sh = (seg * 16) as u32;
++            wordm |= (mm(word_b) as u64) << sh;
++            wsm |= (mm(ws_b) as u64) << sh;
++            digitm |= (mm(digit_b) as u64) << sh;
++            miscm |= (mm(misc_b) as u64) << sh;
++            kwt |= (mm(not0(vandq_u8(mg, v_03))) as u64) << sh;
++            opt |= (mm(opch_b) as u64) << sh;
++            dtt |= (mm(dot_b) as u64) << sh;
++
++            // kind: single-byte punct via the punct1 PH-hash LUTs, then
++            // whitespace / ident / number overrides (mirrors vpunct1).
++            // SAFETY: pure register ops.
++            let hash = unsafe { veorq_u8(vqtbl1q_u8(ph_a, vn), vqtbl1q_u8(ph_b, vh)) };
++            let hn2 = vandq_u8(hash, v_0f);
++            // SAFETY: pure register ops.
++            let (o0, o1) = unsafe { (vqtbl1q_u8(ph_t0, hn2), vqtbl1q_u8(ph_t1, hn2)) };
++// bit4 of h selects T1. VBSL blends per-BIT, so the selector
++// must be expanded to per-byte 0x00/0xFF (VPBLENDV reads only
++// each byte's MSB, so AVX2 gets away with a bare <<3 that leaks
++// h's bit5 into the next byte's low bit).
++            let sel = unsafe {
++                vnegq_s8(vreinterpretq_s8_u8(vshrq_n_u8(vandq_u8(hash, v_10), 4)))
++            };
++            // SAFETY: pure register ops.
++            let mut k = unsafe { vbslq_u8(vreinterpretq_u8_s8(sel), o1, o0) };
++            let ctl = unsafe { vcgtq_s8(vreinterpretq_s8_u8(v_20), vreinterpretq_s8_u8(v)) };
++            k = unsafe { vbslq_u8(ctl, v_inv, k) };
++            k = unsafe { vbslq_u8(ws_b, v_ws, k) };
++            k = unsafe { vbslq_u8(word_b, v_ident, k) };
++            k = unsafe { vbslq_u8(digit_b, v_num, k) };
++            // SAFETY: `off..off+16` is in-bounds for kind (len ceil to 64).
++            unsafe {
++                vst1q_u8(kind.add(off), k);
++            }
++            let _ = (v_ff, v_00);
++        }
++        *word.add(b) = wordm;
++        *st.add(b) = (wsm & !((wsm << 1) | cs)) | (wordm & !((wordm << 1) | cw)) | (!wsm & !wordm);
++        cs = wsm >> 63;
++        cw = wordm >> 63;
++        *word.add(b) = wordm;
++        *digit.add(b) = digitm;
++        *misc.add(b) = miscm;
++        *kwinit.add(b) = kwt;
++        *opch.add(b) = opt;
++        *dot.add(b) = dtt;
++        i += 64;
++        b += 1;
++    }
++    // Mask the overread positions [n, ceil) out of the last block's bitmaps.
++    let rem = n & 63;
++    if rem != 0 {
++        let last = nb_ceil - 1;
++        let m = (1u64 << rem) - 1;
++        *word.add(last) &= m;
++        *st.add(last) &= m;
++        *kwinit.add(last) &= m;
++        *opch.add(last) &= m;
++        *digit.add(last) &= m;
++        *dot.add(last) &= m;
++        *misc.add(last) &= m;
++    }
++}
+diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/classify/mod.rs .bench-deps/oxc/crates/oxc_lexer/src/pipeline/classify/mod.rs
+--- a/src/pipeline/classify/mod.rs	2026-09-16 16:48:43
++++ b/src/pipeline/classify/mod.rs	2026-09-17 08:55:20
+@@ -3,7 +3,23 @@
+ #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"))]
+ pub use avx2::classify;
+ 
+-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
++#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
++mod aarch64;
++
++#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
++pub use aarch64::classify;
++
++#[cfg(not(any(
++    all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"),
++    all(target_arch = "aarch64", target_feature = "neon")
++)))]
+ mod generic;
+-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
++#[cfg(test)]
++mod generic_test_import {
++    include!("generic.rs");
++}
++#[cfg(not(any(
++    all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"),
++    all(target_arch = "aarch64", target_feature = "neon")
++)))]
+ pub use generic::classify;
+diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/compress/aarch64.rs .bench-deps/oxc/crates/oxc_lexer/src/pipeline/compress/aarch64.rs
+--- a/src/pipeline/compress/aarch64.rs	1970-01-01 08:00:00
++++ b/src/pipeline/compress/aarch64.rs	2026-09-17 08:54:58
+@@ -0,0 +1,157 @@
++use core::arch::aarch64::*;
++
++use oxc_span::Span;
++
++use crate::{
++    lanes::Lanes,
++    tables::Tables,
++    token::{is_trivia_byte, tk},
++};
++
++use super::super::chunk::{eqm, load128};
++
++use super::common::{emit_value, invalid_diags};
++
++/// NEON twin of `compress/avx2.rs::compress_blocks`: per 16-byte segment of
++/// the st bitmap, the pair LUTs produce a control vector where byte j holds
++/// the offset of the j-th set bit (or 0x80 padding). VQTBL zero-fills on
++/// 0x80 just like PSHUFB, so the same LUTs drive both the position expand
++/// (widened to u32) and the kind gather.
++pub(super) unsafe fn compress_blocks(
++    t: &Tables,
++    st: *const u64,
++    kind: *const u8,
++    b0: usize,
++    b1: usize,
++    starts: *mut u32,
++    kinds: *mut u8,
++) -> usize {
++    let lut0z = t.pair_luts.lut0z.as_ptr().cast::<u8>();
++    let lutpad = t.pair_luts.lutpad.as_ptr().cast::<u8>();
++    let mut m = 0usize;
++    for b in b0..b1 {
++        let mword = *st.add(b);
++        if mword == 0 {
++            continue;
++        }
++        let base = b * 64;
++        let o0: u32 = 0;
++        let o1 = o0 + (mword & 0xffff).count_ones();
++        let o2 = o1 + ((mword >> 16) & 0xffff).count_ones();
++        let o3 = o2 + ((mword >> 32) & 0xffff).count_ones();
++        let o4 = o3 + (mword >> 48).count_ones();
++        for p in 0..4usize {
++            let sub0 = ((mword >> (16 * p)) & 0xff) as usize;
++            let sub1 = ((mword >> (16 * p + 8)) & 0xff) as usize;
++            let pc0 = sub0.count_ones() as usize;
++            // SAFETY: LUT rows are in-bounds for sub0/sub1; kind reads stay
++            // within the 64-byte block; the o-offsets index the stage
++            // buffers which the caller sized via STAGE_CAP.
++            unsafe {
++                let row0 = vld1_u8(lut0z.add(sub0 * 8));
++                let row1 = vld1q_u8(lutpad.add(sub1 * 32 + 8 - pc0));
++                let ctrl = vorrq_u8(vcombine_u8(row0, vdup_n_u8(0)), row1);
++                // SAFETY: kind row of the 64-byte block is in-bounds.
++                let kw = unsafe { load128(kind.add(base + 16 * p), 0) };
++                let out = m + match p {
++                    0 => o0,
++                    1 => o1,
++                    2 => o2,
++                    _ => o3,
++                } as usize;
++                // Widen ctrl bytes to u32 in 4-byte groups and add the
++                // segment base: ctrl byte j holds the offset 0..15 within
++                // segment p, so all 16 share base + 16*p.
++                let bv = vdupq_n_u32((base + 16 * p) as u32);
++                let w_lo = vmovl_u8(vget_low_u8(ctrl));
++                let w_hi = vmovl_u8(vget_high_u8(ctrl));
++                let g0 = vaddq_u32(vmovl_u16(vget_low_u16(w_lo)), bv);
++                let g1 = vaddq_u32(vmovl_u16(vget_high_u16(w_lo)), bv);
++                let g2 = vaddq_u32(vmovl_u16(vget_low_u16(w_hi)), bv);
++                let g3 = vaddq_u32(vmovl_u16(vget_high_u16(w_hi)), bv);
++                vst1q_u32(starts.add(out), g0);
++                vst1q_u32(starts.add(out + 4), g1);
++                vst1q_u32(starts.add(out + 8), g2);
++                vst1q_u32(starts.add(out + 12), g3);
++                // Kind gather: same 0x80-padding zero-fill as PSHUFB.
++                let kv = vqtbl1q_u8(kw, ctrl);
++                vst1q_u8(kinds.add(out), kv);
++            }
++        }
++        m += o4 as usize;
++    }
++    m
++}
++
++/// Contents of this function is in common with the AVX2 implementation
++/// (per-entry scalar walk; the AVX2 vectorization needs VPERMD-shaped
++/// 32-lane permutes that NEON lacks, and the entry loop is not the hot
++/// part of this pass).
++pub(super) unsafe fn build_spans(
++    stage_kind: *const u8,
++    stage_pos: *const u32,
++    m: usize,
++    spans: *mut Span,
++    sig_kinds: *mut u8,
++) -> usize {
++    let sp = spans.cast::<u64>();
++    let mut w = 0usize;
++    let mut j = 0usize;
++
++    while j < m {
++        let k = *stage_kind.add(j);
++        *sp.add(w) = stage_pos.add(j).cast::<u64>().read_unaligned();
++        *sig_kinds.add(w) = k;
++        w += usize::from(!is_trivia_byte(k) || k == tk!(Hashbang));
++        j += 1;
++    }
++
++    w
++}
++
++pub(super) unsafe fn lanes_post(
++    src: &[u8],
++    out_kinds: *const u8,
++    out_spans: *const Span,
++    m: usize,
++    nn: u32,
++    lanes: &mut Lanes,
++) {
++    let mut inv = 0u64;
++    let mut i = 0usize;
++    while i + 8 <= m {
++        let x = out_kinds.add(i).cast::<u64>().read_unaligned();
++        let mut hits = eqm(x, tk!(Number))
++            | eqm(x, tk!(BigInt))
++            | eqm(x, tk!(IdentEscaped))
++            | eqm(x, tk!(PrivateIdentEscaped));
++        inv |= eqm(x, tk!(Invalid));
++        while hits != 0 {
++            emit_value(
++                src,
++                out_kinds,
++                out_spans,
++                i + (hits.trailing_zeros() >> 3) as usize,
++                lanes,
++            );
++            hits &= hits - 1;
++        }
++        i += 8;
++    }
++    let mut inv_dirty = inv != 0;
++    while i < m {
++        let k = *out_kinds.add(i);
++        if k == tk!(Number)
++            || k == tk!(BigInt)
++            || k == tk!(IdentEscaped)
++            || k == tk!(PrivateIdentEscaped)
++        {
++            emit_value(src, out_kinds, out_spans, i, lanes);
++        }
++        inv_dirty |= k == tk!(Invalid);
++        i += 1;
++    }
++    if inv_dirty {
++        invalid_diags(src, out_kinds, out_spans, m, nn, lanes);
++    }
++}
+diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/compress/mod.rs .bench-deps/oxc/crates/oxc_lexer/src/pipeline/compress/mod.rs
+--- a/src/pipeline/compress/mod.rs	2026-09-16 16:48:43
++++ b/src/pipeline/compress/mod.rs	2026-09-17 08:55:20
+@@ -11,9 +11,15 @@
+ #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"))]
+ use avx2::{build_spans, compress_blocks, lanes_post};
+ 
+-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
++#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
++mod aarch64;
++
++#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
++use aarch64::{build_spans, compress_blocks, lanes_post};
++
++#[cfg(not(any(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"), all(target_arch = "aarch64", target_feature = "neon"))))]
+ mod generic;
+-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
++#[cfg(not(any(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"), all(target_arch = "aarch64", target_feature = "neon"))))]
+ use generic::{build_spans, compress_blocks, lanes_post};
+ 
+ mod common;
+diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/find/aarch64.rs .bench-deps/oxc/crates/oxc_lexer/src/pipeline/find/aarch64.rs
+--- a/src/pipeline/find/aarch64.rs	1970-01-01 08:00:00
++++ b/src/pipeline/find/aarch64.rs	2026-09-17 08:43:25
+@@ -0,0 +1,128 @@
++use core::arch::aarch64::*;
++
++use super::super::chunk::{load128, mm, veq};
++
++/// OR-fold of byte-equality results, associated as a tree.
++macro_rules! vor {
++    ($a:expr) => { $a };
++    ($a:expr, $b:expr) => {{
++        use core::arch::aarch64::vorrq_u8;
++        unsafe { vorrq_u8($a, $b) }
++    }};
++    ($a:expr, $b:expr, $($rest:expr),+) => {{
++        use core::arch::aarch64::vorrq_u8;
++        unsafe { vorrq_u8(vor!($a, $b), vor!($($rest),+)) }
++    }};
++}
++pub(super) use vor;
++
++macro_rules! define_find_function {
++    ($(#[$attr:meta])* $name:ident: $($needle:expr),+ $(,)?) => {
++        $(#[$attr])*
++        #[inline]
++        pub unsafe fn $name(src: *const u8, n: usize, mut i: usize) -> usize {
++            use super::super::chunk::{load128, mm, veq};
++            use super::aarch64::vor;
++
++            while i + 16 <= n {
++                let v = load128(src, i);
++                let m = mm(vor!($(veq(v, $needle)),+));
++                if m != 0 {
++                    return i + m.trailing_zeros() as usize;
++                }
++                i += 16;
++            }
++            while i < n {
++                let c = *src.add(i);
++                if $(c == $needle)||+ {
++                    return i;
++                }
++                i += 1;
++            }
++            n
++        }
++    };
++}
++pub(super) use define_find_function;
++
++#[inline]
++pub unsafe fn find1(src: *const u8, n: usize, mut i: usize, a: u8) -> usize {
++    while i + 16 <= n {
++        let m = mm(veq(load128(src, i), a));
++        if m != 0 {
++            return i + m.trailing_zeros() as usize;
++        }
++        i += 16;
++    }
++    while i < n {
++        if *src.add(i) == a {
++            return i;
++        }
++        i += 1;
++    }
++    n
++}
++
++#[inline]
++pub unsafe fn find2(src: *const u8, n: usize, mut i: usize, a: u8, b: u8) -> usize {
++    while i + 16 <= n {
++        let v = load128(src, i);
++        let m = mm(vorrq_u8(veq(v, a), veq(v, b)));
++        if m != 0 {
++            return i + m.trailing_zeros() as usize;
++        }
++        i += 16;
++    }
++    while i < n {
++        let c = *src.add(i);
++        if c == a || c == b {
++            return i;
++        }
++        i += 1;
++    }
++    n
++}
++
++#[inline]
++pub unsafe fn find3(src: *const u8, n: usize, mut i: usize, a: u8, b: u8, c: u8) -> usize {
++    while i + 16 <= n {
++        let v = load128(src, i);
++        let m = mm(vorrq_u8(vorrq_u8(veq(v, a), veq(v, b)), veq(v, c)));
++        if m != 0 {
++            return i + m.trailing_zeros() as usize;
++        }
++        i += 16;
++    }
++    while i < n {
++        let ch = *src.add(i);
++        if ch == a || ch == b || ch == c {
++            return i;
++        }
++        i += 1;
++    }
++    n
++}
++
++#[inline]
++pub unsafe fn find4(src: *const u8, n: usize, mut i: usize, a: u8, b: u8, c: u8, d: u8) -> usize {
++    while i + 16 <= n {
++        let v = load128(src, i);
++        let m = mm(vorrq_u8(
++            vorrq_u8(veq(v, a), veq(v, b)),
++            vorrq_u8(veq(v, c), veq(v, d)),
++        ));
++        if m != 0 {
++            return i + m.trailing_zeros() as usize;
++        }
++        i += 16;
++    }
++    while i < n {
++        let x = *src.add(i);
++        if x == a || x == b || x == c || x == d {
++            return i;
++        }
++        i += 1;
++    }
++    n
++}
++
+diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/find/mod.rs .bench-deps/oxc/crates/oxc_lexer/src/pipeline/find/mod.rs
+--- a/src/pipeline/find/mod.rs	2026-09-16 16:48:43
++++ b/src/pipeline/find/mod.rs	2026-09-17 08:38:16
+@@ -5,11 +5,18 @@
+ #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"))]
+ pub(super) use avx2::{find1, find2, find3, find4};
+ 
+-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
++#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
++mod aarch64;
++#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
++use aarch64::define_find_function;
++#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
++pub(super) use aarch64::{find1, find2, find3, find4};
++
++#[cfg(not(any(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"), all(target_arch = "aarch64", target_feature = "neon"))))]
+ mod generic;
+-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
++#[cfg(not(any(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"), all(target_arch = "aarch64", target_feature = "neon"))))]
+ use generic::define_find_function;
+-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
++#[cfg(not(any(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"), all(target_arch = "aarch64", target_feature = "neon"))))]
+ pub(super) use generic::{find1, find2, find3, find4};
+ 
+ mod common;
+diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/scan/aarch64.rs .bench-deps/oxc/crates/oxc_lexer/src/pipeline/scan/aarch64.rs
+--- a/src/pipeline/scan/aarch64.rs	1970-01-01 08:00:00
++++ b/src/pipeline/scan/aarch64.rs	2026-09-17 08:31:11
+@@ -0,0 +1,120 @@
++use core::arch::aarch64::*;
++
++use super::super::chunk::{load128, mm, veq};
++
++use super::common::lic_verify_at;
++
++pub unsafe fn scan_block_comment(src: *const u8, n: usize, mut i: usize) -> (usize, bool, i64) {
++    let mut saw_nl = false;
++    let mut lic_q: i64 = -1;
++    while i + 16 <= n {
++        let v = load128(src, i);
++        let vn = load128(src, i + 1);
++        let term = mm(vandq_u8(veq(v, b'*'), veq(vn, b'/')));
++        let nl = if saw_nl {
++            0
++        } else {
++            mm(vorrq_u8(veq(v, b'\n'), veq(v, b'\r')))
++        };
++        let at = if lic_q < 0 { mm(veq(v, b'@')) } else { 0 };
++        if term != 0 {
++            let j = term.trailing_zeros() as usize;
++            let bodymask: u16 = if j > 0 { (1u16 << j) - 1 } else { 0 };
++            saw_nl |= (nl & bodymask) != 0;
++            if lic_q < 0 {
++                let am = at & bodymask;
++                if am != 0 {
++                    lic_q = lic_first(src, i, am);
++                }
++            }
++            return (i + j + 1, saw_nl, lic_q);
++        }
++        saw_nl |= nl != 0;
++        if lic_q < 0 && at != 0 {
++            lic_q = lic_first(src, i, at);
++        }
++        i += 16;
++    }
++    while i + 1 < n {
++        let c = *src.add(i);
++        if c == b'*' && *src.add(i + 1) == b'/' {
++            return (i + 1, saw_nl, lic_q);
++        }
++        if c == b'\n' || c == b'\r' {
++            saw_nl = true;
++        }
++        if c == b'@' && lic_q < 0 && lic_verify_at(src, i) {
++            lic_q = i as i64;
++        }
++        i += 1;
++    }
++    (n, saw_nl, lic_q)
++}
++
++/// Scan a `//` line comment to its LineTerminator (LF, CR, or LS/PS).
++/// A 0xE2 that isn't LS/PS is cleared from the mask and the scan continues;
++/// the 2-byte confirm past a trailing 0xE2 reads the pad, which can never
++/// match 0x80.
++pub unsafe fn scan_line_comment(src: *const u8, n: usize, mut i: usize) -> (usize, i64) {
++    let mut lic_q: i64 = -1;
++    while i + 16 <= n {
++        let v = load128(src, i);
++        let term_v = vorrq_u8(
++            vorrq_u8(veq(v, b'\n'), veq(v, b'\r')),
++            veq(v, 0xE2),
++        );
++        let mut term = mm(term_v);
++        let at = mm(veq(v, b'@'));
++        while term != 0 {
++            let t = term.trailing_zeros() as usize;
++            let c = *src.add(i + t);
++            if c == 0xE2
++                && !(*src.add(i + t + 1) == 0x80
++                    && (*src.add(i + t + 2) == 0xA8 || *src.add(i + t + 2) == 0xA9))
++            {
++                term &= term - 1; // not LS/PS: clear and keep scanning
++                continue;
++            }
++            if lic_q < 0 {
++                let am = at & if t > 0 { (1u16 << t) - 1 } else { 0 };
++                if am != 0 {
++                    lic_q = lic_first(src, i, am);
++                }
++            }
++            return (i + t, lic_q);
++        }
++        if lic_q < 0 && at != 0 {
++            lic_q = lic_first(src, i, at);
++        }
++        i += 16;
++    }
++    while i < n {
++        let c = *src.add(i);
++        if c == b'\n' || c == b'\r' {
++            return (i, lic_q);
++        }
++        if c == 0xE2
++            && *src.add(i + 1) == 0x80
++            && (*src.add(i + 2) == 0xA8 || *src.add(i + 2) == 0xA9)
++        {
++            return (i, lic_q);
++        }
++        if c == b'@' && lic_q < 0 && lic_verify_at(src, i) {
++            lic_q = i as i64;
++        }
++        i += 1;
++    }
++    (n, lic_q)
++}
++
++#[inline(always)]
++unsafe fn lic_first(src: *const u8, base: usize, mut am: u16) -> i64 {
++    while am != 0 {
++        let q = base + am.trailing_zeros() as usize;
++        am &= am - 1;
++        if lic_verify_at(src, q) {
++            return q as i64;
++        }
++    }
++    -1
++}
+diff -ruN /Users/bytedance/r/my-scanner/.bench-deps/oxc/crates/oxc_lexer/src/pipeline/scan/mod.rs .bench-deps/oxc/crates/oxc_lexer/src/pipeline/scan/mod.rs
+--- a/src/pipeline/scan/mod.rs	2026-09-16 16:48:43
++++ b/src/pipeline/scan/mod.rs	2026-09-17 08:38:16
+@@ -3,9 +3,14 @@
+ #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"))]
+ pub(super) use avx2::{scan_block_comment, scan_line_comment};
+ 
+-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
++#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
++mod aarch64;
++#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
++pub(super) use aarch64::{scan_block_comment, scan_line_comment};
++
++#[cfg(not(any(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"), all(target_arch = "aarch64", target_feature = "neon"))))]
+ mod generic;
+-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2")))]
++#[cfg(not(any(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2"), all(target_arch = "aarch64", target_feature = "neon"))))]
+ pub(super) use generic::{scan_block_comment, scan_line_comment};
+ 
+ mod common;

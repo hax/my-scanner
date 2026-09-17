@@ -20,6 +20,7 @@
 | `scalar` | 全标量单阶段 | pos 循环 | 纯标量 | yuku-old（0.10.1） |
 | `jump_vec` | 单阶段 + SIMD 长跳跃 | pos 循环 | SIMD 原语 + 空白块扫 + 注释快跳 | yuku-main / swc / oxc |
 | `two_phase` | 两阶段 SIMD | 位图 ctz 迭代 | SIMD 原语 | oxc_bitmap（孵化实验，见「oxc_bitmap」一节） |
+| `bitmap` | oxc_lexer 式六趟位图流水线（NEON） | 位图批量产出 token | 语义层共享 | oxc_bitmap AVX2（实验记录见 [oxc-bitmap-neon-experiment.md](oxc-bitmap-neon-experiment.md)） |
 | （未实施） | 单阶段 + 按块候选缓冲 | 块内产掩码即消费 | SIMD 原语 | — |
 
 规则：任何语义修复/变更必须全变体差分全绿（`scripts/check.sh` 对

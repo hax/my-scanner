@@ -20,7 +20,7 @@ echo
 echo "==== 差分对比 vs tsc scanner（全部架构变体）===="
 # scalar / jump_vec / two_phase 三个架构变体并行演化；
 # 每条线都必须差分全绿，语义漂移在此拦截。
-VARIANTS=(two_phase scalar jump_vec)
+VARIANTS=(two_phase scalar jump_vec bitmap)
 if [ $# -gt 0 ]; then
   for v in "${VARIANTS[@]}"; do
     echo "---- variant: $v ----"
